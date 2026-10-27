@@ -1,6 +1,8 @@
 # CHECKPOINT
 
 - Current phase: source separation、provenance、local build/test、Private Git管理準備完了
+- Private remote: `https://github.com/yuki-inoue12345/nakanoshima-robot-challenge`
+- Initial source snapshot: `cb6ca41d64f441953407e40d7e44b9be5fe91a8a`
 - Source snapshot date: 2026-10-27
 - Completed:
   - ARの実体を`ar_navigation_project/ar_path_viewer`と特定
