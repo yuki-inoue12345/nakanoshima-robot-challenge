@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<robot name="koko">
+  <material name="blue"><color rgba="0.10 0.35 0.80 1"/></material>
+  <material name="dark"><color rgba="0.10 0.10 0.10 1"/></material>
+  <material name="green"><color rgba="0.05 0.75 0.20 1"/></material>
+
+  <link name="base_footprint"/>
+  <link name="base_link">
+    <visual>
+      <origin xyz="-0.025 0 0.24"/>
+      <geometry><box size="0.90 0.66 0.28"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+  <joint name="footprint_to_base" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/>
+  </joint>
+
+  <link name="left_wheel">
+    <visual><origin rpy="1.5707963 0 0"/><geometry><cylinder radius="0.10" length="0.045"/></geometry><material name="dark"/></visual>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="0 0.2175 0.10"/><parent link="base_footprint"/><child link="left_wheel"/><axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="right_wheel">
+    <visual><origin rpy="1.5707963 0 0"/><geometry><cylinder radius="0.10" length="0.045"/></geometry><material name="dark"/></visual>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="0 -0.2175 0.10"/><parent link="base_footprint"/><child link="right_wheel"/><axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="front_caster"><visual><geometry><sphere radius="0.055"/></geometry><material name="dark"/></visual></link>
+  <joint name="front_caster_joint" type="fixed"><origin xyz="0.30 0 0.055"/><parent link="base_footprint"/><child link="front_caster"/></joint>
+  <link name="rear_caster"><visual><geometry><sphere radius="0.055"/></geometry><material name="dark"/></visual></link>
+  <joint name="rear_caster_joint" type="fixed"><origin xyz="-0.35 0 0.055"/><parent link="base_footprint"/><child link="rear_caster"/></joint>
+
+  <link name="lidar_link">
+    <visual><geometry><cylinder radius="0.052" length="0.072"/></geometry><material name="dark"/></visual>
+  </link>
+  <joint name="lidar_joint" type="fixed"><origin xyz="0 0 0.72"/><parent link="base_footprint"/><child link="lidar_link"/></joint>
+
+  <!--
+    Foot-level Hokuyo 2D LiDAR.  The origin is the measured sensor position
+    relative to base_footprint.
+  -->
+  <link name="hokuyo_link">
+    <visual>
+      <origin xyz="0 0 0.025"/>
+      <geometry><box size="0.05 0.05 0.05"/></geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+  <joint name="hokuyo_joint" type="fixed">
+    <origin xyz="0.196 0 0.11" rpy="0 0 0"/>
+    <parent link="base_footprint"/>
+    <child link="hokuyo_link"/>
+  </joint>
+
+  <link name="imu_link">
+    <visual><geometry><box size="0.05 0.04 0.015"/></geometry><material name="green"/></visual>
+  </link>
+  <joint name="imu_joint" type="fixed"><origin xyz="0 0 0.28"/><parent link="base_footprint"/><child link="imu_link"/></joint>
+</robot>

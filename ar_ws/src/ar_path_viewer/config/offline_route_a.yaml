@@ -1,0 +1,29 @@
+offline_simulation:
+  # Route A is the original real-waypoint sample; it is not hard-coded in Python.
+  waypoint_yaml: /home/inoue-yuki/robot_archives/renya_20261025/maps_waypoints/waypoints/1014-15_True.yaml
+  map_yaml: /home/inoue-yuki/robot_archives/renya_20261025/maps_waypoints/maps/1014_15_True.yaml
+  input:
+    type: simulation
+    uri: ""
+  output:
+    directory: ../../outputs/route_a
+    video: ../../outputs/route_a/route_a.mp4
+  motion:
+    speed_mps: 1.2
+    fps: 20.0
+    stop_duration_sec: 5.0
+    path_timeout_sec: 6.5
+  camera:
+    width: 640
+    height: 480
+    fx: 525.0
+    fy: 525.0
+    cx: 319.5
+    cy: 239.5
+    x: 0.20
+    y: 0.0
+    z: 0.6967
+    yaw_deg: 0.0
+    pitch_up_deg: 7.5
+    roll_deg: 0.0
+    near_clip_m: 0.10

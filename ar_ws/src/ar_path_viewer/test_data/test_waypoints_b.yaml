@@ -1,0 +1,27 @@
+format_version: '1.0'
+waypoints:
+- number: 101
+  x: 0.0
+  y: 0.0
+  angle_radians: 0.0
+- number: 205
+  x: 3.0
+  y: 0.0
+  angle_radians: 1.5707963267948966
+  stop: true
+  wait_time: 0.4
+  test_note: harmless-extra-attribute
+- number: 309
+  x: 3.0
+  y: 2.0
+  angle_radians: 3.141592653589793
+  threshold: 0.15
+- number: 412
+  x: 1.0
+  y: 2.0
+  angle_radians: -1.5707963267948966
+  person_area: true
+- number: 550
+  x: 1.0
+  y: 0.0
+  angle_radians: 0.0

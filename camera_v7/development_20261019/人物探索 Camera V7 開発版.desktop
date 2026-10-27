@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=人物探索 Camera V7 開発版
+Type=Application
+Terminal=true
+Exec=/home/inoue-yuki/nuc_audit_20260919/camera_v7_fix/run_daikoudai_v7_ui_dev.sh

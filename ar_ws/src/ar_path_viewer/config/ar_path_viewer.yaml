@@ -1,0 +1,29 @@
+ar_path_viewer:
+  ros__parameters:
+    path_topic: /plan
+    base_frame: robot/base_footprint
+    path_timeout_sec: 6.5
+    width: 640
+    height: 480
+    # Provisional pinhole intrinsics; replace after C920 calibration.
+    fx: 525.0
+    fy: 525.0
+    cx: 319.5
+    cy: 239.5
+    # x/y are explicit placeholders, not converted from chassis-edge measurements.
+    camera_x: 0.20
+    camera_y: 0.0
+    camera_z: 0.6967
+    camera_yaw_deg: 0.0
+    camera_pitch_up_deg: 7.5
+    camera_roll_deg: 0.0
+    near_clip_m: 0.10
+    line_b: 0
+    line_g: 255
+    line_r: 0
+    line_thickness: 5
+    image_input_type: simulation  # simulation | image | video | camera
+    image_input_uri: ""
+    display: false
+    output_video: ""
+    fps: 20.0

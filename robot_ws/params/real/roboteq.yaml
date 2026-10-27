@@ -1,0 +1,32 @@
+# ココちゃん実機用Roboteq設定。車輪径・トレッド幅・encoder符号は実測値に合わせる。
+roboteq_ros2_driver:
+  ros__parameters:
+    pub_odom_tf: true
+    odom_frame: odom
+    base_frame: base_footprint
+    cmdvel_topic: cmd_vel
+    odom_topic: odom
+    port: /dev/roboteq
+    baud: 230400
+    open_loop: false
+    wheel_circumference: 0.6283
+    track_width: 0.435
+    max_amps: 12.0
+    max_rpm: 58
+    gear_ratio: 1.0
+    pulse: 950
+    max_speed: 1.5
+    odom_stream_interval_ms: 10
+    odom_publish_hz: 50.0
+    speed_scale: 0.70
+    # 2026-09-25の床上試験で右車輪が左より約1.8%速かったため右だけ補正。
+    right_speed_scale: 0.982
+    left_speed_scale: 1.0
+    kp_soft: 0.3
+    # 2026-09-25の床上試験で0.10なら左右とも始動し、底上げ時の
+    # 定常角速度は約0.317 rad/s。0.12より低速旋回の段差を抑えられる。
+    min_speed_threshold: 0.10
+    # モータ指令へ変換した後にも角加速度を制限し、底上げによる段差をなくす。
+    max_angular_acceleration: 0.50
+    encoder_sign_r: -1.0
+    encoder_sign_l: 1.0

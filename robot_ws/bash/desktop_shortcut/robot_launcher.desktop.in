@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=@LAUNCHER_NAME@
+Comment=@DISPLAY_NAME@用 ROS 2 ノード・シミュレータ起動UI
+Exec=/bin/bash "@WORKSPACE@/bash/start_launcher2.sh"
+Icon=system-run
+Terminal=false
+Categories=Science;Robotics;
+StartupNotify=true

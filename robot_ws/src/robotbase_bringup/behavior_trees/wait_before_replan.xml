@@ -1,0 +1,45 @@
+<!--
+  Koko navigation policy for temporary obstructions such as people and doors.
+  A substantially longer replacement path is held briefly before it is used.
+  Recovery avoids autonomous spin and backup around people.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <ReactiveSequence name="WaitBeforeTakingDetour">
+          <PathLongerOnApproach path="{path}" prox_len="1000.0" length_factor="1.2">
+            <RetryUntilSuccessful num_attempts="1">
+              <SequenceWithMemory name="CancelControlAndWait">
+                <CancelControl name="ControlCancel"/>
+                <Wait name="WaitForTemporaryObstacle" wait_duration="8.0"/>
+              </SequenceWithMemory>
+            </RetryUntilSuccessful>
+          </PathLongerOnApproach>
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </RecoveryNode>
+        </ReactiveSequence>
+      </PipelineSequence>
+      <ReactiveFallback name="WaitFirstRecoveries">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Wait name="WaitRecovery" wait_duration="8.0"/>
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

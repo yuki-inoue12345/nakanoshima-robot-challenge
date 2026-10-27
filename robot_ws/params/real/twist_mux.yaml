@@ -1,0 +1,26 @@
+# ココちゃん実機用twist_mux設定。
+twist_mux:
+  ros__parameters:
+    use_stamped: false
+    topics:
+      teleop:
+        topic: cmd_vel_teleop
+        timeout: 0.5
+        priority: 100
+      direct:
+        topic: cmd_vel_direct
+        timeout: 0.5
+        priority: 90
+      navigation:
+        topic: cmd_vel_smoothed
+        timeout: 0.5
+        priority: 10
+      idle:
+        topic: cmd_vel_idle
+        timeout: 0.5
+        priority: 1
+    locks:
+      stop:
+        topic: /stop
+        timeout: 0.0
+        priority: 255

@@ -1,0 +1,4 @@
+# Versions observed in the audited Camera V7 development environment.
+ultralytics==8.4.47
+opencv-python==4.13.0.92
+torch==2.11.0

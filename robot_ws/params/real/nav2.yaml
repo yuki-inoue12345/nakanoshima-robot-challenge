@@ -1,0 +1,339 @@
+# ココちゃん実機用Nav2設定。
+# VLP-16の /scan3 をSLAM・自己位置推定に使う。
+# global/local costmapは /scan3 と足元Hokuyoの /hokuyo_scan を併用する。
+# センサー間のclearing干渉を避けるため、障害物レイヤは別々に保持する。
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_footprint
+    global_frame_id: map
+    odom_frame_id: odom
+    scan_topic: /scan3
+    robot_model_type: nav2_amcl::DifferentialMotionModel
+    laser_model_type: likelihood_field
+    min_particles: 500
+    max_particles: 2000
+    max_beams: 120
+    laser_min_range: 0.20
+    laser_max_range: 25.0
+    update_min_d: 0.10
+    update_min_a: 0.10
+    transform_tolerance: 1.0
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    planner_plugins: [GridBased]
+    GridBased:
+      plugin: nav2_navfn_planner::NavfnPlanner
+      tolerance: 0.5
+      use_astar: true
+      allow_unknown: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_footprint
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      resolution: 0.05
+      track_unknown_space: true
+      # 全長0.60 m（前後各0.30）、全幅0.58 m（左右各0.29）。
+      footprint: "[[0.30, 0.29], [0.30, -0.29], [-0.30, -0.29], [-0.30, 0.29]]"
+      plugins: [static_layer, velodyne_obstacle_layer, hokuyo_obstacle_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      velodyne_obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: velodyne_scan
+        velodyne_scan:
+          topic: /scan3
+          data_type: LaserScan
+          max_obstacle_height: 2.0
+          marking: true
+          clearing: true
+          obstacle_max_range: 15.0
+          raytrace_max_range: 20.0
+      hokuyo_obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: hokuyo_scan
+        hokuyo_scan:
+          topic: /hokuyo_scan
+          data_type: LaserScan
+          max_obstacle_height: 2.0
+          marking: true
+          clearing: true
+          obstacle_max_range: 10.0
+          raytrace_max_range: 15.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.70
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 10.0
+    failure_tolerance: 0.5
+    use_realtime_priority: false
+    enable_stamped_cmd_vel: false
+    odom_topic: /odom/filtered
+    # 実機は|vx| < 0.10 m/sでは駆動しないため、微小なodomを停止として扱う。
+    min_x_velocity_threshold: 0.10
+    min_y_velocity_threshold: 0.0
+    min_theta_velocity_threshold: 0.001
+    progress_checker_plugins: [progress_checker]
+    goal_checker_plugins: [goal_checker]
+    controller_plugins: [FollowPath]
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.20
+      movement_time_allowance: 30.0
+    goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    FollowPath:
+      plugin: nav2_mppi_controller::MPPIController
+      # 10 Hzで2.8秒先まで予測。最高速時も6 m local costmap内へ収める。
+      time_steps: 28
+      model_dt: 0.10
+      batch_size: 2000
+      # MPPIに固定の巡航速度はないため、運用上の前進基準を上限0.90 m/sで定義する。
+      vx_max: 0.90
+      vx_min: -0.30
+      vy_max: 0.0
+      vy_min: 0.0
+      # robotbase_wsと同じ角速度上限を使用する。
+      wz_max: 0.90
+      wz_min: -0.90
+      # 実機では探索ノイズを抑え、周期的な前後加速を減らす。
+      vx_std: 0.30
+      vy_std: 0.0
+      wz_std: 0.30
+      # robotbase_wsと同じ前進加速度上限を使用する。
+      ax_max: 0.90
+      ax_min: -0.90
+      ay_max: 0.0
+      ay_min: 0.0
+      # robotbase_wsと同じ角加速度制限を使用する。
+      az_max: 1.50
+      az_min: -1.50
+      iteration_count: 1
+      prune_distance: 3.0
+      transform_tolerance: 0.10
+      temperature: 0.30
+      # 操作列の滑らかさを優先する。前進速度上限はvx_maxで0.90 m/sに設定する。
+      gamma: 0.050
+      motion_model: DiffDrive
+      # 実機では候補軌道描画を止め、controller周期の計算負荷を安定させる。
+      visualize: false
+      # 毎周期の乱数再生成を止め、サンプリングによる出力の揺れとCPU wake-upを減らす。
+      regenerate_noises: false
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      critics: [ConstraintCritic, CostCritic, GoalCritic, GoalAngleCritic, PathAlignCritic, PathFollowCritic, PathAngleCritic, PreferForwardCritic, VelocityDeadbandCritic]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 6.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        # 広いinflation領域で停止・周回しないよう標準域へ戻す。
+        # 実衝突はfootprint判定とcollision_costで引き続き禁止する。
+        cost_weight: 4.0
+        near_collision_cost: 200
+        critical_cost: 300.0
+        # 長方形の車体前端・角まで衝突評価する。
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 1
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 8.0
+        threshold_to_consider: 1.0
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 8.0 #12.0
+        max_path_occupancy_ratio: 0.10
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 25
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        # 障害物回避を維持しつつ、経路上を前へ進む軌道を強く評価する。
+        cost_weight: 8.0 #12.0 めっちゃ効くらしいからsiriusに合わせた
+        # 0.05 m間隔の経路で約0.55 m先。1.68 m予測距離のおよそ1/3。
+        offset_from_furthest: 11
+        threshold_to_consider: 1.0
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 0.5
+        mode: 0
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        # 後退は禁止せず、通常は向き直って前進する軌道を強く優先する。
+        cost_weight: 40.0
+        threshold_to_consider: 0.5
+      VelocityDeadbandCritic:
+        enabled: true
+        cost_power: 1
+        # 実機で動力にならない微小前後速度を避ける。角速度の不感帯は実測後に設定する。
+        cost_weight: 35.0
+        deadband_velocities: [0.10, 0.0, 0.0]
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: odom
+      robot_base_frame: base_footprint
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      # global/localで同じ実車外形を使用する。
+      footprint: "[[0.30, 0.29], [0.30, -0.29], [-0.30, -0.29], [-0.30, 0.29]]"
+      plugins: [velodyne_obstacle_layer, hokuyo_obstacle_layer, inflation_layer]
+      velodyne_obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: velodyne_scan
+        velodyne_scan:
+          topic: /scan3
+          data_type: LaserScan
+          max_obstacle_height: 2.0
+          marking: true
+          clearing: true
+          obstacle_max_range: 10.0
+          raytrace_max_range: 15.0
+      hokuyo_obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: hokuyo_scan
+        hokuyo_scan:
+          topic: /hokuyo_scan
+          data_type: LaserScan
+          max_obstacle_height: 2.0
+          marking: true
+          clearing: true
+          obstacle_max_range: 10.0
+          raytrace_max_range: 15.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.70
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: [simple_smoother]
+    simple_smoother:
+      plugin: nav2_smoother::SimpleSmoother
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_footprint
+    behavior_plugins: [spin, backup, drive_on_heading, wait]
+    spin:
+      plugin: nav2_behaviors::Spin
+    backup:
+      plugin: nav2_behaviors::BackUp
+    drive_on_heading:
+      plugin: nav2_behaviors::DriveOnHeading
+    wait:
+      plugin: nav2_behaviors::Wait
+
+bt_navigator:
+  ros__parameters:
+    plugin_lib_names: [robotbase_remove_traversed_goals_bt_node]
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom/filtered
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    default_nav_to_pose_bt_xml: "$(find-pkg-share robotbase_bringup)/behavior_trees/navigate_to_pose_w_replanning_goal_patience_and_recovery_no_spin.xml"
+    default_nav_through_poses_bt_xml: "$(find-pkg-share robotbase_bringup)/behavior_trees/navigate_through_poses_w_replanning_goal_patience_and_recovery_no_spin.xml"
+    navigators: [navigate_to_pose, navigate_through_poses]
+    navigate_to_pose:
+      plugin: nav2_bt_navigator::NavigateToPoseNavigator
+    navigate_through_poses:
+      plugin: nav2_bt_navigator::NavigateThroughPosesNavigator
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    max_velocity: [0.90, 0.0, 0.90]
+    min_velocity: [-0.30, 0.0, -0.90]
+    max_accel: [0.90, 0.0, 1.50]
+    max_decel: [-0.90, 0.0, -1.50]
+    odom_topic: /odom/filtered
+    odom_duration: 0.3
+    # モータが反応しない微小な前後速度はRoboteqへ送らず、明示的な停止にする。
+    deadband_velocity: [0.10, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+# Nav2標準の/follow_waypoints action server。独自YAMLと同時にgoalを送らない。
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false
+    action_server_result_timeout: 900.0
+    global_frame_id: map
+    waypoint_task_executor_plugin: wait_at_waypoint
+    wait_at_waypoint:
+      plugin: nav2_waypoint_follower::WaitAtWaypoint
+      enabled: true
+      waypoint_pause_duration: 200

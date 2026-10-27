@@ -1,0 +1,21 @@
+format_version: '1.0'
+waypoints:
+- number: 1
+  x: 0.8
+  y: 0.0
+  angle_radians: -1.571
+  threshold: 0.25
+- number: 2
+  x: 0.8
+  y: -0.8
+  angle_radians: 3.142
+  threshold: 0.25
+- number: 3
+  x: 0.0
+  y: -0.8
+  angle_radians: 1.571
+  threshold: 0.25
+- number: 4
+  x: 0.0
+  y: 0.0
+  angle_radians: 0.0

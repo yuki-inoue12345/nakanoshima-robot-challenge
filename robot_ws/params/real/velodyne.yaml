@@ -1,0 +1,36 @@
+# ココちゃん実機用Velodyne VLP-16設定。
+velodyne_driver_node:
+  ros__parameters:
+    device_ip: 192.168.1.201
+    gps_time: false
+    time_offset: 0.0
+    enabled: true
+    read_once: false
+    read_fast: false
+    repeat_delay: 0.0
+    frame_id: lidar_link
+    model: VLP16
+    rpm: 600.0
+    port: 2368
+    timestamp_first_packet: false
+
+velodyne_transform_node:
+  ros__parameters:
+    calibration: VLP16db.yaml
+    model: VLP16
+    min_range: 0.1
+    max_range: 130.0
+    view_direction: 0.0
+    fixed_frame: ""
+    target_frame: ""
+    organize_cloud: true
+
+velodyne_laserscan_node:
+  ros__parameters:
+    ring: -1  # 単一リング版/scanは自動選択（SLAM/Nav2ではscan3を使用）
+    ring2: -1  # 旧2リング処理用。現在のscan3では使用しない
+    resolution: 0.007  # LaserScanの角度刻み[rad]
+    use_multi_rings: true  # 複数リングを合成した/scan3を配信する
+    ring_ids: [1, 2, 3, 4, 5, 6, 8]  # 下向きリングから水平に近いリングまでを使用
+    # 各ringの採用上限[m]。下向きリングが遠方の床を障害物として拾わないよう制限する。
+    ring_max_distances: [1.25, 1.50, 1.75, 2.00, 2.50, 3.50, 100.0]

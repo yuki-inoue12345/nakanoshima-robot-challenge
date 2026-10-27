@@ -1,0 +1,29 @@
+offline_simulation:
+  # All paths are relative to this config file to exercise portable switching.
+  waypoint_yaml: ../test_data/test_waypoints_b.yaml
+  map_yaml: ../test_data/test_map_b.yaml
+  input:
+    type: image
+    uri: ../test_data/test_map_b.pgm
+  output:
+    directory: ../../outputs/route_b
+    video: ../../outputs/route_b/route_b.mp4
+  motion:
+    speed_mps: 0.8
+    fps: 12.0
+    stop_duration_sec: 0.5
+    path_timeout_sec: 4.0
+  camera:
+    width: 480
+    height: 360
+    fx: 410.0
+    fy: 405.0
+    cx: 239.5
+    cy: 179.5
+    x: 0.10
+    y: -0.03
+    z: 0.65
+    yaw_deg: 1.0
+    pitch_up_deg: 5.0
+    roll_deg: 0.0
+    near_clip_m: 0.08

@@ -1,0 +1,74 @@
+# ココちゃん実機用SLAM Toolbox設定。
+slam_toolbox:
+  ros__parameters:
+
+    # 時刻設定
+    use_sim_time: false  # 実機なのでROSのシミュレーション時刻を使わない
+
+    # グラフ最適化ソルバー設定
+    solver_plugin: solver_plugins::CeresSolver  # ポーズグラフ最適化にCeresを使用
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY  # 疎行列向けの線形ソルバー
+    ceres_preconditioner: SCHUR_JACOBI  # 反復計算を安定・高速化する前処理
+    ceres_trust_strategy: LEVENBERG_MARQUARDT  # 非線形最適化の更新方法
+    ceres_dogleg_type: TRADITIONAL_DOGLEG  # Dogleg使用時の方式（現在の戦略では通常未使用）
+    ceres_loss_function: None  # ロバスト損失関数を追加しない
+
+    # フレーム・入出力設定。起動時にTF接頭辞（標準はrobot）が付加される。
+    odom_frame: odom  # オドメトリ座標系（実行時はrobot/odom）
+    map_frame: map  # 地図座標系
+    base_frame: base_footprint  # ロボット基準座標系（実行時はrobot/base_footprint）
+    scan_topic: /scan3  # VLP-16の複数リングを距離制限付きで合成したLaserScan
+    mode: mapping  # 新しい地図を作成・更新するモード
+    use_map_saver: true  # SLAM Toolboxの地図保存機能を有効化
+
+    # 更新周期・距離範囲
+    debug_logging: false  # 詳細デバッグログは通常無効
+    throttle_scans: 1  # 1なら受信した全スキャンを処理する
+    transform_publish_period: 0.02  # map→odom TFの配信周期[s]（50 Hz）
+    map_update_interval: 3.0  # OccupancyGrid地図の更新周期[s]（シリウス実機と同値）
+    resolution: 0.05  # 地図1セルの大きさ[m]
+    min_laser_range: 1.0  # 1 m以内の人・車体周辺などを除外（シリウス実機と同値）
+    max_laser_range: 100.0  # これより遠い測距点をSLAMで使わない[m]（シリウス実機と同値）
+    minimum_time_interval: 0.10  # スキャンを処理する最小時間間隔[s]
+    transform_timeout: 0.2  # スキャン時刻のTFを待つ最大時間[s]（シリウス実機と同値）
+    tf_buffer_duration: 30.0  # 過去TFを保持する時間[s]
+    stack_size_to_use: 100000000  # シリアライズ等で使うスレッドスタック上限[byte]（100 MB、シリウス実機と同値）
+    enable_interactive_mode: true  # RVizのSLAM Toolboxプラグインによるグラフ編集を許可（2D Pose Estimateとは別機能）
+
+    # 通常のスキャンマッチング設定
+    use_scan_matching: true  # LaserScan同士を照合して姿勢を補正する
+    use_scan_barycenter: true  # スキャンの重心を照合基準に利用する
+    minimum_travel_distance: 0.3  # 新しいスキャン節点を追加する最小並進量[m]（シリウス実機と同値）
+    minimum_travel_heading: 0.3  # 新しいスキャン節点を追加する最小回転量[rad]（約17.2度、シリウス実機と同値）
+    scan_buffer_size: 10  # 近傍照合に保持する直近スキャン数
+    scan_buffer_maximum_scan_distance: 20.0  # バッファ内スキャンを照合候補にする最大移動距離[m]
+    link_match_minimum_response_fine: 0.1  # 近接スキャン間リンクを採用する最小一致度
+    link_scan_maximum_distance: 1.5  # 近接リンク探索を行う最大距離[m]
+
+    # ループクロージャ設定
+    loop_search_maximum_distance: 3.0  # 過去地点とのループ候補を探す距離[m]
+    do_loop_closing: true  # 再訪地点を検出して地図全体のずれを補正する
+    loop_match_minimum_chain_size: 10  # ループ成立に必要な連続スキャン数
+    loop_match_maximum_variance_coarse: 3.0  # 粗探索で許容する最大分散
+    loop_match_minimum_response_coarse: 0.35  # 粗探索で必要な最小一致度
+    loop_match_minimum_response_fine: 0.45  # 詳細探索で必要な最小一致度
+
+    # 通常スキャンマッチングの相関探索範囲
+    correlation_search_space_dimension: 0.5  # 並進方向に探索する範囲[m]
+    correlation_search_space_resolution: 0.01  # 並進探索の刻み幅[m]
+    correlation_search_space_smear_deviation: 0.1  # 相関応答を平滑化する標準偏差[m]
+
+    # ループクロージャ時の広域探索範囲
+    loop_search_space_dimension: 8.0  # ループ候補を探索する範囲[m]
+    loop_search_space_resolution: 0.05  # ループ探索の刻み幅[m]
+    loop_search_space_smear_deviation: 0.03  # ループ探索の相関応答を平滑化する標準偏差[m]
+
+    # スキャンマッチャの評価設定
+    distance_variance_penalty: 0.5  # オドメトリ予測からの並進ずれに対するペナルティ
+    angle_variance_penalty: 1.0  # オドメトリ予測からの角度ずれに対するペナルティ
+    fine_search_angle_offset: 0.00349  # 詳細角度探索の範囲[rad]（約0.2度）
+    coarse_search_angle_offset: 0.349  # 粗い角度探索の範囲[rad]（約20度）
+    coarse_angle_resolution: 0.0349  # 粗い角度探索の刻み[rad]（約2度）
+    minimum_angle_penalty: 0.9  # 角度方向の評価値に適用する下限係数
+    minimum_distance_penalty: 0.5  # 並進方向の評価値に適用する下限係数
+    use_response_expansion: true  # 一致度が低いとき探索範囲を拡張する
