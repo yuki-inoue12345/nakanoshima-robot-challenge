@@ -77,6 +77,13 @@ class PathStore:
             return "PATH STALE", snapshot
         return "ACTIVE", snapshot
 
+    def age(self, now: float | None = None) -> float:
+        snapshot = self.snapshot()
+        if snapshot is None:
+            return 0.0
+        timestamp = self._clock() if now is None else float(now)
+        return timestamp - snapshot.received_monotonic
+
 
 def path_message_to_array(message) -> Tuple[np.ndarray, str]:
     """Convert a nav_msgs/Path-like object without depending on ROS in tests."""

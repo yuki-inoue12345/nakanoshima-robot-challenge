@@ -69,6 +69,30 @@ ros2 launch ar_path_viewer ar_path_viewer.launch.py \
 
 表示状態は`ACTIVE`、`NO PATH`、`PATH STALE`、`TF UNAVAILABLE`、`CAMERA UNAVAILABLE`、`PATH OUT OF VIEW`、`INVALID CONFIG`です。Pathは受信ごとに全体交換し、不正Pathを受けた場合は直ちに旧線を消します。TFが取得できない場合も線を出しません。初期値6.5秒を超えて更新がない場合は描画を消します。
 
+AR ViewerはWaypoint Followerより先に起動できます。起動時にPathがなくても映像表示・録画を継続し、後から`/plan`を受信すると自動的に投影を開始します。ルート変更後の新しいPathはgeneration単位で全体交換されます。
+
+## NO PATH診断
+
+追加診断はROS parameterで切り替えます。
+
+```yaml
+diagnostic_logging: true
+diagnostic_log_interval_sec: 5.0
+```
+
+`false`にすると追加診断を停止します。同じ種類の受信・TF失敗・画角外ログは既定で最大5秒に1回ですが、状態変化は直ちに1回記録します。
+
+主なログ：
+
+- `plan_rx`: 累積受信回数、monotonic受信時刻、Path header stamp、frame_id、点数
+- `plan_adopted` / `plan_updated`: 有効Pathのgeneration、frame_id、点数
+- `plan_discarded`: 空Path、NaN/Inf、不正frame_id等の破棄理由
+- `viewer_state`: `STARTUP -> NO PATH`、`NO PATH -> ACTIVE`、`ACTIVE -> PATH STALE`等
+- `tf_unavailable`: source/target frame、例外型、TF lookupの原因本文
+- `path_out_of_view`: 3Dクリップ後にカメラ視錐台と交差する線分がないこと
+
+`NO PATH`のdetailが`no Path received since startup`かつ`plan_rx_count=0`なら、Viewer起動後にまだ`/plan`を一度も受信していません。`plan_discarded`があれば空または不正Pathが最後の原因です。`ACTIVE`後に`PATH STALE`へ変化した場合は、最後の有効Pathから設定timeoutを超えています。
+
 ## 汎用オフライン動画生成
 
 ROSノードやPublisherを起動せず、指定Waypoint間を直線補間してAR投影を通し実行します。Pythonソース内に地図名やWaypoint名の固定値はありません。
@@ -114,3 +138,5 @@ Waypointが地図画像範囲外なら動画生成前にエラー終了します
 7. 安全な既知位置でyawを手動変更できる場合も、走行指令なし・管理者立会いで画面追従だけを確認する。
 
 実機TFにはカメラframeを追加せず、初期版はViewer内部のmount値を使います。
+
+終了処理は`rclpy.try_shutdown()`を使用し、SIGINT時にROS contextが既にshutdown済みでも二重shutdown例外を発生させない構造です。

@@ -1,7 +1,6 @@
 """ROS 2 viewer node. This node creates subscriptions only, never publishers."""
 
 from pathlib import Path
-import time
 
 import cv2
 import numpy as np
@@ -13,6 +12,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
+from .diagnostics import DiagnosticReporter
 from .image_source import SimulationSource, make_image_source
 from .path_adapter import PathStore, path_message_to_array
 from .projection import CameraIntrinsics, CameraMount, project_clipped_segments
@@ -50,6 +50,8 @@ class ArPathViewerNode(Node):
             "display": False,
             "output_video": "",
             "fps": 20.0,
+            "diagnostic_logging": True,
+            "diagnostic_log_interval_sec": 5.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -98,6 +100,17 @@ class ArPathViewerNode(Node):
                 self._intrinsics.width, self._intrinsics.height
             )
 
+        try:
+            self._diagnostics = DiagnosticReporter(
+                self._bool("diagnostic_logging"),
+                self.get_logger(),
+                self._float("diagnostic_log_interval_sec"),
+            )
+        except ValueError as exc:
+            self._config_error = str(exc)
+            self.get_logger().error(f"Invalid diagnostic configuration: {exc}")
+            self._diagnostics = DiagnosticReporter(False, self.get_logger())
+
         self._base_frame = self._str("base_frame")
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
         self._thickness = self._int("line_thickness")
@@ -145,13 +158,28 @@ class ArPathViewerNode(Node):
         return writer
 
     def _on_path(self, message: PathMessage) -> None:
+        raw_frame = str(getattr(getattr(message, "header", None), "frame_id", ""))
+        raw_poses = getattr(message, "poses", ())
+        stamp = getattr(getattr(message, "header", None), "stamp", None)
+        header_stamp_sec = None
+        if stamp is not None:
+            header_stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        self._diagnostics.path_received(raw_frame, len(raw_poses), header_stamp_sec)
+        previous = self._path_store.snapshot()
         try:
             points, frame = path_message_to_array(message)
-            self._path_store.replace(points, frame)
+            snapshot = self._path_store.replace(points, frame)
+            if len(points) == 0:
+                self._diagnostics.path_discarded("empty Path; current route cleared")
+            else:
+                updated = previous is not None and len(previous.points) > 0
+                self._diagnostics.path_accepted(
+                    frame, len(points), snapshot.generation, updated
+                )
         except ValueError as exc:
             # Do not keep showing a formerly valid route after an invalid update.
             self._path_store.clear()
-            self.get_logger().warning(f"Rejected invalid Path: {exc}")
+            self._diagnostics.path_discarded(str(exc))
 
     def _points_in_base(self, points: np.ndarray, frame_id: str) -> np.ndarray:
         transform = self._tf_buffer.lookup_transform(
@@ -161,13 +189,21 @@ class ArPathViewerNode(Node):
 
     def _tick(self) -> None:
         image = self._image_source.read()
+        state = "NO PATH"
+        detail = ""
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
-            frame = render_frame(image, [], "CAMERA UNAVAILABLE")
+            state = "CAMERA UNAVAILABLE"
+            detail = "image source returned no frame"
+            frame = render_frame(image, [], state)
         elif self._camera_error:
-            frame = render_frame(image, [], "CAMERA UNAVAILABLE", detail=self._camera_error)
+            state = "CAMERA UNAVAILABLE"
+            detail = self._camera_error
+            frame = render_frame(image, [], state, detail=detail)
         elif self._config_error:
-            frame = render_frame(image, [], "INVALID CONFIG", detail=self._config_error)
+            state = "INVALID CONFIG"
+            detail = self._config_error
+            frame = render_frame(image, [], state, detail=detail)
         else:
             if image.shape[:2] != (self._intrinsics.height, self._intrinsics.width):
                 image = cv2.resize(image, (self._intrinsics.width, self._intrinsics.height))
@@ -178,11 +214,42 @@ class ArPathViewerNode(Node):
                     state, segments = project_path_state(
                         snapshot.points, snapshot.frame_id, self._base_frame,
                         self._points_in_base, self._mount, self._intrinsics, self._near,
+                        on_tf_error=lambda exc: self._diagnostics.tf_failure(
+                            snapshot.frame_id, self._base_frame, exc
+                        ),
                     )
+                    if state == "PATH OUT OF VIEW":
+                        self._diagnostics.path_out_of_view(
+                            snapshot.frame_id, len(snapshot.points)
+                        )
+                        detail = (
+                            f"frame_id={snapshot.frame_id!r}, "
+                            f"points={len(snapshot.points)}"
+                        )
+                    elif state == "TF UNAVAILABLE":
+                        detail = (
+                            f"source_frame={snapshot.frame_id!r}, "
+                            f"target_frame={self._base_frame!r}"
+                        )
+                    else:
+                        detail = (
+                            f"generation={snapshot.generation}, "
+                            f"frame_id={snapshot.frame_id!r}, "
+                            f"points={len(snapshot.points)}, segments={len(segments)}"
+                        )
                 except ValueError as exc:
                     state = "INVALID CONFIG"
-                    self.get_logger().warning(str(exc))
+                    detail = str(exc)
+            elif state == "NO PATH":
+                detail = self._diagnostics.no_path_detail()
+            elif state == "PATH STALE" and snapshot is not None:
+                age = max(0.0, self._path_store.age())
+                detail = (
+                    f"age={age:.3f}s timeout={self._path_store.timeout_sec:.3f}s "
+                    f"generation={snapshot.generation}"
+                )
             frame = render_frame(image, segments, state, self._color, self._thickness)
+        self._diagnostics.state_changed(state, detail)
         if self._writer is not None:
             self._writer.write(frame)
         if self._display:
@@ -207,4 +274,9 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        shutdown_ros_context()
+
+
+def shutdown_ros_context() -> None:
+    """Idempotently shut down rclpy after node destruction."""
+    rclpy.try_shutdown()

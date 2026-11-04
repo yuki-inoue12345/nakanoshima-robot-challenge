@@ -1,0 +1,114 @@
+"""Rate-limited diagnostics for Path reception and viewer state transitions."""
+
+import time
+from typing import Callable, Optional
+
+
+class DiagnosticReporter:
+    """Collect counters even when logs are throttled, without ROS dependencies."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        logger,
+        min_interval_sec: float = 5.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if min_interval_sec <= 0.0:
+            raise ValueError("diagnostic_log_interval_sec must be positive")
+        self.enabled = bool(enabled)
+        self.logger = logger
+        self.min_interval_sec = float(min_interval_sec)
+        self.clock = clock
+        self.path_receive_count = 0
+        self.last_path_received_at: Optional[float] = None
+        self.last_path_outcome = "no Path received since startup"
+        self.current_state: Optional[str] = None
+        self._last_emitted = {}
+
+    def _emit(self, level: str, key: str, message: str, force: bool = False) -> None:
+        if not self.enabled:
+            return
+        now = self.clock()
+        previous = self._last_emitted.get(key)
+        if not force and previous is not None and now - previous < self.min_interval_sec:
+            return
+        self._last_emitted[key] = now
+        getattr(self.logger, level)(message)
+
+    def path_received(
+        self, frame_id: str, point_count: int, header_stamp_sec: float | None = None
+    ) -> None:
+        self.path_receive_count += 1
+        self.last_path_received_at = self.clock()
+        stamp = "unavailable" if header_stamp_sec is None else f"{header_stamp_sec:.9f}"
+        self._emit(
+            "info",
+            "path_received",
+            "plan_rx "
+            f"count={self.path_receive_count} "
+            f"received_monotonic={self.last_path_received_at:.6f} "
+            f"header_stamp={stamp} frame_id={frame_id!r} points={point_count}",
+            force=self.path_receive_count == 1,
+        )
+
+    def path_discarded(self, reason: str) -> None:
+        self.last_path_outcome = f"discarded: {reason}"
+        self._emit(
+            "warning",
+            f"path_discarded:{reason}",
+            f"plan_discarded count={self.path_receive_count} reason={reason}",
+        )
+
+    def path_accepted(self, frame_id: str, point_count: int, generation: int, updated: bool) -> None:
+        action = "updated" if updated else "adopted"
+        self.last_path_outcome = (
+            f"valid Path {action}: generation={generation}, "
+            f"frame_id={frame_id!r}, points={point_count}"
+        )
+        self._emit(
+            "info",
+            "path_accepted",
+            f"plan_{action} count={self.path_receive_count} generation={generation} "
+            f"frame_id={frame_id!r} points={point_count}",
+            force=not updated,
+        )
+
+    def tf_failure(self, path_frame: str, base_frame: str, error: Exception) -> None:
+        self._emit(
+            "warning",
+            f"tf_failure:{path_frame}:{base_frame}:{type(error).__name__}",
+            f"tf_unavailable source_frame={path_frame!r} target_frame={base_frame!r} "
+            f"error={type(error).__name__}: {error}",
+        )
+
+    def path_out_of_view(self, frame_id: str, point_count: int) -> None:
+        self._emit(
+            "info",
+            "path_out_of_view",
+            f"path_out_of_view frame_id={frame_id!r} points={point_count} "
+            "reason=no clipped segment intersects the camera frustum",
+        )
+
+    def state_changed(self, state: str, detail: str = "") -> None:
+        if state == self.current_state:
+            return
+        previous = self.current_state or "STARTUP"
+        self.current_state = state
+        suffix = f" detail={detail}" if detail else ""
+        level = "info" if state == "ACTIVE" else "warning"
+        self._emit(
+            level,
+            f"state:{previous}->{state}:{self.path_receive_count}",
+            f"viewer_state previous={previous!r} current={state!r} "
+            f"plan_rx_count={self.path_receive_count}{suffix}",
+            force=True,
+        )
+
+    def no_path_detail(self) -> str:
+        if self.last_path_received_at is None:
+            return self.last_path_outcome
+        return (
+            f"{self.last_path_outcome}; last_rx_monotonic="
+            f"{self.last_path_received_at:.6f}"
+        )

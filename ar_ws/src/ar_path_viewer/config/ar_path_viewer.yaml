@@ -27,3 +27,5 @@ ar_path_viewer:
     display: false
     output_video: ""
     fps: 20.0
+    diagnostic_logging: true
+    diagnostic_log_interval_sec: 5.0

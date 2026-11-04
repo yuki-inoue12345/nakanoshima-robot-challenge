@@ -15,13 +15,16 @@ def project_path_state(
     mount: CameraMount,
     intrinsics: CameraIntrinsics,
     near: float,
+    on_tf_error: Callable[[Exception], None] | None = None,
 ) -> Tuple[str, List[Tuple[Tuple[int, int], Tuple[int, int]]]]:
     if path_frame == base_frame:
         points_base = points
     else:
         try:
             points_base = transform_to_base(points, path_frame)
-        except Exception:
+        except Exception as exc:
+            if on_tf_error is not None:
+                on_tf_error(exc)
             return "TF UNAVAILABLE", []
     segments = project_clipped_segments(
         points_base, (0.0, 0.0, 0.0), mount, intrinsics, near

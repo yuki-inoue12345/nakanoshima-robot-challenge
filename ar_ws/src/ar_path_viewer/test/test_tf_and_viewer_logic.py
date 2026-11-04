@@ -14,16 +14,20 @@ def test_quaternion_and_translation_transform_points():
 
 
 def test_tf_unavailable_has_explicit_state():
+    errors = []
+
     def unavailable(points, frame):
         raise RuntimeError("no transform")
 
     state, segments = project_path_state(
         np.array(((1.0, 0.0, 0.0), (4.0, 0.0, 0.0))),
         "map", "robot/base_footprint", unavailable,
-        CameraMount(), CameraIntrinsics(), 0.1,
+        CameraMount(), CameraIntrinsics(), 0.1, on_tf_error=errors.append,
     )
     assert state == "TF UNAVAILABLE"
     assert segments == []
+    assert len(errors) == 1
+    assert str(errors[0]) == "no transform"
 
 
 def test_path_out_of_view_has_explicit_state():
