@@ -14,7 +14,12 @@ import yaml
 
 from .image_source import ImageSource, make_image_source
 from .path_adapter import PathStore
-from .projection import CameraIntrinsics, CameraMount, project_clipped_segments
+from .projection import (
+    DEFAULT_CAMERA_Y_M,
+    CameraIntrinsics,
+    CameraMount,
+    project_clipped_segments,
+)
 from .rendering import render_frame
 from .route_io import (
     WaypointRecord,
@@ -511,7 +516,7 @@ def parse_settings(args=None) -> OfflineSettings:
         ),
         mount=CameraMount(
             x=float(camera("x", parsed.camera_x, 0.20)),
-            y=float(camera("y", parsed.camera_y, 0.0)),
+            y=float(camera("y", parsed.camera_y, DEFAULT_CAMERA_Y_M)),
             z=float(camera("z", parsed.camera_z, 0.6967)),
             yaw_deg=float(camera("yaw_deg", parsed.camera_yaw_deg, 0.0)),
             pitch_up_deg=float(camera("pitch_up_deg", parsed.camera_pitch_up_deg, 7.5)),

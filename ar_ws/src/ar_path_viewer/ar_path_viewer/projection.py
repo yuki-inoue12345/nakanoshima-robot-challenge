@@ -15,6 +15,9 @@ from typing import Iterable, List, Sequence, Tuple
 import numpy as np
 
 
+DEFAULT_CAMERA_Y_M = 0.094
+
+
 @dataclass(frozen=True)
 class CameraIntrinsics:
     width: int = 640
@@ -34,9 +37,9 @@ class CameraIntrinsics:
 
 @dataclass(frozen=True)
 class CameraMount:
-    # x and y are explicit provisional values until measured in base_footprint.
+    # x remains provisional. y is measured from the upper-frame CAD centerline.
     x: float = 0.20
-    y: float = 0.0
+    y: float = DEFAULT_CAMERA_Y_M
     z: float = 0.6967
     yaw_deg: float = 0.0
     pitch_up_deg: float = 7.5

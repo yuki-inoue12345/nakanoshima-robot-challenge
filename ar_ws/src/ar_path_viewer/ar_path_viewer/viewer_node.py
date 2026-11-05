@@ -22,7 +22,7 @@ from .localization_monitor import (
     amcl_message_to_observation,
 )
 from .path_adapter import PathStore, path_message_to_array
-from .projection import CameraIntrinsics, CameraMount
+from .projection import DEFAULT_CAMERA_Y_M, CameraIntrinsics, CameraMount
 from .rendering import render_frame
 from .tf_adapter import transform_message_points
 from .viewer_logic import project_path_state
@@ -60,7 +60,7 @@ class ArPathViewerNode(Node):
             "cx": 319.5,
             "cy": 239.5,
             "camera_x": 0.20,
-            "camera_y": 0.0,
+            "camera_y": DEFAULT_CAMERA_Y_M,
             "camera_z": 0.6967,
             "camera_yaw_deg": 0.0,
             "camera_pitch_up_deg": 7.5,

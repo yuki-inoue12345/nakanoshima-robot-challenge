@@ -1,8 +1,11 @@
 import math
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from ar_path_viewer.projection import (
+    DEFAULT_CAMERA_Y_M,
     CameraIntrinsics,
     CameraMount,
     project_clipped_segments,
@@ -12,6 +15,7 @@ from ar_path_viewer.projection import (
 
 INTRINSICS = CameraIntrinsics(width=640, height=480, fx=500.0, fy=500.0, cx=320.0, cy=240.0)
 LEVEL_MOUNT = CameraMount(x=0.0, y=0.0, z=0.7, pitch_up_deg=0.0)
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
 def pixel_for_point(point, mount=LEVEL_MOUNT):
@@ -30,6 +34,23 @@ def test_ros_left_appears_on_image_left_and_right_on_right():
     left = pixel_for_point((5.0, 1.0, 0.7))
     right = pixel_for_point((5.0, -1.0, 0.7))
     assert left[0] < INTRINSICS.cx < right[0]
+
+
+def test_robot_left_camera_offset_moves_centerline_to_image_right():
+    centered = pixel_for_point((5.0, 0.0, 0.7))
+    offset = pixel_for_point(
+        (5.0, 0.0, 0.7),
+        CameraMount(x=0.0, y=DEFAULT_CAMERA_Y_M, z=0.7, pitch_up_deg=0.0),
+    )
+    assert offset[0] > centered[0]
+
+
+def test_runtime_configs_use_measured_camera_y():
+    for filename in ("ar_path_viewer.yaml", "ar_path_viewer_c920.yaml"):
+        config = yaml.safe_load((PACKAGE_ROOT / "config" / filename).read_text())
+        params = config["ar_path_viewer"]["ros__parameters"]
+        assert params["camera_y"] == DEFAULT_CAMERA_Y_M
+    assert CameraMount().y == DEFAULT_CAMERA_Y_M
 
 
 def test_positive_pitch_up_moves_level_scene_down_in_image():
