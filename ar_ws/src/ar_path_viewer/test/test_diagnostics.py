@@ -69,3 +69,16 @@ def test_diagnostics_can_be_disabled():
     reporter.state_changed("NO PATH", "disabled")
     assert reporter.path_receive_count == 1
     assert logger.records == []
+
+
+def test_localization_diagnostics_are_rate_limited_but_log_transitions():
+    now = [10.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 5.0, clock=lambda: now[0])
+    reporter.localization_update("LOCALIZING", "first valid sample", 1)
+    now[0] = 11.0
+    reporter.localization_update("LOCALIZING", "same state", 2)
+    reporter.localization_update("LOCALIZATION OK", "stable", 2)
+    assert len(logger.records) == 2
+    assert "state='LOCALIZING'" in logger.records[0][1]
+    assert "state='LOCALIZATION OK'" in logger.records[1][1]

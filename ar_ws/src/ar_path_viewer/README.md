@@ -1,6 +1,6 @@
 # ar_path_viewer
 
-ROS 2 Jazzy向けの、走行制御から独立した読み取り専用AR Path Viewerです。`nav_msgs/msg/Path`（初期値 `/plan`）を購読し、TFで現在の`robot/base_footprint`座標へ変換して、カメラ画像へ緑色の経路線を重ねます。Publisher、Nav2 Action client、走行制御処理はありません。実機モードは地図名やWaypointファイル名を参照せず、最新PathとTFだけで動作します。
+ROS 2 Jazzy向けの、走行制御から独立した読み取り専用AR Path Viewerです。`nav_msgs/msg/Path`（初期値 `/plan`）を購読し、TFで現在の`robot/base_footprint`座標へ変換して、カメラ画像へ緑色の経路線を重ねます。Phase 4では`/amcl_pose`と`map -> robot/base_footprint` TFも購読・参照し、自己位置が不安定な間だけ緑線を隠します。Publisher、Nav2 Action client、走行制御処理はありません。実機モードは地図名やWaypointファイル名を参照せず、Nav2の最新Pathをそのまま使用します。
 
 ## 座標系と精度上の制約
 
@@ -67,9 +67,50 @@ ros2 launch ar_path_viewer ar_path_viewer.launch.py \
   config_file:=/path/to/ar_path_viewer_c920.yaml
 ```
 
-表示状態は`ACTIVE`、`NO PATH`、`PATH STALE`、`TF UNAVAILABLE`、`CAMERA UNAVAILABLE`、`PATH OUT OF VIEW`、`INVALID CONFIG`です。Pathは受信ごとに全体交換し、不正Pathを受けた場合は直ちに旧線を消します。TFが取得できない場合も線を出しません。初期値6.5秒を超えて更新がない場合は描画を消します。
+表示状態は`ACTIVE`、`NO PATH`、`PATH STALE`、`LOCALIZING`、`LOCALIZATION UNSTABLE`、`TF UNAVAILABLE`、`CAMERA UNAVAILABLE`、`PATH OUT OF VIEW`、`INVALID CONFIG`です。Pathは受信ごとに全体交換し、不正Pathを受けた場合は直ちに旧線を消します。TFが取得できない場合も線を出しません。初期値6.5秒を超えてPath更新がない場合は描画を消します。
 
 AR ViewerはWaypoint Followerより先に起動できます。起動時にPathがなくても映像表示・録画を継続し、後から`/plan`を受信すると自動的に投影を開始します。ルート変更後の新しいPathはgeneration単位で全体交換されます。
+
+## 自己位置ゲート（Phase 4）
+
+緑線を描くには、有効なPathに加えて次の条件が必要です。
+
+- `/amcl_pose`のframeが`localization_global_frame`（初期値`map`）と一致する
+- pose、quaternion、ROS timestamp、6x6 covarianceが有限かつ形式上妥当
+- AMCL timestampが古すぎず、将来方向のずれも許容値内
+- xy共分散行列とyaw分散から求めた標準偏差が暫定上限内
+- 前回の妥当なAMCL poseからの差が、固定ジャンプ余裕と経過時間に応じた速度余裕の範囲内
+- `localization_global_frame -> base_frame`のTFが取得でき、時刻が新しい
+- 正常条件が`localization_recovery_sec`以上継続する
+
+共分散が小さいことは真の位置誤差が小さいことの保証ではありません。このゲートは、受信鮮度、座標系、timestamp、TF、共分散、時系列ジャンプを組み合わせて明白な異常を保守的に除外するもので、地図との実位置一致を証明するものではありません。
+
+Nav2 AMCLは、静止してparticle filter更新条件を満たさない間、`/amcl_pose`を毎LaserScanで再発行しないことがあります。このため、最後のAMCL poseが正常で、`map <- base_frame` TFが新しく、最後のposeから位置・yawが静止保持範囲内の場合は、短い受信間隔だけを理由に非表示へ戻しません。TF上で保持範囲を超えて移動した場合や、AMCL pose自体に古いtimestamp、不正値、高い共分散が届いた場合は、この保持を使わず非表示にします。
+
+初期値は実機ログ取得前の暫定値です。
+
+```yaml
+amcl_pose_topic: /amcl_pose
+localization_global_frame: map
+localization_pose_timeout_sec: 3.0
+localization_stamp_max_age_sec: 3.0
+localization_future_tolerance_sec: 1.5
+localization_tf_max_age_sec: 3.0
+localization_max_position_stddev_m: 0.75
+localization_max_yaw_stddev_rad: 0.75
+localization_jump_distance_m: 1.5
+localization_jump_yaw_rad: 1.2
+localization_max_linear_speed_mps: 1.5
+localization_max_angular_speed_radps: 2.0
+localization_stationary_hold_distance_m: 0.5
+localization_stationary_hold_yaw_rad: 0.5
+localization_recovery_samples: 1
+localization_recovery_sec: 2.0
+```
+
+許容移動量は概ね`jump_distance + max_speed * 受信間隔`です。固定余裕に速度余裕を加えるため、通常走行を単純な座標差だけでジャンプ扱いしません。ジャンプ検出後は新しい位置を復帰候補の基準にするため、一度の正当な大補正で永久に復帰不能にはなりません。
+
+状態の優先順位は、カメラ/設定異常、`NO PATH` / `PATH STALE`、`LOCALIZING` / `LOCALIZATION UNSTABLE`、`TF UNAVAILABLE`、`PATH OUT OF VIEW`、`ACTIVE`の順です。最初のWaypointへの到達は表示条件ではありません。現在位置から最初のWaypointへ向かうNav2 Pathも、同じ条件を満たせば表示します。自己位置ゲートで緑線を隠している間も、C920映像の表示とMP4録画は継続し、録画フレームにも緑線を描きません。
 
 ## NO PATH診断
 
@@ -90,6 +131,7 @@ diagnostic_log_interval_sec: 5.0
 - `viewer_state`: `STARTUP -> NO PATH`、`NO PATH -> ACTIVE`、`ACTIVE -> PATH STALE`等
 - `tf_unavailable`: source/target frame、例外型、TF lookupの原因本文
 - `path_out_of_view`: 3Dクリップ後にカメラ視錐台と交差する線分がないこと
+- `localization_state`: AMCL受信数、`LOCALIZING` / `LOCALIZATION UNSTABLE` / `LOCALIZATION OK`、判定理由
 
 `NO PATH`のdetailが`no Path received since startup`かつ`plan_rx_count=0`なら、Viewer起動後にまだ`/plan`を一度も受信していません。`plan_discarded`があれば空または不正Pathが最後の原因です。`ACTIVE`後に`PATH STALE`へ変化した場合は、最後の有効Pathから設定timeoutを超えています。
 
@@ -133,10 +175,12 @@ Waypointが地図画像範囲外なら動画生成前にエラー終了します
 2. ROS domain 54へ参加する前に運用者の許可を取り、ロボットを停止状態にする。
 3. `camera_x/y`を`base_footprint`基準で測定し、C920をチェッカーボードで校正して内部パラメータを更新する。
 4. Viewer設定を`image_input_type: camera`、C920のby-idへ変更する。
-5. `/plan`と`map -> robot/base_footprint`が存在することを読み取りだけで確認する。
+5. `/plan`、`/amcl_pose`、`map -> robot/base_footprint`が存在することを読み取りだけで確認する。
 6. Viewerのみ起動し、ゴール送信や制御Topic publishをせず、静止状態で重なりと符号を確認する。
 7. 安全な既知位置でyawを手動変更できる場合も、走行指令なし・管理者立会いで画面追従だけを確認する。
 
 実機TFにはカメラframeを追加せず、初期版はViewer内部のmount値を使います。
 
-終了処理は`rclpy.try_shutdown()`を使用し、SIGINT時にROS contextが既にshutdown済みでも二重shutdown例外を発生させない構造です。
+画面表示中は`q`、`Q`、`F10`で終了できます。OpenCVのWin32、GTK、Qtで異なるF10コードを扱い、終了要求とC920/MP4/Windowの解放は一度だけ実行します。Ctrl+Cも引き続き`rclpy.try_shutdown()`で正常終了します。
+
+開発PCの自動テストでは状態遷移、録画フレームの緑線有無、キーコード、リソース解放を確認しています。実機NUCでのAMCL共分散分布、実際の発行間隔、TF遅延、C920とMP4 codec、各HighGUI backendの物理キー入力は未確認であり、走行なしのログ取得後に閾値を調整してください。

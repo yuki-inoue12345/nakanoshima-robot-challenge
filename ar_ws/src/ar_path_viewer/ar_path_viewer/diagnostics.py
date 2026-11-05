@@ -24,6 +24,7 @@ class DiagnosticReporter:
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
+        self._last_localization_state: Optional[str] = None
         self._last_emitted = {}
 
     def _emit(self, level: str, key: str, message: str, force: bool = False) -> None:
@@ -88,6 +89,20 @@ class DiagnosticReporter:
             "path_out_of_view",
             f"path_out_of_view frame_id={frame_id!r} points={point_count} "
             "reason=no clipped segment intersects the camera frustum",
+        )
+
+    def localization_update(
+        self, state: str, detail: str, receive_count: int
+    ) -> None:
+        changed = state != self._last_localization_state
+        self._last_localization_state = state
+        level = "info" if state == "LOCALIZATION OK" else "warning"
+        self._emit(
+            level,
+            f"localization:{state}",
+            f"localization_state state={state!r} amcl_rx_count={receive_count} "
+            f"detail={detail}",
+            force=changed,
         )
 
     def state_changed(self, state: str, detail: str = "") -> None:

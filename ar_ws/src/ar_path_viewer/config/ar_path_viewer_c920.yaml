@@ -1,8 +1,24 @@
 ar_path_viewer:
   ros__parameters:
     path_topic: /plan
+    amcl_pose_topic: /amcl_pose
     base_frame: robot/base_footprint
+    localization_global_frame: map
     path_timeout_sec: 6.5
+    localization_pose_timeout_sec: 3.0
+    localization_stamp_max_age_sec: 3.0
+    localization_future_tolerance_sec: 1.5
+    localization_tf_max_age_sec: 3.0
+    localization_max_position_stddev_m: 0.75
+    localization_max_yaw_stddev_rad: 0.75
+    localization_jump_distance_m: 1.5
+    localization_jump_yaw_rad: 1.2
+    localization_max_linear_speed_mps: 1.5
+    localization_max_angular_speed_radps: 2.0
+    localization_stationary_hold_distance_m: 0.5
+    localization_stationary_hold_yaw_rad: 0.5
+    localization_recovery_samples: 1
+    localization_recovery_sec: 2.0
     width: 640
     height: 480
     # Provisional only: replace with the calibrated C920 matrix.
