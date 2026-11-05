@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
 from ar_path_viewer.localization_monitor import (
@@ -143,6 +144,34 @@ def test_start_before_path_then_adopt_and_update_route_while_recording(monkeypat
     viewer_node.ArPathViewerNode._tick(fake)
     assert states[-1] == ("NO PATH", [])
     assert len(fake._writer.frames) == 4
+
+
+def test_plan_is_adopted_and_processing_continues_with_real_rclpy_logger(monkeypatch):
+    states = capture_states(monkeypatch)
+    fake = make_viewer()
+    fake.logger = get_logger("ar_path_viewer_plan_reception_regression")
+    fake._diagnostics = DiagnosticReporter(True, fake.logger)
+    fake._diagnostics.state_changed("NO PATH", "waiting for /plan")
+
+    first = path_message(((1.0, 0.0, 0.0), (5.0, 0.0, 0.0)))
+    viewer_node.ArPathViewerNode._on_path(fake, first)
+    first_snapshot = fake._path_store.snapshot()
+    assert first_snapshot is not None
+    assert first_snapshot.generation == 1
+    assert np.array_equal(first_snapshot.points, ((1.0, 0.0, 0.0), (5.0, 0.0, 0.0)))
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert states[-1][0] == "ACTIVE"
+    assert states[-1][1]
+
+    second = path_message(((2.0, 0.5, 0.0), (6.0, 1.0, 0.0)), stamp=2.0)
+    viewer_node.ArPathViewerNode._on_path(fake, second)
+    second_snapshot = fake._path_store.snapshot()
+    assert second_snapshot is not None
+    assert second_snapshot.generation == 2
+    assert fake._diagnostics.path_receive_count == 2
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert states[-1][0] == "ACTIVE"
+    assert states[-1][1]
 
 
 def test_invalid_path_and_tf_failure_never_draw_green_segments(monkeypatch):

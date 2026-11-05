@@ -1,3 +1,5 @@
+from rclpy.logging import get_logger
+
 from ar_path_viewer.diagnostics import DiagnosticReporter
 
 
@@ -82,3 +84,15 @@ def test_localization_diagnostics_are_rate_limited_but_log_transitions():
     assert len(logger.records) == 2
     assert "state='LOCALIZING'" in logger.records[0][1]
     assert "state='LOCALIZATION OK'" in logger.records[1][1]
+
+
+def test_real_rclpy_logger_allows_warning_info_warning_transitions():
+    reporter = DiagnosticReporter(
+        True,
+        get_logger("ar_path_viewer_diagnostics_severity_regression"),
+    )
+    reporter.state_changed("NO PATH", "waiting for /plan")
+    reporter.path_received("map", 2, 1.0)
+    reporter.state_changed("PATH STALE", "test transition")
+    assert reporter.path_receive_count == 1
+    assert reporter.current_state == "PATH STALE"

@@ -27,6 +27,21 @@ class DiagnosticReporter:
         self._last_localization_state: Optional[str] = None
         self._last_emitted = {}
 
+    def _write_log(self, level: str, message: str) -> None:
+        """Call each rclpy severity from a stable, severity-specific call site."""
+        if level == "debug":
+            self.logger.debug(message)
+        elif level == "info":
+            self.logger.info(message)
+        elif level in ("warning", "warn"):
+            self.logger.warning(message)
+        elif level == "error":
+            self.logger.error(message)
+        elif level == "fatal":
+            self.logger.fatal(message)
+        else:
+            raise ValueError(f"unsupported diagnostic log level: {level!r}")
+
     def _emit(self, level: str, key: str, message: str, force: bool = False) -> None:
         if not self.enabled:
             return
@@ -35,7 +50,7 @@ class DiagnosticReporter:
         if not force and previous is not None and now - previous < self.min_interval_sec:
             return
         self._last_emitted[key] = now
-        getattr(self.logger, level)(message)
+        self._write_log(level, message)
 
     def path_received(
         self, frame_id: str, point_count: int, header_stamp_sec: float | None = None
