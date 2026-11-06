@@ -106,6 +106,26 @@ class DiagnosticReporter:
             "reason=no clipped segment intersects the camera frustum",
         )
 
+    def projection_update(
+        self, frame_id: str, stats_detail: str, out_of_view_reason: str = ""
+    ) -> None:
+        event = "path_out_of_view" if out_of_view_reason else "path_projection"
+        reason = f" reason={out_of_view_reason}" if out_of_view_reason else ""
+        self._emit(
+            "info",
+            f"projection:{event}",
+            f"{event} frame_id={frame_id!r} {stats_detail}{reason}",
+        )
+
+    def camera_configuration(self, detail: str) -> None:
+        """Record the effective projection model once for field-log correlation."""
+        self._emit(
+            "info",
+            "camera_configuration",
+            f"camera_configuration {detail}",
+            force=True,
+        )
+
     def localization_update(
         self, state: str, detail: str, receive_count: int
     ) -> None:

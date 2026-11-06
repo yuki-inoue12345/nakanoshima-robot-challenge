@@ -50,6 +50,20 @@ class RecordingWriter:
         self.release_count += 1
 
 
+class RecordingDisplayWindow:
+    def __init__(self, key_code=-1):
+        self.key_code = key_code
+        self.frames = []
+        self.close_count = 0
+
+    def show_and_poll(self, frame):
+        self.frames.append(frame.copy())
+        return self.key_code
+
+    def close(self):
+        self.close_count += 1
+
+
 class FakeViewer:
     pass
 
@@ -70,6 +84,7 @@ def make_viewer(clock=None):
     fake._color = (0, 255, 0)
     fake._thickness = 5
     fake._display = False
+    fake._display_window = None
     fake._writer = RecordingWriter()
     fake._points_in_base = lambda points, frame: points
     fake._check_localization_tf = lambda: (True, "", (0.0, 0.0, 0.0))
@@ -132,6 +147,14 @@ def test_start_before_path_then_adopt_and_update_route_while_recording(monkeypat
     first_segments = states[-1][1]
     assert states[-1][0] == "ACTIVE"
     assert first_segments
+    log_text = "\n".join(message for _, message in fake.logger.records)
+    assert "path_length_m=" in log_text
+    assert "endpoint_distance_m=" in log_text
+    assert "camera_forward_path_length_m=" in log_text
+    assert "visible_path_length_m=" in log_text
+    assert "nonvisible_forward_path_length_m=" in log_text
+    assert "visible_depth_max_m=" in log_text
+    assert "visible_pixel_length=" in log_text
 
     second = path_message(((1.0, 0.0, 0.0), (4.0, -1.0, 0.0)), stamp=2.0)
     viewer_node.ArPathViewerNode._on_path(fake, second)
@@ -313,6 +336,8 @@ def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):
     writer = fake._writer
     source = fake._image_source
     fake._display = True
+    fake._display_window = RecordingDisplayWindow(ord("q"))
+    display_window = fake._display_window
     fake._release_resources = lambda: viewer_node.ArPathViewerNode._release_resources(fake)
     fake._request_shutdown = lambda reason: viewer_node.ArPathViewerNode._request_shutdown(
         fake, reason
@@ -321,9 +346,6 @@ def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):
         fake, path_message(((1.0, 0.0, 0.0), (5.0, 0.0, 0.0)))
     )
     shutdown_calls = []
-    monkeypatch.setattr(viewer_node.cv2, "imshow", lambda *args: None)
-    monkeypatch.setattr(viewer_node.cv2, "waitKeyEx", lambda delay: ord("q"))
-    monkeypatch.setattr(viewer_node.cv2, "destroyAllWindows", lambda: None)
     monkeypatch.setattr(
         viewer_node, "shutdown_ros_context", lambda: shutdown_calls.append(True)
     )
@@ -332,11 +354,15 @@ def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):
     assert len(writer.frames) == 1
     assert writer.release_count == 1
     assert source.close_count == 1
+    assert len(display_window.frames) == 1
+    assert display_window.frames[0].shape == (480, 640, 3)
+    assert display_window.close_count == 1
     assert shutdown_calls == [True]
     fake._request_shutdown("duplicate")
     fake._release_resources()
     assert writer.release_count == 1
     assert source.close_count == 1
+    assert display_window.close_count == 1
     assert shutdown_calls == [True]
 
 

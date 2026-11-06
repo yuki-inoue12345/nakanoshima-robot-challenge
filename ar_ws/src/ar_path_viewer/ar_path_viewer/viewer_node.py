@@ -15,6 +15,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
 from .diagnostics import DiagnosticReporter
+from .display_window import DisplayWindow
 from .image_source import SimulationSource, make_image_source
 from .localization_monitor import (
     LocalizationMonitor,
@@ -25,7 +26,7 @@ from .path_adapter import PathStore, path_message_to_array
 from .projection import DEFAULT_CAMERA_Y_M, CameraIntrinsics, CameraMount
 from .rendering import render_frame
 from .tf_adapter import transform_message_points
-from .viewer_logic import project_path_state
+from .viewer_logic import project_path_state_detailed
 
 
 class ArPathViewerNode(Node):
@@ -73,6 +74,8 @@ class ArPathViewerNode(Node):
             "image_input_type": "simulation",
             "image_input_uri": "",
             "display": False,
+            "display_width": 960,
+            "display_height": 720,
             "output_video": "",
             "fps": 20.0,
             "diagnostic_logging": True,
@@ -135,6 +138,17 @@ class ArPathViewerNode(Node):
             self._config_error = str(exc)
             self.get_logger().error(f"Invalid diagnostic configuration: {exc}")
             self._diagnostics = DiagnosticReporter(False, self.get_logger())
+        self._diagnostics.camera_configuration(
+            f"width={self._intrinsics.width} height={self._intrinsics.height} "
+            f"fx={self._intrinsics.fx:.3f} fy={self._intrinsics.fy:.3f} "
+            f"cx={self._intrinsics.cx:.3f} cy={self._intrinsics.cy:.3f} "
+            f"camera_x={self._mount.x:.4f} camera_y={self._mount.y:.4f} "
+            f"camera_z={self._mount.z:.4f} "
+            f"camera_yaw_deg={self._mount.yaw_deg:.3f} "
+            f"camera_pitch_up_deg={self._mount.pitch_up_deg:.3f} "
+            f"camera_roll_deg={self._mount.roll_deg:.3f} "
+            f"near_clip_m={self._near:.3f}"
+        )
 
         self._base_frame = self._str("base_frame")
         try:
@@ -173,6 +187,17 @@ class ArPathViewerNode(Node):
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
         self._thickness = self._int("line_thickness")
         self._display = self._bool("display")
+        self._display_window = None
+        if self._display:
+            try:
+                self._display_window = DisplayWindow(
+                    self._int("display_width"), self._int("display_height")
+                )
+            except (AttributeError, RuntimeError, ValueError, cv2.error) as exc:
+                self._display = False
+                self.get_logger().warning(
+                    f"OpenCV display unavailable; recording continues: {exc}"
+                )
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         qos = QoSProfile(
@@ -360,31 +385,34 @@ class ArPathViewerNode(Node):
                     detail = tf_detail
                 else:
                     try:
-                        state, segments = project_path_state(
+                        state, segments, projection_stats = project_path_state_detailed(
                             snapshot.points, snapshot.frame_id, self._base_frame,
                             self._points_in_base, self._mount, self._intrinsics, self._near,
                             on_tf_error=lambda exc: self._diagnostics.tf_failure(
                                 snapshot.frame_id, self._base_frame, exc
                             ),
                         )
-                        if state == "PATH OUT OF VIEW":
-                            self._diagnostics.path_out_of_view(
-                                snapshot.frame_id, len(snapshot.points)
+                        if projection_stats is not None:
+                            self._diagnostics.projection_update(
+                                snapshot.frame_id,
+                                projection_stats.log_detail(),
+                                projection_stats.out_of_view_reason,
                             )
+                        if state == "PATH OUT OF VIEW" and projection_stats is not None:
                             detail = (
-                                f"frame_id={snapshot.frame_id!r}, "
-                                f"points={len(snapshot.points)}"
+                                f"frame={snapshot.frame_id} "
+                                f"{projection_stats.out_of_view_reason}; "
+                                f"{projection_stats.compact_detail()}"
                             )
                         elif state == "TF UNAVAILABLE":
                             detail = (
                                 f"source_frame={snapshot.frame_id!r}, "
                                 f"target_frame={self._base_frame!r}"
                             )
-                        else:
+                        elif projection_stats is not None:
                             detail = (
-                                f"generation={snapshot.generation}, "
-                                f"frame_id={snapshot.frame_id!r}, "
-                                f"points={len(snapshot.points)}, segments={len(segments)}"
+                                f"gen={snapshot.generation} frame={snapshot.frame_id} "
+                                f"{projection_stats.compact_detail()}"
                             )
                     except ValueError as exc:
                         state = "INVALID CONFIG"
@@ -404,10 +432,18 @@ class ArPathViewerNode(Node):
         if self._writer is not None:
             self._writer.write(frame)
         if self._display:
-            cv2.imshow("AR Path Viewer", frame)
-            wait_key = getattr(cv2, "waitKeyEx", cv2.waitKey)
-            if is_exit_key(wait_key(1)):
-                self._request_shutdown("keyboard q/Q/F10")
+            try:
+                key_code = self._display_window.show_and_poll(frame)
+            except (AttributeError, RuntimeError, cv2.error) as exc:
+                self.get_logger().warning(
+                    f"OpenCV display failed; recording continues: {exc}"
+                )
+                self._display = False
+                if self._display_window is not None:
+                    self._display_window.close()
+            else:
+                if is_exit_key(key_code):
+                    self._request_shutdown("keyboard q/Q/F10")
 
     def _request_shutdown(self, reason: str) -> None:
         if self._shutdown_requested:
@@ -425,8 +461,8 @@ class ArPathViewerNode(Node):
         if self._writer is not None:
             self._writer.release()
             self._writer = None
-        if self._display:
-            cv2.destroyAllWindows()
+        if self._display_window is not None:
+            self._display_window.close()
 
     def destroy_node(self):
         self._release_resources()

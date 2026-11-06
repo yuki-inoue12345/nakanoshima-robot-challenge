@@ -96,3 +96,36 @@ def test_real_rclpy_logger_allows_warning_info_warning_transitions():
     reporter.state_changed("PATH STALE", "test transition")
     assert reporter.path_receive_count == 1
     assert reporter.current_state == "PATH STALE"
+
+
+def test_projection_diagnostics_are_rate_limited_per_visibility_state():
+    now = [10.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 5.0, clock=lambda: now[0])
+    detail = "transformed_points=119 front_points=80 image_points=20 drawable_segments=19"
+    reporter.projection_update("map", detail)
+    reporter.projection_update("map", detail)
+    reporter.projection_update("map", detail, "all forward Path points are below the image")
+    reporter.projection_update("map", detail, "all forward Path points are below the image")
+    assert len(logger.records) == 2
+    now[0] = 15.1
+    reporter.projection_update("map", detail)
+    assert len(logger.records) == 3
+    assert "drawable_segments=19" in logger.records[-1][1]
+
+
+def test_effective_camera_configuration_is_logged_once_with_projection_values():
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger)
+    reporter.camera_configuration(
+        "width=640 height=480 fx=525.000 fy=525.000 "
+        "camera_y=0.0940 camera_pitch_up_deg=7.500"
+    )
+    assert logger.records == [
+        (
+            "info",
+            "camera_configuration width=640 height=480 "
+            "fx=525.000 fy=525.000 camera_y=0.0940 "
+            "camera_pitch_up_deg=7.500",
+        )
+    ]

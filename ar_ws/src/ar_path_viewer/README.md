@@ -18,6 +18,33 @@ ROS 2 Jazzy向けの、走行制御から独立した読み取り専用AR Path V
 - `fx=fy=525 px`等は未校正の仮内部パラメータです。実写との位置精度は保証しません。
 - 画角外、カメラ後方、near plane内の経路を飾り線で代替しません。
 
+### Phase 5の投影幾何検証
+
+地面上の点をカメラ前方距離`d`、カメラ高さ`h`、上向き角`θ`とすると、中央線の画像行は概ね次式です。
+
+```text
+v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
+```
+
+初期値`h=0.6967 m`、`fy=525 px`、`cy=239.5 px`、`θ=7.5°`では、地平線は`v=308.6 px`、地面が画像下端`v=479 px`へ入り始めるのはカメラ前方約`2.276 m`です。`camera_x=0.20 m`を含む`base_footprint`前方距離では約`2.476 m`です。コードとは独立した三角関数計算と投影実装が一致しており、正の`camera_pitch_up_deg`が実際に上向きとなる符号も一致しています。
+
+同じ仮内部パラメータでの参考値です。物理角度を変えず設定値だけを変更すると投影が実写から外れるため、実測せずに採用しません。
+
+近距離の床経路をより多く映す必要がある場合、物理取付角を上向き7.5°から0〜3°付近へ下げることが検討候補です。その場合も、実際のレンズ角を測定してから同じ値を`camera_pitch_up_deg`へ設定します。今回は物理取付を確認できないため7.5°を変更していません。
+
+| `camera_pitch_up_deg` | 地平線の画像行 | 地面が下端へ入るカメラ前方距離 |
+|---:|---:|---:|
+| 0° | 239.5 px | 1.527 m |
+| 3° | 267.0 px | 1.767 m |
+| 5° | 285.4 px | 1.965 m |
+| 7.5° | 308.6 px | 2.276 m |
+
+2026-11-06の実機録画では、ACTIVE時の緑線が画像下端12〜24 px程度に限られるフレームを確認しました。上向きカメラにより近距離の床が物理的に画角外となることは確定しています。一方、受信PathのTF変換後形状が保存されていないため、多数のPath点が後方・左右・下側のどこへ外れたかは録画だけでは確定できません。Phase 5では点数だけでなく、TF変換後のPath全長、ロボット原点から終点までの直線距離、カメラ前方にあるPath実長、視錐台内へ3DクリップされたPath実長、描画線分数、描画ピクセル長を5秒間隔で記録します。次回の実機ログで「Path自体が短い」「多くが後方」「前方だが画角外」「画角内実長はあるが遠近法で短く見える」を区別できます。
+
+メートル単位の長さは隣接Path点間の3次元線分長から求めます。`camera_forward_path_length_m`はカメラ光学座標の前方半空間に含まれる各線分部分、`visible_path_length_m`はnear planeと上下左右の視錐台でクリップ後に残る各線分部分の合計です。両者の差を`nonvisible_forward_path_length_m`として記録します。境界を横切る線分は交点までの割合を使うため、端点が画面外でも画面内部分を失いません。`visible_depth_min_m` / `visible_depth_max_m`は実際に画角へ入った線分のカメラ前方深度範囲です。`endpoint_distance_m`は現在の`base_frame`原点からPath終点までの3次元直線距離で、Path全長とは別の値です。
+
+同録画の32秒・40秒の直線廊下について、廊下方向の直線群から求めた消失点候補は画像行`v≈378〜380 px`でした。仮の`fy=525 px`、`cy=239.5 px`へ当てはめると上向き約14.8〜15.0°相当で、7.5°設定より大きい可能性があります。仮に15°なら地面が画像下端へ入り始める距離はカメラ前方約4.17 m、`camera_x=0.20 m`を含むbase前方約4.37 mです。ただし、廊下線の選択、レンズ歪み、`fx/fy/cx/cy`自体が未校正なので、これは校正値ではありません。この映像推定だけで設定を15°へ変更せず、チェッカーボード内部校正と水平基準を写した静止画で物理ピッチを測定します。実機ログの`camera_configuration`で、NUC固有YAMLから実際に読み込まれた投影値を確認します。
+
 ## ビルドとテスト
 
 ワークスペース直下で実行します。
@@ -60,8 +87,12 @@ C920ライブ表示・録画の設定例です（実機での実行は未実施�
 image_input_type: camera
 image_input_uri: /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_66F7D3AF-video-index0
 display: true
+display_width: 960
+display_height: 720
 output_video: /home/inoue-yuki/ar_navigation_project/outputs/c920_static_test.mp4
 ```
+
+通常ウィンドウはマウスでリサイズでき、映像は黒帯を使って4:3を維持します。`F11`で全画面と通常表示を切り替え、`q`、`Q`、`F10`で正常終了します。HighGUI backendがリサイズ・全画面APIに対応しない場合は通常表示へ留まり、表示自体を作れない場合も録画処理は継続します。表示用の拡大・黒帯はGUIだけに適用され、投影計算とMP4は従来どおり640×480、20fpsです。
 
 同じ内容の[ar_path_viewer_c920.yaml](/home/inoue-yuki/ar_navigation_project/ar_path_viewer/config/ar_path_viewer_c920.yaml)を指定する場合：
 
@@ -71,6 +102,8 @@ ros2 launch ar_path_viewer ar_path_viewer.launch.py \
 ```
 
 表示状態は`ACTIVE`、`NO PATH`、`PATH STALE`、`LOCALIZING`、`LOCALIZATION UNSTABLE`、`TF UNAVAILABLE`、`CAMERA UNAVAILABLE`、`PATH OUT OF VIEW`、`INVALID CONFIG`です。Pathは受信ごとに全体交換し、不正Pathを受けた場合は直ちに旧線を消します。TFが取得できない場合も線を出しません。初期値6.5秒を超えてPath更新がない場合は描画を消します。
+
+ACTIVE時は投影済みのNav2 Path線分上に進行方向矢印を描きます。矢印は画面内へクリップされた実線分から生成し、経路座標の移動、変形、Waypoint直線接続は行いません。
 
 AR ViewerはWaypoint Followerより先に起動できます。起動時にPathがなくても映像表示・録画を継続し、後から`/plan`を受信すると自動的に投影を開始します。ルート変更後の新しいPathはgeneration単位で全体交換されます。
 
@@ -134,7 +167,11 @@ diagnostic_log_interval_sec: 5.0
 - `viewer_state`: `STARTUP -> NO PATH`、`NO PATH -> ACTIVE`、`ACTIVE -> PATH STALE`等
 - `tf_unavailable`: source/target frame、例外型、TF lookupの原因本文
 - `path_out_of_view`: 3Dクリップ後にカメラ視錐台と交差する線分がないこと
+- `path_projection`: TF変換後点数、入力線分数、Path全長、ロボットから終点までの距離、カメラ前方部分の実長、視錐台内部分と前方だが非表示の実長、前方全体と画角内線分それぞれの深度範囲、画像内点数、後方・near内・左右・上下の点数、描画線分数、可視画素長・表示範囲
+- `camera_configuration`: 実際に読み込まれた画像サイズ、内部パラメータ、カメラ位置・姿勢、near clip（起動時に1回）
 - `localization_state`: AMCL受信数、`LOCALIZING` / `LOCALIZATION UNSTABLE` / `LOCALIZATION OK`、判定理由
+
+`path_out_of_view`の理由は、全点がカメラ後方、全点がnear clip内、前方点がすべて画像の下・上・左・右、または複数境界の組合せで視錐台と交差しない場合に分類します。点がすべて画像外でも、隣接点間の線分が画角を横切れば3Dクリッピング後に描画します。投影診断は`diagnostic_log_interval_sec`（初期値5秒）で集約されます。
 
 `NO PATH`のdetailが`no Path received since startup`かつ`plan_rx_count=0`なら、Viewer起動後にまだ`/plan`を一度も受信していません。`plan_discarded`があれば空または不正Pathが最後の原因です。`ACTIVE`後に`PATH STALE`へ変化した場合は、最後の有効Pathから設定timeoutを超えています。
 
@@ -222,6 +259,6 @@ diff -u -- "$BACKUP" "$NUC_CONFIG" || true
 
 実機TFにはカメラframeを追加せず、初期版はViewer内部のmount値を使います。
 
-画面表示中は`q`、`Q`、`F10`で終了できます。OpenCVのWin32、GTK、Qtで異なるF10コードを扱い、終了要求とC920/MP4/Windowの解放は一度だけ実行します。Ctrl+Cも引き続き`rclpy.try_shutdown()`で正常終了します。
+画面表示中は`F11`で全画面を切り替え、`q`、`Q`、`F10`で終了できます。OpenCVのWin32、GTK、Qtで異なるF10/F11コードを扱い、終了要求とC920/MP4/Windowの解放は一度だけ実行します。Ctrl+Cも引き続き`rclpy.try_shutdown()`で正常終了します。
 
 開発PCの自動テストでは状態遷移、録画フレームの緑線有無、キーコード、リソース解放を確認しています。実機NUCでのAMCL共分散分布、実際の発行間隔、TF遅延、C920とMP4 codec、各HighGUI backendの物理キー入力は未確認であり、走行なしのログ取得後に閾値を調整してください。

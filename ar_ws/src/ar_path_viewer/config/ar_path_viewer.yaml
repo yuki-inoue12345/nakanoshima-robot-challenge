@@ -42,6 +42,8 @@ ar_path_viewer:
     image_input_type: simulation  # simulation | image | video | camera
     image_input_uri: ""
     display: false
+    display_width: 960
+    display_height: 720
     output_video: ""
     fps: 20.0
     diagnostic_logging: true
