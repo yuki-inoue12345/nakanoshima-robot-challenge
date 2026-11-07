@@ -6,7 +6,10 @@ import pytest
 
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.display_window import (
+    ACTION_COPY_LOG,
+    ACTION_VIEW_LOG,
     DisplayWindow,
+    compose_display_frame,
     fit_frame_to_window,
     is_fullscreen_key,
 )
@@ -88,11 +91,28 @@ def test_display_letterboxes_without_changing_source_frame():
     assert np.all(fitted[:, 100:900] == 127)
 
 
+def test_display_control_bar_is_below_video_and_does_not_change_source():
+    frame = np.full((480, 640, 3), 127, np.uint8)
+    original = frame.copy()
+    display, rectangles = compose_display_frame(frame, 1000, 700)
+    assert display.shape == (700, 1000, 3)
+    assert np.array_equal(frame, original)
+    assert set(rectangles) == {ACTION_VIEW_LOG, ACTION_COPY_LOG}
+    source_mask = np.all(display[:636] == 127, axis=2)
+    ys, xs = np.nonzero(source_mask)
+    assert (xs.max() - xs.min() + 1, ys.max() - ys.min() + 1) == (848, 636)
+    for x1, y1, x2, y2 in rectangles.values():
+        assert 0 <= x1 < x2 < display.shape[1]
+        assert 480 < y1 < y2 < display.shape[0]
+    assert np.any(display[650:] != 0)
+
+
 class FakeHighGui:
     WINDOW_NORMAL = 0
     WINDOW_KEEPRATIO = 0
     WINDOW_FULLSCREEN = 1
     WND_PROP_FULLSCREEN = 0
+    EVENT_LBUTTONUP = 4
 
     def __init__(self, keys):
         self.keys = iter(keys)
@@ -101,6 +121,7 @@ class FakeHighGui:
         self.properties = []
         self.shown = []
         self.destroyed = []
+        self.mouse_callback = None
 
     def namedWindow(self, name, flags):
         self.named.append((name, flags))
@@ -123,6 +144,9 @@ class FakeHighGui:
     def setWindowProperty(self, name, prop, value):
         self.properties.append((name, prop, value))
 
+    def setMouseCallback(self, name, callback):
+        self.mouse_callback = callback
+
     def destroyWindow(self, name):
         self.destroyed.append(name)
 
@@ -142,6 +166,19 @@ def test_resizable_window_f11_toggle_and_q_passthrough():
     window.close()
     window.close()
     assert len(gui.destroyed) == 1
+
+
+def test_log_buttons_emit_mouse_actions_without_affecting_keys():
+    gui = FakeHighGui((-1, ord("q")))
+    window = DisplayWindow(960, 720, cv_module=gui)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    assert window.show_and_poll(frame) == -1
+    assert gui.mouse_callback is not None
+    for expected in (ACTION_VIEW_LOG, ACTION_COPY_LOG):
+        x1, y1, x2, y2 = window._button_rectangles[expected]
+        gui.mouse_callback(gui.EVENT_LBUTTONUP, (x1 + x2) // 2, (y1 + y2) // 2, 0, None)
+        assert window.consume_actions() == [expected]
+    assert window.show_and_poll(frame) == ord("q")
 
 
 def test_f11_backend_codes_are_recognized():

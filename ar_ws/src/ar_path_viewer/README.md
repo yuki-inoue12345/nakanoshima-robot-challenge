@@ -94,6 +94,32 @@ output_video: /home/inoue-yuki/ar_navigation_project/outputs/c920_static_test.mp
 
 通常ウィンドウはマウスでリサイズでき、映像は黒帯を使って4:3を維持します。`F11`で全画面と通常表示を切り替え、`q`、`Q`、`F10`で正常終了します。HighGUI backendがリサイズ・全画面APIに対応しない場合は通常表示へ留まり、表示自体を作れない場合も録画処理は継続します。表示用の拡大・黒帯はGUIだけに適用され、投影計算とMP4は従来どおり640×480、20fpsです。
 
+### Phase 6 ログ操作と自動保存
+
+OpenCV画面の下部に表示専用の操作バーを追加します。ボタンは「ログを見る」と「ログをコピー」です。OpenCV FreeTypeまたは日本語フォントが利用できない環境では、操作を失わないよう`LOG VIEW`と`LOG COPY`へフォールバックします。操作バー、ボタン、コピー結果表示は画面表示用キャンバスだけに描き、640×480のMP4フレームには入りません。リサイズ・F11全画面中も映像領域だけを4:3で維持し、その下に操作バーを確保します。
+
+- `LOG VIEW`: 選択・スクロール可能な別ウィンドウを開きます。`最新ログへ更新`で現在の内容へ更新できます。閉じてもAR表示・録画・ROS処理は継続します。
+- `LOG COPY`: ChatGPT/Codexへ貼り付けられるテキストをOSクリップボードへコピーします。成功・失敗は操作バーへ約3秒表示します。
+- Tk/Display/Clipboardが利用できない場合は警告ログを残し、カメラ表示・録画・Nav2購読を停止しません。
+
+ログは起動時からメモリとUTF-8ファイルへ同時記録します。`output_video`が設定されていれば同じディレクトリ・同じstemの`.log`を使用します。
+
+```text
+kokochan_navi_20261106_182206.mp4
+kokochan_navi_20261106_182206.log
+```
+
+動画またはログがすでに存在する場合は、両方に`_001`、`_002`等を付けて既存データを上書きしません。動画を記録しない場合は`log_output_dir`へ`kokochan_navi_YYYYMMDD_HHMMSS.log`を作成します。ファイル保存に失敗してもメモリ上のログ表示・コピーは継続します。
+
+```yaml
+log_output: ""  # 空ならoutput_videoと同じstem
+log_output_dir: ~/ar_navigation_project/outputs
+log_max_entries: 4000
+log_copy_max_chars: 100000
+```
+
+ファイルには全ての集約済み診断を保存します。コピー内容が上限を超える場合は、起動情報、`camera_configuration`、最新の`viewer_state`・`plan_rx`・`path_projection`、警告・エラー・終了理由を優先し、直近ログで残りを埋めます。ファイル側はこのコピー上限では切り詰めません。別ログウィンドウとクリップボードには`python3-tk`が必要です。
+
 同じ内容の[ar_path_viewer_c920.yaml](/home/inoue-yuki/ar_navigation_project/ar_path_viewer/config/ar_path_viewer_c920.yaml)を指定する場合：
 
 ```bash
@@ -159,6 +185,8 @@ diagnostic_log_interval_sec: 5.0
 
 `false`にすると追加診断を停止します。同じ種類の受信・TF失敗・画角外ログは既定で最大5秒に1回ですが、状態変化は直ちに1回記録します。
 
+`diagnostic_logging: false`の場合も、起動日時、出力先、実効カメラ設定、直接検出したエラー、終了理由はセッションログへ残ります。Path・TF・AMCLの追加診断を取得する実機調査では`true`を使用します。
+
 主なログ：
 
 - `plan_rx`: 累積受信回数、monotonic受信時刻、Path header stamp、frame_id、点数
@@ -209,7 +237,7 @@ ros2 run ar_path_viewer simulate_lap --config /path/to/offline_route.yaml
 
 Waypointが地図画像範囲外なら動画生成前にエラー終了します。地図上に入っていることは障害物回避や通行可能性の証明ではありません。この補間はNav2の経路計画、実カメラ映像、車体運動を再現しません。
 
-## 実機NUCへのcamera_y反映
+## 実機NUCへの反映
 
 既存cloneの絶対パスだけを`REPO_DIR`へ設定して実行します。作業ツリーに変更があれば停止し、新規clone、reset、stash、force pullは行いません。
 
@@ -230,6 +258,27 @@ colcon build --packages-select ar_path_viewer
 colcon test --packages-select ar_path_viewer
 colcon test-result --test-result-base build/ar_path_viewer --verbose
 ```
+
+Phase 6ではTkログウィンドウ、クリップボード、日本語ボタン表示を使うため、NUCへ一度だけ依存パッケージを導入します。
+
+```bash
+sudo apt-get update
+sudo apt-get install --yes python3-tk fonts-noto-cjk
+python3 -c 'import tkinter; print("tkinter OK")'
+mkdir -p /home/koko-chan-nuc/ar_navigation_project/outputs
+test -w /home/koko-chan-nuc/ar_navigation_project/outputs
+```
+
+既存のNUC固有YAMLにPhase 6パラメータがなくても、コード既定値で自動保存と操作バーは動作します。既存`output_video`が設定されていれば同名stemの`.log`を自動作成します。保存先だけを明示したい場合は、NUC固有YAMLをバックアップして`ros__parameters`内へ次を追加します。
+
+```yaml
+log_output: ""
+log_output_dir: /home/koko-chan-nuc/ar_navigation_project/outputs
+log_max_entries: 4000
+log_copy_max_chars: 100000
+```
+
+既存のC920デバイスパス、`output_video`、診断設定、デスクトップアイコン、起動スクリプトは維持します。デスクトップアイコンの再作成は不要です。
 
 Git管理外のNUC固有YAMLは、他の値をGitHub版で置換せず、`camera_y`の1行だけを更新します。
 

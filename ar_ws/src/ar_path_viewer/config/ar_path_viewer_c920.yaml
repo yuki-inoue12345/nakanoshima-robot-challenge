@@ -48,3 +48,8 @@ ar_path_viewer:
     fps: 20.0
     diagnostic_logging: true
     diagnostic_log_interval_sec: 5.0
+    # Empty log_output pairs the .log name with output_video when recording.
+    log_output: ""
+    log_output_dir: ~/ar_navigation_project/outputs
+    log_max_entries: 4000
+    log_copy_max_chars: 100000

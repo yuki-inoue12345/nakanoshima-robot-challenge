@@ -51,14 +51,24 @@ class RecordingWriter:
 
 
 class RecordingDisplayWindow:
-    def __init__(self, key_code=-1):
+    def __init__(self, key_code=-1, actions=()):
         self.key_code = key_code
+        self.actions = list(actions)
         self.frames = []
+        self.statuses = []
         self.close_count = 0
 
     def show_and_poll(self, frame):
         self.frames.append(frame.copy())
         return self.key_code
+
+    def consume_actions(self):
+        actions = self.actions
+        self.actions = []
+        return actions
+
+    def set_status(self, text, success):
+        self.statuses.append((text, success))
 
     def close(self):
         self.close_count += 1
@@ -66,6 +76,49 @@ class RecordingDisplayWindow:
 
 class FakeViewer:
     pass
+
+
+class RecordingLogGui:
+    def __init__(self, copy_success=True):
+        self.copy_success = copy_success
+        self.shown = []
+        self.copied = []
+        self.poll_count = 0
+        self.close_count = 0
+
+    def show(self, content, refresh_source=None):
+        self.shown.append((content, refresh_source))
+        return True, "shown"
+
+    def copy(self, content):
+        self.copied.append(content)
+        if self.copy_success:
+            return True, "copied"
+        return False, "clipboard unavailable"
+
+    def poll(self):
+        self.poll_count += 1
+
+    def close(self):
+        self.close_count += 1
+
+
+class MemorySessionLog:
+    def __init__(self):
+        self.records = []
+        self.closed = False
+
+    def text(self):
+        return "camera_configuration test\npath_projection test\n"
+
+    def copy_text(self, max_chars):
+        return self.text()[:max_chars]
+
+    def record(self, level, message):
+        self.records.append((level, message))
+
+    def close(self):
+        self.closed = True
 
 
 def make_viewer(clock=None):
@@ -90,6 +143,8 @@ def make_viewer(clock=None):
     fake._check_localization_tf = lambda: (True, "", (0.0, 0.0, 0.0))
     fake.logger = RecordingLogger()
     fake.get_logger = lambda: fake.logger
+    fake._log_info = lambda message: fake.logger.info(message)
+    fake._log_warning = lambda message: fake.logger.warning(message)
     fake._diagnostics = DiagnosticReporter(True, fake.logger, clock=active_clock)
     fake._localization = LocalizationMonitor(
         LocalizationThresholds(recovery_samples=1, recovery_sec=0.0),
@@ -364,6 +419,46 @@ def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):
     assert source.close_count == 1
     assert display_window.close_count == 1
     assert shutdown_calls == [True]
+
+
+def test_log_view_copy_failure_and_control_bar_never_enter_recording(monkeypatch):
+    fake = make_viewer()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow(
+        actions=(viewer_node.ACTION_VIEW_LOG, viewer_node.ACTION_COPY_LOG)
+    )
+    fake._log_gui = RecordingLogGui(copy_success=False)
+    fake._session_log = MemorySessionLog()
+    fake._log_copy_max_chars = 100000
+    fake._handle_display_action = lambda action: (
+        viewer_node.ArPathViewerNode._handle_display_action(fake, action)
+    )
+    fake._log_info = lambda message: (
+        fake._session_log.record("INFO", message), fake.logger.info(message)
+    )
+    fake._log_warning = lambda message: (
+        fake._session_log.record("WARNING", message), fake.logger.warning(message)
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert len(fake._writer.frames) == 1
+    assert fake._writer.frames[0].shape == (480, 640, 3)
+    assert len(fake._display_window.frames) == 1
+    assert fake._display_window.frames[0].shape == (480, 640, 3)
+    assert len(fake._log_gui.shown) == 1
+    assert callable(fake._log_gui.shown[0][1])
+    assert fake._log_gui.copied == [fake._session_log.text()]
+    assert fake._display_window.statuses == [
+        ("Log window opened", True),
+        ("Log copy failed", False),
+    ]
+    assert not fake._shutdown_requested
+    assert fake._log_gui.poll_count == 1
+    assert any(
+        level == "WARNING" and "clipboard unavailable" in message
+        for level, message in fake._session_log.records
+    )
 
 
 def test_localization_tf_requires_a_fresh_timestamp():

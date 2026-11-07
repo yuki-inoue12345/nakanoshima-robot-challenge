@@ -129,3 +129,19 @@ def test_effective_camera_configuration_is_logged_once_with_projection_values():
             "camera_pitch_up_deg=7.500",
         )
     ]
+
+
+def test_emitted_diagnostics_are_forwarded_to_session_sink():
+    logger = RecordingLogger()
+    saved = []
+    reporter = DiagnosticReporter(
+        True, logger, record_sink=lambda level, message: saved.append((level, message))
+    )
+    reporter.path_received("map", 119, 123.0)
+    reporter.projection_update(
+        "map", "path_length_m=8.0 visible_path_length_m=3.0"
+    )
+    assert saved[0][0] == "info"
+    assert "plan_rx" in saved[0][1]
+    assert "path_projection" in saved[1][1]
+    assert "path_length_m=8.0" in saved[1][1]

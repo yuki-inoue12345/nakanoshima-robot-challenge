@@ -13,6 +13,7 @@ class DiagnosticReporter:
         logger,
         min_interval_sec: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
+        record_sink: Callable[[str, str], None] | None = None,
     ) -> None:
         if min_interval_sec <= 0.0:
             raise ValueError("diagnostic_log_interval_sec must be positive")
@@ -20,6 +21,7 @@ class DiagnosticReporter:
         self.logger = logger
         self.min_interval_sec = float(min_interval_sec)
         self.clock = clock
+        self.record_sink = record_sink
         self.path_receive_count = 0
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
@@ -50,6 +52,12 @@ class DiagnosticReporter:
         if not force and previous is not None and now - previous < self.min_interval_sec:
             return
         self._last_emitted[key] = now
+        if self.record_sink is not None:
+            try:
+                self.record_sink(level, message)
+            except Exception:
+                # File/UI diagnostics must never interrupt ROS callbacks or rendering.
+                pass
         self._write_log(level, message)
 
     def path_received(

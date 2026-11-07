@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import traceback
 
 import cv2
 import numpy as np
@@ -15,8 +16,9 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
 from .diagnostics import DiagnosticReporter
-from .display_window import DisplayWindow
+from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
 from .image_source import SimulationSource, make_image_source
+from .log_gui import LogGui
 from .localization_monitor import (
     LocalizationMonitor,
     LocalizationThresholds,
@@ -25,6 +27,7 @@ from .localization_monitor import (
 from .path_adapter import PathStore, path_message_to_array
 from .projection import DEFAULT_CAMERA_Y_M, CameraIntrinsics, CameraMount
 from .rendering import render_frame
+from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
 from .viewer_logic import project_path_state_detailed
 
@@ -80,12 +83,25 @@ class ArPathViewerNode(Node):
             "fps": 20.0,
             "diagnostic_logging": True,
             "diagnostic_log_interval_sec": 5.0,
+            "log_output": "",
+            "log_output_dir": "~/ar_navigation_project/outputs",
+            "log_max_entries": 4000,
+            "log_copy_max_chars": 100000,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
 
         self._config_error = ""
         self._camera_error = ""
+        self._log_copy_max_chars = max(2000, self._int("log_copy_max_chars"))
+        log_max_entries = max(100, self._int("log_max_entries"))
+        self._session_paths = resolve_session_paths(
+            self._str("output_video"),
+            self._str("log_output"),
+            self._str("log_output_dir"),
+        )
+        self._session_log = SessionLog(self._session_paths.log, log_max_entries)
+        self._log_gui = LogGui()
         try:
             self._intrinsics = CameraIntrinsics(
                 width=self._int("width"), height=self._int("height"),
@@ -104,7 +120,7 @@ class ArPathViewerNode(Node):
             self._path_store = PathStore(self._float("path_timeout_sec"))
         except ValueError as exc:
             self._config_error = str(exc)
-            self.get_logger().error(f"Invalid configuration: {exc}")
+            self._log_error(f"Invalid configuration: {exc}")
             self._intrinsics = CameraIntrinsics()
             self._mount = CameraMount()
             self._near = 0.10
@@ -117,13 +133,13 @@ class ArPathViewerNode(Node):
             )
         except OSError as exc:
             self._camera_error = str(exc)
-            self.get_logger().error(f"Camera unavailable: {exc}")
+            self._log_error(f"Camera unavailable: {exc}")
             self._image_source = SimulationSource(
                 self._intrinsics.width, self._intrinsics.height
             )
         except ValueError as exc:
             self._config_error = str(exc)
-            self.get_logger().error(f"Invalid image input configuration: {exc}")
+            self._log_error(f"Invalid image input configuration: {exc}")
             self._image_source = SimulationSource(
                 self._intrinsics.width, self._intrinsics.height
             )
@@ -133,12 +149,14 @@ class ArPathViewerNode(Node):
                 self._bool("diagnostic_logging"),
                 self.get_logger(),
                 self._float("diagnostic_log_interval_sec"),
+                record_sink=self._session_log.record,
             )
         except ValueError as exc:
             self._config_error = str(exc)
-            self.get_logger().error(f"Invalid diagnostic configuration: {exc}")
+            self._log_error(f"Invalid diagnostic configuration: {exc}")
             self._diagnostics = DiagnosticReporter(False, self.get_logger())
-        self._diagnostics.camera_configuration(
+        self._log_info(
+            "camera_configuration "
             f"width={self._intrinsics.width} height={self._intrinsics.height} "
             f"fx={self._intrinsics.fx:.3f} fy={self._intrinsics.fy:.3f} "
             f"cx={self._intrinsics.cx:.3f} cy={self._intrinsics.cy:.3f} "
@@ -149,6 +167,16 @@ class ArPathViewerNode(Node):
             f"camera_roll_deg={self._mount.roll_deg:.3f} "
             f"near_clip_m={self._near:.3f}"
         )
+        self._log_info(
+            "output_files "
+            f"video={str(self._session_paths.video)!r} "
+            f"log={str(self._session_paths.log)!r}"
+        )
+        if self._session_log.file_error:
+            self._log_warning(
+                "Automatic log file unavailable; in-memory log remains active: "
+                f"{self._session_log.file_error}"
+            )
 
         self._base_frame = self._str("base_frame")
         try:
@@ -182,7 +210,7 @@ class ArPathViewerNode(Node):
             self._localization = LocalizationMonitor(localization_thresholds)
         except ValueError as exc:
             self._config_error = self._config_error or str(exc)
-            self.get_logger().error(f"Invalid localization configuration: {exc}")
+            self._log_error(f"Invalid localization configuration: {exc}")
             self._localization = LocalizationMonitor()
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
         self._thickness = self._int("line_thickness")
@@ -195,7 +223,7 @@ class ArPathViewerNode(Node):
                 )
             except (AttributeError, RuntimeError, ValueError, cv2.error) as exc:
                 self._display = False
-                self.get_logger().warning(
+                self._log_warning(
                     f"OpenCV display unavailable; recording continues: {exc}"
                 )
         self._tf_buffer = Buffer()
@@ -215,9 +243,12 @@ class ArPathViewerNode(Node):
             self._on_amcl_pose,
             qos,
         )
-        self._writer = self._make_writer(self._str("output_video"), self._float("fps"))
+        output_video = "" if self._session_paths.video is None else str(
+            self._session_paths.video
+        )
+        self._writer = self._make_writer(output_video, self._float("fps"))
         self._timer = self.create_timer(1.0 / max(1.0, self._float("fps")), self._tick)
-        self.get_logger().info("AR Path Viewer started in read-only/subscriber-only mode")
+        self._log_info("AR Path Viewer started in read-only/subscriber-only mode")
 
     def _str(self, name: str) -> str:
         return str(self.get_parameter(name).value)
@@ -231,6 +262,18 @@ class ArPathViewerNode(Node):
     def _bool(self, name: str) -> bool:
         return bool(self.get_parameter(name).value)
 
+    def _log_info(self, message: str) -> None:
+        self._session_log.record("INFO", message)
+        self.get_logger().info(message)
+
+    def _log_warning(self, message: str) -> None:
+        self._session_log.record("WARNING", message)
+        self.get_logger().warning(message)
+
+    def _log_error(self, message: str) -> None:
+        self._session_log.record("ERROR", message)
+        self.get_logger().error(message)
+
     def _make_writer(self, path: str, fps: float):
         if not path:
             return None
@@ -241,10 +284,33 @@ class ArPathViewerNode(Node):
             (self._intrinsics.width, self._intrinsics.height),
         )
         if not writer.isOpened():
-            self.get_logger().error(f"Cannot open output video: {destination}")
+            self._log_error(f"Cannot open output video: {destination}")
             writer.release()
             return None
         return writer
+
+    def _handle_display_action(self, action: str) -> None:
+        if action == ACTION_VIEW_LOG:
+            success, message = self._log_gui.show(
+                self._session_log.text(), refresh_source=self._session_log.text
+            )
+            toast = "Log window opened" if success else "Log view failed"
+        elif action == ACTION_COPY_LOG:
+            try:
+                content = self._session_log.copy_text(self._log_copy_max_chars)
+                success, message = self._log_gui.copy(content)
+            except Exception as exc:
+                success = False
+                message = f"ログコピー失敗: {type(exc).__name__}: {exc}"
+            toast = "Log copied" if success else "Log copy failed"
+        else:
+            return
+        if success:
+            self._log_info(f"log_ui action={action} result=success detail={message}")
+        else:
+            self._log_warning(f"log_ui action={action} result=failure detail={message}")
+        if self._display_window is not None:
+            self._display_window.set_status(toast, success)
 
     def _on_path(self, message: PathMessage) -> None:
         raw_frame = str(getattr(getattr(message, "header", None), "frame_id", ""))
@@ -435,21 +501,29 @@ class ArPathViewerNode(Node):
             try:
                 key_code = self._display_window.show_and_poll(frame)
             except (AttributeError, RuntimeError, cv2.error) as exc:
-                self.get_logger().warning(
+                self._log_warning(
                     f"OpenCV display failed; recording continues: {exc}"
                 )
                 self._display = False
                 if self._display_window is not None:
                     self._display_window.close()
             else:
+                consume_actions = getattr(
+                    self._display_window, "consume_actions", lambda: []
+                )
+                for action in consume_actions():
+                    self._handle_display_action(action)
                 if is_exit_key(key_code):
                     self._request_shutdown("keyboard q/Q/F10")
+        log_gui = getattr(self, "_log_gui", None)
+        if log_gui is not None:
+            log_gui.poll()
 
     def _request_shutdown(self, reason: str) -> None:
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
-        self.get_logger().info(f"AR Path Viewer shutdown requested: {reason}")
+        self._log_info(f"AR Path Viewer shutdown requested: {reason}")
         self._release_resources()
         shutdown_ros_context()
 
@@ -463,6 +537,12 @@ class ArPathViewerNode(Node):
             self._writer = None
         if self._display_window is not None:
             self._display_window.close()
+        log_gui = getattr(self, "_log_gui", None)
+        if log_gui is not None:
+            log_gui.close()
+        session_log = getattr(self, "_session_log", None)
+        if session_log is not None:
+            session_log.close()
 
     def destroy_node(self):
         self._release_resources()
@@ -483,7 +563,12 @@ def main(args=None) -> None:
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node._log_info("AR Path Viewer shutdown requested: Ctrl+C")
+    except Exception as exc:
+        node._log_error(
+            f"Unhandled exception: {type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        )
+        raise
     finally:
         node.destroy_node()
         shutdown_ros_context()
