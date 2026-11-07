@@ -73,35 +73,112 @@ def _draw_button_label(
     fallback: str,
 ) -> None:
     x1, top, x2, bottom = rectangle
+    button_width = max(1, x2 - x1)
+    button_height = max(1, bottom - top)
+    font_height = max(12, min(22, button_height - 16))
     font = _japanese_font()
     if font is not None:
-        font_height = max(14, min(20, bottom - top - 14))
         try:
-            (text_width, text_height), baseline = font.getTextSize(
-                japanese, font_height, -1
-            )
-            origin = (
-                x1 + max(2, (x2 - x1 - text_width) // 2),
-                top + max(text_height + baseline, (bottom - top + text_height) // 2),
-            )
-            font.putText(
-                canvas, japanese, origin, font_height, (245, 245, 245),
-                -1, cv2.LINE_AA, False,
+            mask = _freetype_text_mask(japanese, font_height)
+            _paint_centered_mask(
+                canvas, rectangle, mask, (245, 245, 245)
             )
             return
         except (AttributeError, RuntimeError, cv2.error):
             pass
-    (text_width, text_height), _ = cv2.getTextSize(
-        fallback, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+    mask = _hershey_text_mask(fallback, font_height)
+    _paint_centered_mask(
+        canvas, (x1, top, x1 + button_width, top + button_height),
+        mask, (245, 245, 245),
     )
-    origin = (
-        x1 + max(2, (x2 - x1 - text_width) // 2),
-        top + max(text_height + 2, (bottom - top + text_height) // 2),
+
+
+@lru_cache(maxsize=16)
+def _freetype_text_mask(text: str, font_height: int) -> np.ndarray:
+    """Rasterize and crop actual ink so ascenders/descenders center correctly."""
+    font = _japanese_font()
+    if font is None:
+        raise RuntimeError("Japanese FreeType font is unavailable")
+    (text_width, text_height), baseline = font.getTextSize(text, font_height, -1)
+    padding = max(4, font_height)
+    image = np.zeros(
+        (
+            max(1, text_height + baseline + padding * 3),
+            max(1, text_width + padding * 2),
+            3,
+        ),
+        dtype=np.uint8,
+    )
+    font.putText(
+        image, text, (padding, padding), font_height, (255, 255, 255),
+        -1, cv2.LINE_AA, False,
+    )
+    mask = np.max(image, axis=2)
+    return _crop_nonzero(mask)
+
+
+@lru_cache(maxsize=16)
+def _hershey_text_mask(text: str, font_height: int) -> np.ndarray:
+    """Rasterize the ASCII fallback and crop its real baseline-dependent bounds."""
+    font_scale = max(0.38, float(font_height) / 34.0)
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+    )
+    padding = 4
+    image = np.zeros(
+        (
+            max(1, text_height + baseline + padding * 2),
+            max(1, text_width + padding * 2),
+        ),
+        dtype=np.uint8,
     )
     cv2.putText(
-        canvas, fallback, origin, cv2.FONT_HERSHEY_SIMPLEX,
-        0.55, (245, 245, 245), 1, cv2.LINE_AA,
+        image, text, (padding, padding + text_height),
+        cv2.FONT_HERSHEY_SIMPLEX, font_scale, 255, 1, cv2.LINE_AA,
     )
+    return _crop_nonzero(image)
+
+
+def _crop_nonzero(mask: np.ndarray) -> np.ndarray:
+    rows, columns = np.nonzero(mask)
+    if rows.size == 0:
+        return np.ones((1, 1), dtype=np.uint8) * 255
+    return mask[rows.min():rows.max() + 1, columns.min():columns.max() + 1].copy()
+
+
+def _paint_centered_mask(
+    canvas: np.ndarray,
+    rectangle: tuple[int, int, int, int],
+    mask: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    """Center measured glyph ink in both axes, scaling down only when necessary."""
+    x1, top, x2, bottom = rectangle
+    available_width = max(1, x2 - x1 - 8)
+    available_height = max(1, bottom - top - 8)
+    scale = min(
+        1.0,
+        available_width / max(1, mask.shape[1]),
+        available_height / max(1, mask.shape[0]),
+    )
+    if scale < 1.0:
+        mask = cv2.resize(
+            mask,
+            (
+                max(1, int(round(mask.shape[1] * scale))),
+                max(1, int(round(mask.shape[0] * scale))),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+    left = x1 + (x2 - x1 - mask.shape[1]) // 2
+    y = top + (bottom - top - mask.shape[0]) // 2
+    region = canvas[y:y + mask.shape[0], left:left + mask.shape[1]]
+    alpha = mask.astype(np.uint16)[..., None]
+    foreground = np.asarray(color, dtype=np.uint16).reshape(1, 1, 3)
+    blended = (
+        region.astype(np.uint16) * (255 - alpha) + foreground * alpha + 127
+    ) // 255
+    region[:] = blended.astype(np.uint8)
 
 
 def compose_display_frame(
@@ -126,7 +203,7 @@ def compose_display_frame(
 
     margin = max(6, min(16, width // 30))
     gap = max(6, min(14, width // 50))
-    button_height = max(24, bar_height - 18)
+    button_height = max(28, bar_height - 12)
     button_width = max(90, min(170, (width - margin * 2 - gap) // 3))
     y1 = video_height + max(4, (bar_height - button_height) // 2)
     y2 = min(height - 4, y1 + button_height)
@@ -183,8 +260,14 @@ class DisplayWindow:
         self._status_text = ""
         self._status_success = True
         self._status_until = 0.0
-        flags = getattr(self.cv, "WINDOW_NORMAL", 0) | getattr(
-            self.cv, "WINDOW_KEEPRATIO", 0
+        self._normal_resize_attempts = 0
+        # The frame is already resized and letterboxed by compose_display_frame().
+        # Qt must fill its complete image viewport, otherwise KEEPRATIO applies a
+        # second letterbox and the expanded GUI adds a toolbar around that result.
+        flags = (
+            getattr(self.cv, "WINDOW_NORMAL", 0)
+            | getattr(self.cv, "WINDOW_FREERATIO", 0)
+            | getattr(self.cv, "WINDOW_GUI_NORMAL", 0)
         )
         self.cv.namedWindow(WINDOW_NAME, flags)
         self.cv.resizeWindow(WINDOW_NAME, *self.normal_size)
@@ -234,13 +317,24 @@ class DisplayWindow:
                 WINDOW_NAME, getattr(self.cv, "WND_PROP_FULLSCREEN", 0), value
             )
             if not target:
-                self.cv.resizeWindow(WINDOW_NAME, *self.normal_size)
+                # Qt applies the fullscreen transition asynchronously. Retrying
+                # from subsequent frames avoids a resize request being discarded.
+                self._normal_resize_attempts = 3
+            else:
+                self._normal_resize_attempts = 0
         except (AttributeError, RuntimeError, cv2.error):
             return False
         self.fullscreen = target
         return True
 
     def show_and_poll(self, frame: np.ndarray) -> int:
+        if self._normal_resize_attempts > 0:
+            try:
+                self.cv.resizeWindow(WINDOW_NAME, *self.normal_size)
+            except (AttributeError, RuntimeError, cv2.error):
+                self._normal_resize_attempts = 0
+            else:
+                self._normal_resize_attempts -= 1
         width, height = self._image_rect_size()
         if self._clock() >= self._status_until:
             self._status_text = ""

@@ -1,9 +1,8 @@
-from pathlib import Path
-
 import cv2
 import numpy as np
 import pytest
 
+from ar_path_viewer import display_window
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.display_window import (
     ACTION_COPY_LOG,
@@ -107,9 +106,68 @@ def test_display_control_bar_is_below_video_and_does_not_change_source():
     assert np.any(display[650:] != 0)
 
 
+@pytest.mark.parametrize(
+    "window_size",
+    ((480, 360), (960, 720), (1280, 1024), (1920, 1080)),
+)
+def test_display_fills_small_large_and_fullscreen_viewports(window_size):
+    width, height = window_size
+    color = np.asarray((17, 83, 141), dtype=np.uint8)
+    frame = np.empty((480, 640, 3), dtype=np.uint8)
+    frame[:] = color
+    display, _ = compose_display_frame(frame, width, height)
+    video_height = height - 64
+    mask = np.all(display[:video_height] == color, axis=2)
+    rows, columns = np.nonzero(mask)
+    expected_scale = min(width / 640.0, video_height / 480.0)
+    expected_width = int(round(640 * expected_scale))
+    expected_height = int(round(480 * expected_scale))
+    assert columns.max() - columns.min() + 1 == expected_width
+    assert rows.max() - rows.min() + 1 == expected_height
+    # Exactly one axis must consume the available viewport: there is no
+    # additional HighGUI-style scaling or a second letterbox in this canvas.
+    assert expected_width == width or expected_height == video_height
+
+
+@pytest.mark.parametrize("window_size", ((480, 360), (960, 720), (1920, 1080)))
+def test_log_button_text_is_centered_and_not_clipped(window_size):
+    display, rectangles = compose_display_frame(
+        np.zeros((480, 640, 3), np.uint8), *window_size
+    )
+    for x1, y1, x2, y2 in rectangles.values():
+        assert y2 - y1 == 52
+        # The button fill and border remain below 200; this isolates label ink.
+        region = display[y1 + 1:y2, x1 + 1:x2]
+        rows, columns = np.nonzero(np.min(region, axis=2) > 200)
+        assert rows.size > 0
+        text_center_x = x1 + 1 + (columns.min() + columns.max()) / 2.0
+        text_center_y = y1 + 1 + (rows.min() + rows.max()) / 2.0
+        assert abs(text_center_x - (x1 + x2) / 2.0) <= 2.0
+        assert abs(text_center_y - (y1 + y2) / 2.0) <= 1.0
+        assert rows.min() >= 1
+        assert rows.max() <= region.shape[0] - 2
+
+
+def test_ascii_fallback_text_is_also_centered(monkeypatch):
+    monkeypatch.setattr(display_window, "_japanese_font", lambda: None)
+    display, rectangles = compose_display_frame(
+        np.zeros((480, 640, 3), np.uint8), 960, 720
+    )
+    for x1, y1, x2, y2 in rectangles.values():
+        region = display[y1 + 1:y2, x1 + 1:x2]
+        rows, columns = np.nonzero(np.min(region, axis=2) > 200)
+        assert rows.size > 0
+        text_center_x = x1 + 1 + (columns.min() + columns.max()) / 2.0
+        text_center_y = y1 + 1 + (rows.min() + rows.max()) / 2.0
+        assert abs(text_center_x - (x1 + x2) / 2.0) <= 2.0
+        assert abs(text_center_y - (y1 + y2) / 2.0) <= 1.0
+
+
 class FakeHighGui:
     WINDOW_NORMAL = 0
     WINDOW_KEEPRATIO = 0
+    WINDOW_FREERATIO = 0x100
+    WINDOW_GUI_NORMAL = 0x10
     WINDOW_FULLSCREEN = 1
     WND_PROP_FULLSCREEN = 0
     EVENT_LBUTTONUP = 4
@@ -122,6 +180,7 @@ class FakeHighGui:
         self.shown = []
         self.destroyed = []
         self.mouse_callback = None
+        self.image_rect = (0, 0, 1000, 600)
 
     def namedWindow(self, name, flags):
         self.named.append((name, flags))
@@ -130,7 +189,7 @@ class FakeHighGui:
         self.resized.append((name, width, height))
 
     def getWindowImageRect(self, name):
-        return (0, 0, 1000, 600)
+        return self.image_rect
 
     def imshow(self, name, frame):
         self.shown.append((name, frame.copy()))
@@ -161,11 +220,34 @@ def test_resizable_window_f11_toggle_and_q_passthrough():
     assert not window.fullscreen
     assert window.show_and_poll(frame) == ord("q")
     assert gui.shown[-1][1].shape == (600, 1000, 3)
+    assert gui.named[0][1] == gui.WINDOW_FREERATIO | gui.WINDOW_GUI_NORMAL
     assert gui.resized[0][1:] == (960, 720)
     assert gui.resized[-1][1:] == (960, 720)
     window.close()
     window.close()
     assert len(gui.destroyed) == 1
+
+
+def test_resized_highgui_viewport_drives_entire_display_canvas():
+    gui = FakeHighGui((-1, -1))
+    window = DisplayWindow(960, 720, cv_module=gui)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    window.show_and_poll(frame)
+    assert gui.shown[-1][1].shape == (600, 1000, 3)
+    gui.image_rect = (40, 50, 1600, 900)
+    window.show_and_poll(frame)
+    assert gui.shown[-1][1].shape == (900, 1600, 3)
+
+
+def test_fullscreen_restore_retries_normal_size_for_asynchronous_qt():
+    gui = FakeHighGui((-1, -1, -1))
+    window = DisplayWindow(960, 720, cv_module=gui)
+    assert window.toggle_fullscreen()
+    assert window.toggle_fullscreen()
+    frame = np.zeros((480, 640, 3), np.uint8)
+    for _ in range(3):
+        window.show_and_poll(frame)
+    assert gui.resized == [("AR Path Viewer", 960, 720)] * 4
 
 
 def test_log_buttons_emit_mouse_actions_without_affecting_keys():
