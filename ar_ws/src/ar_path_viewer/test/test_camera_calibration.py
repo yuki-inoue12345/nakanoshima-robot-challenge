@@ -10,10 +10,14 @@ from ar_path_viewer.calibration_tool import (
     OPTICAL_FROM_CAMERA_BODY,
     _rotation_from_mount,
     build_argument_parser,
+    characterize_calibration_frame,
     compare_projection,
     detect_checkerboard,
     estimate_extrinsics,
+    extract_calibration_video_frames,
     export_runtime_overlay,
+    record_calibration_video,
+    select_diverse_calibration_frames,
 )
 from ar_path_viewer.camera_model import CameraUndistorter
 from ar_path_viewer.projection import CameraIntrinsics
@@ -29,6 +33,35 @@ def intrinsics_result(distortion=None):
         ],
         "distortion_coefficients": distortion or [0.0] * 5,
     }
+
+
+def synthetic_checkerboard_frame(quad=None, blur=0):
+    square = 36
+    board = np.zeros((7 * square, 10 * square), np.uint8)
+    for row in range(7):
+        for column in range(10):
+            if (row + column) % 2 == 0:
+                board[
+                    row * square:(row + 1) * square,
+                    column * square:(column + 1) * square,
+                ] = 255
+    if quad is None:
+        quad = ((140, 100), (500, 110), (490, 360), (130, 350))
+    source = np.float32([
+        (0, 0), (board.shape[1] - 1, 0),
+        (board.shape[1] - 1, board.shape[0] - 1),
+        (0, board.shape[0] - 1),
+    ])
+    transform = cv2.getPerspectiveTransform(source, np.float32(quad))
+    canvas = np.full((480, 640), 127, np.uint8)
+    warped = cv2.warpPerspective(board, transform, (640, 480), borderValue=127)
+    mask = cv2.warpPerspective(
+        np.full_like(board, 255), transform, (640, 480), borderValue=0
+    )
+    canvas[mask > 0] = warped[mask > 0]
+    if blur:
+        canvas = cv2.GaussianBlur(canvas, (blur, blur), 0)
+    return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
 
 
 def test_checkerboard_detector_finds_9_by_6_inner_corners():
@@ -50,6 +83,125 @@ def test_checkerboard_detector_finds_9_by_6_inner_corners():
     assert corners.shape == (54, 1, 2)
 
 
+def test_video_frame_characterization_measures_blur_pose_and_board_size():
+    sharp = synthetic_checkerboard_frame()
+    blurred = synthetic_checkerboard_frame(blur=21)
+    sharp_corners = detect_checkerboard(sharp, 9, 6)
+    blurred_corners = detect_checkerboard(blurred, 9, 6)
+    sharp_result = characterize_calibration_frame(
+        sharp, sharp_corners, 9, 6, 10, 0.5
+    )
+    blurred_result = characterize_calibration_frame(
+        blurred, blurred_corners, 9, 6, 11, 0.55
+    )
+    assert sharp_result.area_ratio > 0.10
+    assert 0.3 < sharp_result.center_x < 0.7
+    assert sharp_result.sharpness > blurred_result.sharpness * 10.0
+
+
+def test_diversity_selection_rejects_nearly_identical_compositions():
+    frames = [
+        synthetic_checkerboard_frame(),
+        synthetic_checkerboard_frame(),
+        synthetic_checkerboard_frame(
+            ((30, 30), (330, 60), (300, 280), (50, 260))
+        ),
+        synthetic_checkerboard_frame(
+            ((300, 160), (610, 100), (590, 390), (280, 350))
+        ),
+    ]
+    candidates = []
+    for index, image in enumerate(frames):
+        corners = detect_checkerboard(image, 9, 6)
+        candidates.append(characterize_calibration_frame(
+            image, corners, 9, 6, index, index / 20.0
+        ))
+    selected = select_diverse_calibration_frames(
+        candidates, target_images=4, min_diversity_distance=0.05
+    )
+    assert len(selected) == 3
+    assert {item.frame_index for item in selected} != {0, 1}
+
+
+def test_saved_video_is_detected_deduplicated_and_exported_as_png(tmp_path):
+    video = tmp_path / "board.avi"
+    writer = cv2.VideoWriter(
+        str(video), cv2.VideoWriter_fourcc(*"MJPG"), 20.0, (640, 480)
+    )
+    assert writer.isOpened()
+    quads = (
+        ((140, 100), (500, 110), (490, 360), (130, 350)),
+        ((30, 30), (330, 60), (300, 280), (50, 260)),
+        ((300, 160), (610, 100), (590, 390), (280, 350)),
+        ((130, 180), (480, 110), (520, 350), (160, 390)),
+    )
+    for quad in quads:
+        frame = synthetic_checkerboard_frame(quad)
+        for _ in range(3):
+            writer.write(frame)
+    blurred = synthetic_checkerboard_frame(blur=21)
+    writer.write(blurred)
+    writer.write(blurred)
+    writer.release()
+
+    recorded = tmp_path / "recorded.mp4"
+    recording = record_calibration_video(
+        str(video), recorded, fps=20.0, duration_sec=0.001, display=False
+    )
+    assert recording["width"] == 640
+    assert recording["height"] == 480
+    assert recording["fps"] == 20.0
+    assert recording["frames_written"] >= 1
+    recorded_capture = cv2.VideoCapture(str(recorded))
+    ok, recorded_frame = recorded_capture.read()
+    recorded_capture.release()
+    assert ok
+    assert recorded_frame.shape[:2] == (480, 640)
+
+    output_dir = tmp_path / "selected"
+    report_path = tmp_path / "selection.yaml"
+    report = extract_calibration_video_frames(
+        video,
+        output_dir,
+        report_path,
+        target_images=8,
+        minimum_images=3,
+        analysis_fps=20.0,
+        min_diversity_distance=0.03,
+    )
+    assert 3 <= report["selected_count"] <= len(quads)
+    assert report["analysis"]["accepted_candidates"] == 12
+    assert report["analysis"]["blurred"] == 2
+    assert report["checkerboard"]["inner_columns"] == 9
+    assert report["checkerboard"]["inner_rows"] == 6
+    assert report["checkerboard"]["square_size_m"] == 0.020
+    assert report["missing_compositions"]
+    assert any(
+        "board position missing" in item
+        for item in report["missing_compositions"]
+    )
+    assert len(list(output_dir.glob("*.png"))) == report["selected_count"]
+    assert yaml.safe_load(report_path.read_text(encoding="utf-8"))[
+        "selected_count"
+    ] == report["selected_count"]
+
+    blocked_report = tmp_path / "blocked_selection.yaml"
+    blocked_intrinsics = tmp_path / "must_not_exist.yaml"
+    with pytest.raises(ValueError, match="coverage is insufficient"):
+        extract_calibration_video_frames(
+            video,
+            tmp_path / "blocked_selected",
+            blocked_report,
+            target_images=8,
+            minimum_images=8,
+            analysis_fps=20.0,
+            min_diversity_distance=0.03,
+            intrinsics_output=blocked_intrinsics,
+        )
+    assert blocked_report.exists()
+    assert not blocked_intrinsics.exists()
+
+
 def test_intrinsics_cli_defaults_match_actual_10_by_7_board_with_20mm_squares():
     args = build_argument_parser().parse_args([
         "intrinsics",
@@ -59,6 +211,24 @@ def test_intrinsics_cli_defaults_match_actual_10_by_7_board_with_20mm_squares():
     assert args.inner_columns == DEFAULT_CHECKERBOARD_INNER_COLUMNS == 9
     assert args.inner_rows == DEFAULT_CHECKERBOARD_INNER_ROWS == 6
     assert args.square_size_m == DEFAULT_CHECKERBOARD_SQUARE_SIZE_M == 0.020
+
+
+def test_video_cli_defaults_record_20fps_and_select_30_to_40_images():
+    parser = build_argument_parser()
+    record = parser.parse_args([
+        "record-video", "--device", "0", "--output", "board.mp4",
+    ])
+    extract = parser.parse_args([
+        "extract-video",
+        "--video", "board.mp4",
+        "--output-dir", "selected",
+        "--report", "selection.yaml",
+    ])
+    assert record.fps == 20.0
+    assert record.duration_sec == 90.0
+    assert extract.target_images == 36
+    assert extract.min_images == 30
+    assert extract.analysis_fps == 4.0
 
 
 def test_undistorter_preserves_640_by_480_and_provides_effective_intrinsics():

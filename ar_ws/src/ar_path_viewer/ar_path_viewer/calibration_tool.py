@@ -1,6 +1,7 @@
 """Offline C920 calibration and before/after projection comparison tools."""
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 import glob
 import math
@@ -24,6 +25,33 @@ OPTICAL_FROM_CAMERA_BODY = np.array(
 DEFAULT_CHECKERBOARD_INNER_COLUMNS = 9
 DEFAULT_CHECKERBOARD_INNER_ROWS = 6
 DEFAULT_CHECKERBOARD_SQUARE_SIZE_M = 0.020
+
+
+@dataclass(frozen=True)
+class CalibrationFrameCandidate:
+    frame_index: int
+    timestamp_sec: float
+    sharpness: float
+    area_ratio: float
+    center_x: float
+    center_y: float
+    rotation_deg: float
+    perspective_x: float
+    perspective_y: float
+    descriptor: tuple[float, ...]
+
+    def report(self) -> dict[str, float | int]:
+        return {
+            "frame_index": self.frame_index,
+            "timestamp_sec": round(self.timestamp_sec, 3),
+            "sharpness": round(self.sharpness, 3),
+            "area_ratio": round(self.area_ratio, 6),
+            "center_x": round(self.center_x, 5),
+            "center_y": round(self.center_y, 5),
+            "rotation_deg": round(self.rotation_deg, 3),
+            "perspective_x": round(self.perspective_x, 5),
+            "perspective_y": round(self.perspective_y, 5),
+        }
 
 
 def _read_yaml(path: Path) -> Any:
@@ -85,6 +113,176 @@ def detect_checkerboard(
                 gray, candidate, (11, 11), (-1, -1), criteria
             )
     return None if corners is None else np.asarray(corners, dtype=np.float32)
+
+
+def _normalize_board_rotation(angle_rad: float) -> float:
+    while angle_rad >= math.pi / 2.0:
+        angle_rad -= math.pi
+    while angle_rad < -math.pi / 2.0:
+        angle_rad += math.pi
+    return angle_rad
+
+
+def characterize_calibration_frame(
+    image: np.ndarray,
+    corners: np.ndarray,
+    columns: int,
+    rows: int,
+    frame_index: int,
+    timestamp_sec: float,
+) -> CalibrationFrameCandidate:
+    if image.shape[:2] != (480, 640):
+        raise ValueError("calibration video frames must be 640x480")
+    grid = np.asarray(corners, dtype=float).reshape(rows, columns, 2)
+    if not np.isfinite(grid).all():
+        raise ValueError("checkerboard corners contain NaN or Inf")
+    flat = grid.reshape(-1, 2).astype(np.float32)
+    hull = cv2.convexHull(flat)
+    area_ratio = float(cv2.contourArea(hull) / (image.shape[0] * image.shape[1]))
+    center = np.mean(flat, axis=0)
+
+    minimum = np.maximum(np.floor(np.min(flat, axis=0)).astype(int) - 8, 0)
+    maximum = np.minimum(
+        np.ceil(np.max(flat, axis=0)).astype(int) + 9,
+        np.array((image.shape[1], image.shape[0])),
+    )
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    crop = gray[minimum[1]:maximum[1], minimum[0]:maximum[0]]
+    sharpness = 0.0 if crop.size == 0 else float(cv2.Laplacian(
+        crop, cv2.CV_64F
+    ).var())
+
+    top_left = grid[0, 0]
+    top_right = grid[0, -1]
+    bottom_left = grid[-1, 0]
+    bottom_right = grid[-1, -1]
+    top_length = max(1e-9, float(np.linalg.norm(top_right - top_left)))
+    bottom_length = max(1e-9, float(np.linalg.norm(bottom_right - bottom_left)))
+    left_length = max(1e-9, float(np.linalg.norm(bottom_left - top_left)))
+    right_length = max(1e-9, float(np.linalg.norm(bottom_right - top_right)))
+    row_vector = np.mean(grid[:, -1] - grid[:, 0], axis=0)
+    rotation_rad = _normalize_board_rotation(math.atan2(
+        float(row_vector[1]), float(row_vector[0])
+    ))
+    perspective_x = math.log(left_length / right_length)
+    perspective_y = math.log(top_length / bottom_length)
+    center_x = float(center[0] / image.shape[1])
+    center_y = float(center[1] / image.shape[0])
+    descriptor = (
+        center_x * 1.5,
+        center_y * 1.5,
+        math.log(max(area_ratio, 1e-9)) * 0.22,
+        rotation_rad / math.radians(35.0),
+        perspective_x * 2.0,
+        perspective_y * 2.0,
+    )
+    return CalibrationFrameCandidate(
+        frame_index=int(frame_index),
+        timestamp_sec=float(timestamp_sec),
+        sharpness=sharpness,
+        area_ratio=area_ratio,
+        center_x=center_x,
+        center_y=center_y,
+        rotation_deg=math.degrees(rotation_rad),
+        perspective_x=perspective_x,
+        perspective_y=perspective_y,
+        descriptor=tuple(float(value) for value in descriptor),
+    )
+
+
+def select_diverse_calibration_frames(
+    candidates: Sequence[CalibrationFrameCandidate],
+    target_images: int = 36,
+    min_diversity_distance: float = 0.08,
+) -> list[CalibrationFrameCandidate]:
+    if target_images < 3:
+        raise ValueError("target_images must be at least three")
+    if min_diversity_distance <= 0.0 or not math.isfinite(min_diversity_distance):
+        raise ValueError("min_diversity_distance must be finite and positive")
+    remaining = list(candidates)
+    if not remaining:
+        return []
+    first = max(
+        remaining,
+        key=lambda item: item.sharpness * math.sqrt(max(item.area_ratio, 1e-9)),
+    )
+    selected = [first]
+    remaining.remove(first)
+    while remaining and len(selected) < target_images:
+        best = None
+        best_distance = -1.0
+        for candidate in remaining:
+            vector = np.asarray(candidate.descriptor)
+            distance = min(float(np.linalg.norm(
+                vector - np.asarray(existing.descriptor)
+            )) for existing in selected)
+            if distance > best_distance:
+                best = candidate
+                best_distance = distance
+        if best is None or best_distance < min_diversity_distance:
+            break
+        selected.append(best)
+        remaining.remove(best)
+    return sorted(selected, key=lambda item: item.frame_index)
+
+
+def _composition_report(
+    selected: Sequence[CalibrationFrameCandidate],
+    minimum_images: int,
+) -> tuple[dict[str, Any], list[str]]:
+    locations = {
+        "left": sum(item.center_x < 0.35 for item in selected),
+        "right": sum(item.center_x > 0.65 for item in selected),
+        "top": sum(item.center_y < 0.35 for item in selected),
+        "bottom": sum(item.center_y > 0.65 for item in selected),
+        "center": sum(
+            0.35 <= item.center_x <= 0.65
+            and 0.35 <= item.center_y <= 0.65
+            for item in selected
+        ),
+    }
+    scales = {
+        "near_large": sum(item.area_ratio >= 0.060 for item in selected),
+        "middle": sum(0.020 <= item.area_ratio < 0.060 for item in selected),
+        "far_small": sum(item.area_ratio < 0.020 for item in selected),
+    }
+    orientations = {
+        "frontal": sum(
+            max(abs(item.perspective_x), abs(item.perspective_y)) < 0.08
+            for item in selected
+        ),
+        "perspective_tilted": sum(
+            max(abs(item.perspective_x), abs(item.perspective_y)) >= 0.12
+            for item in selected
+        ),
+        "clockwise_roll": sum(item.rotation_deg >= 10.0 for item in selected),
+        "counterclockwise_roll": sum(item.rotation_deg <= -10.0 for item in selected),
+    }
+    missing = []
+    if len(selected) < minimum_images:
+        missing.append(
+            f"usable diverse frames: need {minimum_images}, got {len(selected)}"
+        )
+    for name, count in locations.items():
+        if count == 0:
+            missing.append(f"board position missing: {name}")
+    for name, count in scales.items():
+        if count == 0:
+            missing.append(f"apparent distance/size missing: {name}")
+    if orientations["frontal"] == 0:
+        missing.append("orientation missing: frontal board")
+    if orientations["perspective_tilted"] == 0:
+        missing.append("orientation missing: perspective-tilted board")
+    if (
+        orientations["clockwise_roll"] == 0
+        or orientations["counterclockwise_roll"] == 0
+    ):
+        missing.append("orientation missing: both clockwise and counterclockwise roll")
+    return {
+        "positions": locations,
+        "apparent_sizes": scales,
+        "orientations": orientations,
+    }, missing
 
 
 def calibrate_intrinsics(
@@ -474,12 +672,305 @@ def compare_projection(
         raise OSError(f"failed to write comparison: {output_path}")
 
 
-def capture_images(device: str, output_dir: Path, fps: float) -> int:
+def _video_source(device: str) -> int | str:
     try:
-        source: int | str = int(device)
+        return int(device)
     except ValueError:
-        source = device
-    capture = cv2.VideoCapture(source)
+        return device
+
+
+def _is_exit_key(key: int) -> bool:
+    low = key & 0xFF
+    return low in (ord("q"), ord("Q")) or key in (
+        0x00790000, 0x0000FFC7, 0x01000039,
+    )
+
+
+def record_calibration_video(
+    device: str,
+    output_path: Path,
+    fps: float = 20.0,
+    duration_sec: float = 90.0,
+    display: bool = True,
+) -> dict[str, Any]:
+    if output_path.exists():
+        raise FileExistsError(f"refusing to overwrite existing video: {output_path}")
+    if fps <= 0.0 or not math.isfinite(fps):
+        raise ValueError("video fps must be finite and positive")
+    if duration_sec < 0.0 or not math.isfinite(duration_sec):
+        raise ValueError("duration_sec must be finite and non-negative")
+    if not display and duration_sec <= 0.0:
+        raise ValueError("headless recording requires a positive duration_sec")
+    capture = cv2.VideoCapture(_video_source(device))
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    capture.set(cv2.CAP_PROP_FPS, float(fps))
+    if not capture.isOpened():
+        capture.release()
+        raise OSError(f"cannot open camera: {device}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        float(fps),
+        (640, 480),
+    )
+    if not writer.isOpened():
+        capture.release()
+        writer.release()
+        raise OSError(f"cannot open calibration video writer: {output_path}")
+    window = "C920 calibration video - move board, Q/F10 exit"
+    frame_count = 0
+    start = cv2.getTickCount() / cv2.getTickFrequency()
+    if display:
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    try:
+        while True:
+            ok, image = capture.read()
+            if not ok or image is None:
+                raise OSError("camera stopped while recording calibration video")
+            if image.shape[:2] != (480, 640):
+                image = cv2.resize(image, (640, 480))
+            writer.write(image)
+            frame_count += 1
+            elapsed = cv2.getTickCount() / cv2.getTickFrequency() - start
+            if display:
+                preview = image.copy()
+                cv2.putText(
+                    preview,
+                    f"REC {elapsed:05.1f}s  10x7 squares / 20mm",
+                    (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow(window, preview)
+                # Camera reads pace the loop; a second frame-period wait would
+                # reduce a 20 fps capture to roughly 10 fps.
+                if _is_exit_key(cv2.waitKeyEx(1)):
+                    break
+            if duration_sec > 0.0 and elapsed >= duration_sec:
+                break
+    finally:
+        writer.release()
+        capture.release()
+        if display:
+            cv2.destroyWindow(window)
+    return {
+        "output_video": str(output_path),
+        "width": 640,
+        "height": 480,
+        "fps": float(fps),
+        "frames_written": frame_count,
+        "duration_sec": frame_count / float(fps),
+    }
+
+
+def analyze_calibration_video(
+    video_path: Path,
+    analysis_fps: float = 4.0,
+    sharpness_threshold: float = 80.0,
+    minimum_area_ratio: float = 0.006,
+) -> tuple[list[CalibrationFrameCandidate], dict[str, Any]]:
+    if analysis_fps <= 0.0 or not math.isfinite(analysis_fps):
+        raise ValueError("analysis_fps must be finite and positive")
+    if sharpness_threshold < 0.0 or not math.isfinite(sharpness_threshold):
+        raise ValueError("sharpness_threshold must be finite and non-negative")
+    if not 0.0 < minimum_area_ratio < 1.0:
+        raise ValueError("minimum_area_ratio must be between zero and one")
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        capture.release()
+        raise OSError(f"cannot open calibration video: {video_path}")
+    source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    if not math.isfinite(source_fps) or source_fps <= 0.0:
+        source_fps = 20.0
+    sample_step = max(1, int(round(source_fps / analysis_fps)))
+    counts = {
+        "video_frames": 0,
+        "analyzed_frames": 0,
+        "checkerboard_not_found": 0,
+        "blurred": 0,
+        "board_too_small": 0,
+        "accepted_candidates": 0,
+    }
+    candidates = []
+    frame_index = 0
+    try:
+        while True:
+            ok, image = capture.read()
+            if not ok or image is None:
+                break
+            counts["video_frames"] += 1
+            if frame_index % sample_step != 0:
+                frame_index += 1
+                continue
+            counts["analyzed_frames"] += 1
+            if image.shape[:2] != (480, 640):
+                raise ValueError(
+                    f"calibration video must be 640x480, got "
+                    f"{image.shape[1]}x{image.shape[0]}"
+                )
+            corners = detect_checkerboard(
+                image,
+                DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+                DEFAULT_CHECKERBOARD_INNER_ROWS,
+            )
+            if corners is None:
+                counts["checkerboard_not_found"] += 1
+                frame_index += 1
+                continue
+            candidate = characterize_calibration_frame(
+                image,
+                corners,
+                DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+                DEFAULT_CHECKERBOARD_INNER_ROWS,
+                frame_index,
+                frame_index / source_fps,
+            )
+            if candidate.sharpness < sharpness_threshold:
+                counts["blurred"] += 1
+            elif candidate.area_ratio < minimum_area_ratio:
+                counts["board_too_small"] += 1
+            else:
+                candidates.append(candidate)
+            frame_index += 1
+    finally:
+        capture.release()
+    counts["accepted_candidates"] = len(candidates)
+    return candidates, {
+        "source_video": str(video_path),
+        "source_fps": source_fps,
+        "analysis_fps": min(source_fps, analysis_fps),
+        "sample_step_frames": sample_step,
+        **counts,
+    }
+
+
+def _save_selected_video_frames(
+    video_path: Path,
+    selected: Sequence[CalibrationFrameCandidate],
+    output_dir: Path,
+) -> list[Path]:
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"refusing to mix selected images into non-empty directory: {output_dir}"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_by_index = {item.frame_index: item for item in selected}
+    destinations = {
+        index: output_dir / (
+            f"selected_{order:03d}_frame_{index:07d}_"
+            f"{selected_by_index[index].timestamp_sec:08.3f}s.png"
+        )
+        for order, index in enumerate(sorted(selected_by_index), start=1)
+    }
+    existing = [path for path in destinations.values() if path.exists()]
+    if existing:
+        raise FileExistsError(f"refusing to overwrite selected image: {existing[0]}")
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        capture.release()
+        raise OSError(f"cannot reopen calibration video: {video_path}")
+    written = []
+    frame_index = 0
+    try:
+        while destinations and frame_index <= max(destinations):
+            ok, image = capture.read()
+            if not ok or image is None:
+                break
+            destination = destinations.get(frame_index)
+            if destination is not None:
+                if image.shape[:2] != (480, 640):
+                    raise ValueError("selected video frame is not 640x480")
+                if not cv2.imwrite(str(destination), image):
+                    raise OSError(f"failed to write selected image: {destination}")
+                written.append(destination)
+                del destinations[frame_index]
+            frame_index += 1
+    finally:
+        capture.release()
+    if destinations:
+        raise OSError(f"video ended before selected frames: {sorted(destinations)}")
+    return written
+
+
+def extract_calibration_video_frames(
+    video_path: Path,
+    output_dir: Path,
+    report_path: Path,
+    target_images: int = 36,
+    minimum_images: int = 30,
+    analysis_fps: float = 4.0,
+    sharpness_threshold: float = 80.0,
+    minimum_area_ratio: float = 0.006,
+    min_diversity_distance: float = 0.08,
+    intrinsics_output: Path | None = None,
+    preview_dir: Path | None = None,
+) -> dict[str, Any]:
+    if not minimum_images <= target_images:
+        raise ValueError("minimum_images must not exceed target_images")
+    candidates, analysis = analyze_calibration_video(
+        video_path,
+        analysis_fps,
+        sharpness_threshold,
+        minimum_area_ratio,
+    )
+    selected = select_diverse_calibration_frames(
+        candidates, target_images, min_diversity_distance
+    )
+    image_paths = _save_selected_video_frames(video_path, selected, output_dir)
+    coverage, missing = _composition_report(selected, minimum_images)
+    report: dict[str, Any] = {
+        "format_version": 1,
+        "selection_type": "checkerboard_video_diversity",
+        "checkerboard": {
+            "squares_across": 10,
+            "squares_down": 7,
+            "inner_columns": DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+            "inner_rows": DEFAULT_CHECKERBOARD_INNER_ROWS,
+            "square_size_m": DEFAULT_CHECKERBOARD_SQUARE_SIZE_M,
+        },
+        "selection_settings": {
+            "target_images": int(target_images),
+            "minimum_images": int(minimum_images),
+            "sharpness_threshold": float(sharpness_threshold),
+            "minimum_area_ratio": float(minimum_area_ratio),
+            "min_diversity_distance": float(min_diversity_distance),
+        },
+        "analysis": analysis,
+        "selected_count": len(selected),
+        "selected_images": [
+            {"path": str(path), **candidate.report()}
+            for path, candidate in zip(image_paths, selected)
+        ],
+        "coverage": coverage,
+        "missing_compositions": missing,
+        "ready_for_intrinsics": not missing,
+    }
+    _write_new_yaml(report_path, report)
+    if intrinsics_output is not None:
+        if missing:
+            raise ValueError(
+                f"video coverage is insufficient; review {report_path}: "
+                + "; ".join(missing)
+            )
+        result = calibrate_intrinsics(
+            image_paths,
+            DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+            DEFAULT_CHECKERBOARD_INNER_ROWS,
+            DEFAULT_CHECKERBOARD_SQUARE_SIZE_M,
+            minimum_images,
+            preview_dir,
+        )
+        _write_new_yaml(intrinsics_output, result)
+    return report
+
+
+def capture_images(device: str, output_dir: Path, fps: float) -> int:
+    capture = cv2.VideoCapture(_video_source(device))
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     capture.set(cv2.CAP_PROP_FPS, float(fps))
@@ -505,9 +996,7 @@ def capture_images(device: str, output_dir: Path, fps: float) -> int:
             cv2.imshow(window, display)
             key = cv2.waitKeyEx(20)
             low = key & 0xFF
-            if low in (ord("q"), ord("Q")) or key in (
-                0x00790000, 0x0000FFC7, 0x01000039,
-            ):
+            if _is_exit_key(key):
                 break
             if low in (ord("c"), ord("C"), ord(" ")):
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -611,6 +1100,26 @@ def build_argument_parser() -> argparse.ArgumentParser:
     capture.add_argument("--output-dir", type=Path, required=True)
     capture.add_argument("--fps", type=float, default=20.0)
 
+    record = commands.add_parser("record-video")
+    record.add_argument("--device", required=True)
+    record.add_argument("--output", type=Path, required=True)
+    record.add_argument("--fps", type=float, default=20.0)
+    record.add_argument("--duration-sec", type=float, default=90.0)
+    record.add_argument("--no-display", action="store_true")
+
+    extract = commands.add_parser("extract-video")
+    extract.add_argument("--video", type=Path, required=True)
+    extract.add_argument("--output-dir", type=Path, required=True)
+    extract.add_argument("--report", type=Path, required=True)
+    extract.add_argument("--target-images", type=int, default=36)
+    extract.add_argument("--min-images", type=int, default=30)
+    extract.add_argument("--analysis-fps", type=float, default=4.0)
+    extract.add_argument("--sharpness-threshold", type=float, default=80.0)
+    extract.add_argument("--minimum-area-ratio", type=float, default=0.006)
+    extract.add_argument("--min-diversity-distance", type=float, default=0.08)
+    extract.add_argument("--intrinsics-output", type=Path)
+    extract.add_argument("--preview-dir", type=Path)
+
     intrinsics = commands.add_parser("intrinsics")
     intrinsics.add_argument("--images", nargs="+", required=True)
     intrinsics.add_argument(
@@ -665,6 +1174,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "capture":
         count = capture_images(args.device, args.output_dir, args.fps)
         print(f"saved {count} calibration images")
+    elif args.command == "record-video":
+        result = record_calibration_video(
+            args.device,
+            args.output,
+            args.fps,
+            args.duration_sec,
+            not args.no_display,
+        )
+        print(yaml.safe_dump(result, sort_keys=False))
+    elif args.command == "extract-video":
+        result = extract_calibration_video_frames(
+            args.video,
+            args.output_dir,
+            args.report,
+            args.target_images,
+            args.min_images,
+            args.analysis_fps,
+            args.sharpness_threshold,
+            args.minimum_area_ratio,
+            args.min_diversity_distance,
+            args.intrinsics_output,
+            args.preview_dir,
+        )
+        print(
+            f"selected {result['selected_count']} images; "
+            f"ready_for_intrinsics={result['ready_for_intrinsics']}"
+        )
+        for missing in result["missing_compositions"]:
+            print(f"MISSING: {missing}")
     elif args.command == "intrinsics":
         paths = _expand_images(args.images)
         result = calibrate_intrinsics(

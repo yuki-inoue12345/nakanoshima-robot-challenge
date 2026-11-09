@@ -77,8 +77,62 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 
 1. ロボットを停止・固定し、AR ViewerとCamera V7を終了してC920の排他競合を避ける。人物検知の設定やCamera V7のファイルは変更しない。
 2. 実運用と同じデバイス、640×480、20 fps、同じフォーカス・露出条件を使用する。
-3. カメラには触れず、ボードを中央、四隅、上下左右端へ移動し、正面だけでなくyaw/pitchを約±20～35°傾ける。20 mm・A4ボードは遠距離では交点が小さくなるため、レンズから概ね0.35、0.5、0.7、0.9、1.2 mを混ぜ、1.5 mは交点が明瞭な場合だけ補助的に使用する。上向きC920の画面内へ入るようボードの高さを変え、ボード全体が写る画像を30～40枚保存する。
-4. 同じ姿勢の連写、強いブレ、反射、交点が画面外の画像を避け、少なくとも20枚が検出されることを確認する。
+3. カメラには触れず、ボードを中央、四隅、上下左右端へゆっくり移動し、正面だけでなくyaw/pitchを約±20～35°、時計・反時計方向にも傾ける。20 mm・A4ボードは遠距離では交点が小さくなるため、レンズから概ね0.35、0.5、0.7、0.9、1.2 mを混ぜ、1.5 mは交点が明瞭な場合だけ補助的に使用する。上向きC920の画面内へ入るようボードの高さを変える。
+4. 推奨方式では約90秒の動画を撮影し、自動抽出で30～40枚を選ぶ。ボードを急に振らず、各構図で一瞬静止するとブレ除外後の候補を確保しやすい。
+
+#### 推奨：動画撮影と自動選択
+
+実機NUCではC920の生フレームだけを640×480・20 fpsのMP4へ保存します。画面の`REC`文字はpreviewだけで動画には入りません。90秒に達するか、`q`、`Q`、`F10`で正常終了します。既存ファイルは上書きしません。
+
+```bash
+set -euo pipefail
+source /opt/ros/jazzy/setup.bash
+source /home/koko-chan-nuc/ar_navigation_project/install/setup.bash
+
+CALIB_ROOT=/home/koko-chan-nuc/ar_navigation_project/calibration
+mkdir -p "$CALIB_ROOT"
+
+ros2 run ar_path_viewer calibrate_camera record-video \
+  --device /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_66F7D3AF-video-index0 \
+  --output "$CALIB_ROOT/c920_640x480_20fps_board_10x7_20mm.mp4" \
+  --fps 20 --duration-sec 90
+```
+
+保存済み動画を開発PCへコピーした後、次の1コマンドで自動選択と内部校正を実行します。`extract-video`は初期値4 fpsで候補を調べ、交点検出失敗、Laplacian sharpnessが低いブレ画像、内側交点領域が画面の0.6%未満の小さすぎるボード、構図descriptorが近い重複画像を除外します。位置、見かけの大きさ、回転、台形歪みから多様な36枚を選びます。
+
+```bash
+set -euo pipefail
+source /opt/ros/jazzy/setup.bash
+source /home/inoue-yuki/care_patrol_ws/local_repositories/nakanoshima-robot-challenge/ar_ws/install/setup.bash
+
+CALIB_ROOT=/home/inoue-yuki/ar_navigation_project/calibration
+VIDEO="$CALIB_ROOT/c920_640x480_20fps_board_10x7_20mm.mp4"
+
+ros2 run ar_path_viewer calibrate_camera extract-video \
+  --video "$VIDEO" \
+  --output-dir "$CALIB_ROOT/selected_10x7_20mm" \
+  --report "$CALIB_ROOT/selection_10x7_20mm.yaml" \
+  --target-images 36 --min-images 30 \
+  --analysis-fps 4 \
+  --intrinsics-output "$CALIB_ROOT/intrinsics_10x7_20mm.yaml" \
+  --preview-dir "$CALIB_ROOT/corner_previews_10x7_20mm"
+```
+
+別の保存済みMP4/AVIも`--video`へ指定できますが、フレームは640×480でなければ拒否します。出力画像ディレクトリ、report、内部校正YAMLは新しいパスを使い、既存データや別セッションへ混在させません。
+
+`selection_10x7_20mm.yaml`には、解析・検出・ブレ・小さすぎるボード・採用候補の件数、選択フレーム時刻、sharpness、画面位置、面積、回転、台形歪みを保存します。さらに次の不足を`missing_compositions`へ列挙します。
+
+- 左・右・上・下・中央にボードがない
+- 近・中・遠に相当する見かけの大きさが不足
+- 正面または台形になる傾斜構図がない
+- 時計・反時計方向の傾きが揃っていない
+- 類似除外後の画像が30枚未満
+
+不足がある場合、PNGとreportは保存しますが、`--intrinsics-output`を指定した自動校正は停止します。reportに書かれた不足構図だけを追加撮影し、新しい出力先で再実行してください。閾値を下げて不十分な撮影を通すより、撮り直しを優先します。
+
+#### 従来方式：手動でPNGを保存
+
+従来の`capture`も維持しています。Spaceまたは`C`で保存し、`q`、`Q`、`F10`で終了します。
 
 ```bash
 source /opt/ros/jazzy/setup.bash
