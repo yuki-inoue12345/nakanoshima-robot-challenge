@@ -66,17 +66,18 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 ### 用意するもの
 
 - 9×6個の**内側交点**を持つ10×7マスのチェッカーボード
-- 1マス30.0 mmを目安に、A3相当の平らで反りにくい板へ100%倍率で固定したもの
+- 1マス実測20.0 mm、パターン部約200×140 mm、用紙全体約295×210 mm（A4相当）の実物ボード
+- 用紙を平らで反りにくい板へ固定したもの（C920とロボット側は動かさない）
 - 1 m以上を測れるレーザー距離計または巻尺、下げ振り、水平器
 - 外部校正用の、中心位置を5 mm程度以内で特定できる丸印を10～12点
 
-印刷後は複数のマスを実測し、1マスの実寸を`--square-size-m`へ入力します。30 mmと印刷しても実測が29.8 mmなら`0.0298`を使います。
+この実物では`--inner-columns 9 --inner-rows 6 --square-size-m 0.020`を使用します。`square-size`は用紙寸法や白黒パターン全体ではなく、隣接する内側交点間、すなわち白または黒1マスの一辺です。複数マスをまとめて測り、実寸が20.0 mmから明確に異なる場合だけ、測定値をm単位へ換算して指定します。
 
 ### 走行なしで行う内部校正
 
 1. ロボットを停止・固定し、AR ViewerとCamera V7を終了してC920の排他競合を避ける。人物検知の設定やCamera V7のファイルは変更しない。
 2. 実運用と同じデバイス、640×480、20 fps、同じフォーカス・露出条件を使用する。
-3. カメラには触れず、ボードを中央、四隅、上下左右端へ移動し、正面だけでなくyaw/pitchを約±20～35°傾ける。距離0.8、1.2、2.0、可能なら3.0 mを混ぜ、ボード全体が写る画像を30枚以上保存する。
+3. カメラには触れず、ボードを中央、四隅、上下左右端へ移動し、正面だけでなくyaw/pitchを約±20～35°傾ける。20 mm・A4ボードは遠距離では交点が小さくなるため、レンズから概ね0.35、0.5、0.7、0.9、1.2 mを混ぜ、1.5 mは交点が明瞭な場合だけ補助的に使用する。上向きC920の画面内へ入るようボードの高さを変え、ボード全体が写る画像を30～40枚保存する。
 4. 同じ姿勢の連写、強いブレ、反射、交点が画面外の画像を避け、少なくとも20枚が検出されることを確認する。
 
 ```bash
@@ -85,20 +86,24 @@ source /path/to/ar_ws/install/setup.bash
 
 ros2 run ar_path_viewer calibrate_camera capture \
   --device /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_XXXXXXXX-video-index0 \
-  --output-dir ~/ar_navigation_project/calibration/intrinsics \
+  --output-dir ~/ar_navigation_project/calibration/c920_640x480_board_10x7_20mm \
   --fps 20
 
 ros2 run ar_path_viewer calibrate_camera intrinsics \
-  --images "$HOME/ar_navigation_project/calibration/intrinsics/*.png" \
-  --inner-columns 9 --inner-rows 6 --square-size-m 0.030 \
+  --images "$HOME/ar_navigation_project/calibration/c920_640x480_board_10x7_20mm/*.png" \
+  --inner-columns 9 --inner-rows 6 --square-size-m 0.020 \
   --min-images 20 \
-  --preview-dir ~/ar_navigation_project/calibration/corner_previews \
-  --output ~/ar_navigation_project/calibration/intrinsics.yaml
+  --preview-dir ~/ar_navigation_project/calibration/corner_previews_10x7_20mm \
+  --output ~/ar_navigation_project/calibration/intrinsics_10x7_20mm.yaml
 ```
+
+`capture`はボード寸法を計算に使わず、取得フレームを必ず640×480 PNGとして保存します。寸法の混同を避けるため保存先名に`10x7_20mm`を含め、別寸法のボード画像を同じディレクトリへ混在させないでください。`intrinsics`の出力YAMLには、実際に使用した`inner_columns`、`inner_rows`、`square_size_m`が記録されます。
 
 RMSだけで採否を決めず、全previewで順序正しく交点を検出していることを目視します。目安は平均再投影誤差0.5 px以下、最大1 px以下ですが、超えた場合は画像構成やボードの平面性を見直し、値を無理に採用しません。
 
-### 走行なしで行う外部校正
+### 走行なしで行う外部校正（チェッカーボード内部校正とは別作業）
+
+内部校正はチェッカーボードからC920の`fx/fy/cx/cy`とレンズ歪みを求める工程です。以下の外部校正は、その結果を使い、別途実測したロボット座標の3D基準点からC920の位置・姿勢を求める独立工程です。20 mmチェッカーボードの寸法を3D基準点の代用にはしません。
 
 座標は`base_footprint`原点を基準に、x=前、y=左、z=上のm単位です。近距離床が写らないため床点だけに依存せず、遠方床と壁・自立板の高さ違いを組み合わせ、非共面の10～12点を使います。例としてx=4、6、8 m、y=-0.6、+0.6 m付近の床点、およびx=4、6 m、y=-0.6、+0.6 m、z=0.6、1.2 m付近の垂直面上の点を、実際の安全な廊下に合わせて配置します。数字をそのまま仮定せず、各点を`base_footprint`基準で実測してください。
 

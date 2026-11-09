@@ -4,6 +4,9 @@ import pytest
 import yaml
 
 from ar_path_viewer.calibration_tool import (
+    DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+    DEFAULT_CHECKERBOARD_INNER_ROWS,
+    DEFAULT_CHECKERBOARD_SQUARE_SIZE_M,
     OPTICAL_FROM_CAMERA_BODY,
     _rotation_from_mount,
     build_argument_parser,
@@ -45,6 +48,17 @@ def test_checkerboard_detector_finds_9_by_6_inner_corners():
     )
     assert corners is not None
     assert corners.shape == (54, 1, 2)
+
+
+def test_intrinsics_cli_defaults_match_actual_10_by_7_board_with_20mm_squares():
+    args = build_argument_parser().parse_args([
+        "intrinsics",
+        "--images", "board_*.png",
+        "--output", "intrinsics.yaml",
+    ])
+    assert args.inner_columns == DEFAULT_CHECKERBOARD_INNER_COLUMNS == 9
+    assert args.inner_rows == DEFAULT_CHECKERBOARD_INNER_ROWS == 6
+    assert args.square_size_m == DEFAULT_CHECKERBOARD_SQUARE_SIZE_M == 0.020
 
 
 def test_undistorter_preserves_640_by_480_and_provides_effective_intrinsics():

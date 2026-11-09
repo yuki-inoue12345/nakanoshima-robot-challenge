@@ -21,6 +21,10 @@ OPTICAL_FROM_CAMERA_BODY = np.array(
     dtype=np.float64,
 )
 
+DEFAULT_CHECKERBOARD_INNER_COLUMNS = 9
+DEFAULT_CHECKERBOARD_INNER_ROWS = 6
+DEFAULT_CHECKERBOARD_SQUARE_SIZE_M = 0.020
+
 
 def _read_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as stream:
@@ -609,9 +613,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     intrinsics = commands.add_parser("intrinsics")
     intrinsics.add_argument("--images", nargs="+", required=True)
-    intrinsics.add_argument("--inner-columns", type=int, default=9)
-    intrinsics.add_argument("--inner-rows", type=int, default=6)
-    intrinsics.add_argument("--square-size-m", type=float, default=0.030)
+    intrinsics.add_argument(
+        "--inner-columns",
+        type=int,
+        default=DEFAULT_CHECKERBOARD_INNER_COLUMNS,
+        help="checkerboard inner corners across (default: 9 for 10 squares)",
+    )
+    intrinsics.add_argument(
+        "--inner-rows",
+        type=int,
+        default=DEFAULT_CHECKERBOARD_INNER_ROWS,
+        help="checkerboard inner corners down (default: 6 for 7 squares)",
+    )
+    intrinsics.add_argument(
+        "--square-size-m",
+        type=float,
+        default=DEFAULT_CHECKERBOARD_SQUARE_SIZE_M,
+        help="measured edge of one black/white square in metres (default: 0.020)",
+    )
     intrinsics.add_argument("--min-images", type=int, default=20)
     intrinsics.add_argument("--preview-dir", type=Path)
     intrinsics.add_argument("--output", type=Path, required=True)
