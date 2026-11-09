@@ -7,6 +7,8 @@ from typing import Iterable, Tuple
 import cv2
 import numpy as np
 
+from .offscreen_guidance import OffscreenGuidance
+
 
 VALID_STATES = {
     "ACTIVE",
@@ -80,6 +82,55 @@ def direction_arrow_segments(
     return arrows
 
 
+def offscreen_arrow_geometry(
+    width: int,
+    height: int,
+    guidance: OffscreenGuidance,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Place a fixed UI arrow; it is deliberately not a floor projection."""
+    center_x = width // 2
+    start_y = max(32, height - 26)
+    end_y = max(18, start_y - max(54, int(round(height * 0.16))))
+    maximum_horizontal = max(30, int(round(width * 0.18)))
+    horizontal = int(round(
+        -guidance.bearing_deg / 80.0 * maximum_horizontal
+    ))
+    end_x = int(np.clip(center_x + horizontal, 12, width - 13))
+    return (center_x, start_y), (end_x, end_y)
+
+
+def _draw_offscreen_guidance(
+    frame: np.ndarray,
+    guidance: OffscreenGuidance,
+    color_bgr: Tuple[int, int, int],
+) -> None:
+    start, end = offscreen_arrow_geometry(
+        frame.shape[1], frame.shape[0], guidance
+    )
+    cv2.arrowedLine(frame, start, end, (20, 20, 20), 10, cv2.LINE_AA, tipLength=0.32)
+    cv2.arrowedLine(frame, start, end, color_bgr, 6, cv2.LINE_AA, tipLength=0.32)
+    label = f"PATH AHEAD: {guidance.direction}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.58
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, font, scale, thickness
+    )
+    label_x = max(6, (frame.shape[1] - text_width) // 2)
+    label_y = max(text_height + 6, end[1] - 12)
+    cv2.rectangle(
+        frame,
+        (label_x - 5, label_y - text_height - 5),
+        (min(frame.shape[1] - 1, label_x + text_width + 5), label_y + baseline + 4),
+        (20, 20, 20),
+        -1,
+    )
+    cv2.putText(
+        frame, label, (label_x, label_y), font, scale, color_bgr,
+        thickness, cv2.LINE_AA,
+    )
+
+
 def render_frame(
     image: np.ndarray,
     segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
@@ -87,6 +138,8 @@ def render_frame(
     color_bgr: Tuple[int, int, int] = (0, 255, 0),
     thickness: int = 5,
     detail: str = "",
+    guidance: OffscreenGuidance | None = None,
+    guidance_color_bgr: Tuple[int, int, int] = (0, 165, 255),
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -99,6 +152,8 @@ def render_frame(
             cv2.arrowedLine(
                 frame, start, end, color_bgr, thickness, cv2.LINE_AA, tipLength=0.4
             )
+    elif state == "PATH OUT OF VIEW" and guidance is not None:
+        _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
     detail_lines = textwrap.wrap(detail, width=68)[:2] if detail else []
     box_bottom = 42 + 24 * len(detail_lines)

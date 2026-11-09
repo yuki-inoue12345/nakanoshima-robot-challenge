@@ -11,6 +11,7 @@ from ar_path_viewer.localization_monitor import (
     LocalizationThresholds,
 )
 from ar_path_viewer.path_adapter import PathStore
+from ar_path_viewer.offscreen_guidance import GuidanceSettings
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer import viewer_node
 
@@ -127,8 +128,12 @@ def make_viewer(clock=None):
     fake._shutdown_requested = False
     fake._resources_released = False
     fake._intrinsics = CameraIntrinsics()
+    fake._source_intrinsics = fake._intrinsics
+    fake._undistorter = None
     fake._mount = CameraMount()
     fake._near = 0.1
+    fake._guidance_settings = GuidanceSettings()
+    fake._guidance_color = (0, 165, 255)
     fake._path_store = PathStore(clock=active_clock)
     fake._image_source = ImageSource()
     fake._camera_error = ""
@@ -371,6 +376,54 @@ def test_recorded_frame_removes_green_path_when_localization_degrades():
         & (unstable_frame[80:, :, 2] < 80)
     )
     assert unstable_green == 0
+
+
+def test_offscreen_guidance_records_only_for_fresh_stable_real_path():
+    now = [10.0]
+    fake = make_viewer(clock=lambda: now[0])
+    fake._path_store = PathStore(timeout_sec=6.5, clock=lambda: now[0])
+    viewer_node.ArPathViewerNode._on_path(
+        fake,
+        path_message(((0.1, 0.0, 0.0), (1.8, 0.0, 0.0))),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    guided = fake._writer.frames[-1]
+    guided_orange = (
+        (guided[120:, :, 2] > 180)
+        & (guided[120:, :, 1] > 80)
+        & (guided[120:, :, 0] < 80)
+    )
+    assert np.count_nonzero(guided_orange) > 100
+
+    fake._localization.reject("test localization degradation")
+    viewer_node.ArPathViewerNode._tick(fake)
+    unstable = fake._writer.frames[-1]
+    unstable_orange = (
+        (unstable[120:, :, 2] > 180)
+        & (unstable[120:, :, 1] > 80)
+        & (unstable[120:, :, 0] < 80)
+    )
+    assert np.count_nonzero(unstable_orange) == 0
+
+    fake._localization = LocalizationMonitor(
+        LocalizationThresholds(recovery_samples=1, recovery_sec=0.0),
+        clock=lambda: now[0],
+    )
+    fake._localization.observe(
+        AmclObservation(
+            0.0, 0.0, 0.0, tuple(np.eye(6).ravel() * 0.01), "map", 100.0
+        ),
+        100.0,
+    )
+    now[0] = 16.6
+    viewer_node.ArPathViewerNode._tick(fake)
+    stale = fake._writer.frames[-1]
+    stale_orange = (
+        (stale[120:, :, 2] > 180)
+        & (stale[120:, :, 1] > 80)
+        & (stale[120:, :, 0] < 80)
+    )
+    assert np.count_nonzero(stale_orange) == 0
 
 
 @pytest.mark.parametrize(

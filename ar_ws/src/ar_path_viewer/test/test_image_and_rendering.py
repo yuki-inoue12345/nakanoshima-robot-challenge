@@ -4,6 +4,7 @@ import pytest
 
 from ar_path_viewer import display_window
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
+from ar_path_viewer.offscreen_guidance import OffscreenGuidance
 from ar_path_viewer.display_window import (
     ACTION_COPY_LOG,
     ACTION_VIEW_LOG,
@@ -77,6 +78,34 @@ def test_direction_arrow_follows_projected_path_direction():
     assert forward and reverse
     assert forward[0][0][0] < forward[0][1][0]
     assert reverse[0][0][0] > reverse[0][1][0]
+
+
+def test_offscreen_guidance_is_orange_ui_not_green_projected_path():
+    image = np.zeros((480, 640, 3), np.uint8)
+    guidance = OffscreenGuidance("RIGHT", -35.0, 2.0, 1.8)
+    frame = render_frame(
+        image, [], "PATH OUT OF VIEW", guidance=guidance
+    )
+    orange = (
+        (frame[:, :, 2] > 180)
+        & (frame[:, :, 1] > 80)
+        & (frame[:, :, 0] < 80)
+    )
+    green = (
+        (frame[:, :, 1] > 180)
+        & (frame[:, :, 2] < 80)
+        & (frame[:, :, 0] < 80)
+    )
+    assert np.count_nonzero(orange) > 100
+    assert np.count_nonzero(green) == 0
+
+    no_path = render_frame(image, [], "NO PATH", guidance=guidance)
+    no_path_orange = (
+        (no_path[:, :, 2] > 180)
+        & (no_path[:, :, 1] > 80)
+        & (no_path[:, :, 0] < 80)
+    )
+    assert np.count_nonzero(no_path_orange[120:]) == 0
 
 
 def test_display_letterboxes_without_changing_source_frame():

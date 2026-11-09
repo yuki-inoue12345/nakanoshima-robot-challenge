@@ -76,6 +76,7 @@ class SessionLog:
         "plan_discarded",
         "path_projection",
         "path_out_of_view",
+        "offscreen_guidance",
         "localization_state",
         "shutdown",
         "session_end",

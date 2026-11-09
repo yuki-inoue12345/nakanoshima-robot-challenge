@@ -30,7 +30,7 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 
 同じ仮内部パラメータでの参考値です。物理角度を変えず設定値だけを変更すると投影が実写から外れるため、実測せずに採用しません。
 
-近距離の床経路をより多く映す必要がある場合、物理取付角を上向き7.5°から0〜3°付近へ下げることが検討候補です。その場合も、実際のレンズ角を測定してから同じ値を`camera_pitch_up_deg`へ設定します。今回は物理取付を確認できないため7.5°を変更していません。
+このC920は人物検知と共用するため、ARを理由に物理取付位置・角度を変更しません。近距離床が物理的に写らない範囲は緑線を画面内へ移動・伸長せず、正確な`PATH OUT OF VIEW`を維持します。見やすさの補助が必要なら、実Pathと明確に区別した画面端方向表示、または走行制御とは分離された将来経路Topicを別設計として検討します。
 
 | `camera_pitch_up_deg` | 地平線の画像行 | 地面が下端へ入るカメラ前方距離 |
 |---:|---:|---:|
@@ -44,6 +44,128 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 メートル単位の長さは隣接Path点間の3次元線分長から求めます。`camera_forward_path_length_m`はカメラ光学座標の前方半空間に含まれる各線分部分、`visible_path_length_m`はnear planeと上下左右の視錐台でクリップ後に残る各線分部分の合計です。両者の差を`nonvisible_forward_path_length_m`として記録します。境界を横切る線分は交点までの割合を使うため、端点が画面外でも画面内部分を失いません。`visible_depth_min_m` / `visible_depth_max_m`は実際に画角へ入った線分のカメラ前方深度範囲です。`endpoint_distance_m`は現在の`base_frame`原点からPath終点までの3次元直線距離で、Path全長とは別の値です。
 
 同録画の32秒・40秒の直線廊下について、廊下方向の直線群から求めた消失点候補は画像行`v≈378〜380 px`でした。仮の`fy=525 px`、`cy=239.5 px`へ当てはめると上向き約14.8〜15.0°相当で、7.5°設定より大きい可能性があります。仮に15°なら地面が画像下端へ入り始める距離はカメラ前方約4.17 m、`camera_x=0.20 m`を含むbase前方約4.37 mです。ただし、廊下線の選択、レンズ歪み、`fx/fy/cx/cy`自体が未校正なので、これは校正値ではありません。この映像推定だけで設定を15°へ変更せず、チェッカーボード内部校正と水平基準を写した静止画で物理ピッチを測定します。実機ログの`camera_configuration`で、NUC固有YAMLから実際に読み込まれた投影値を確認します。
+
+### 2026-11-09実走データでの確認
+
+2走行分のMCAP、AR録画、診断ログ、RViz録画を時刻照合しました。1走目の127 Pathは全長中央値13.768 m、最大72.067 m、2走目の180 Pathは中央値1.810 m、最大3.065 mでした。2走目はWaypoint Followerが`navigation_mode=to_pose`で約2 m間隔の30地点を1地点ずつNav2へ渡しており、180 Path中175件の終点がWaypointから0.05 m以内でした。したがって点数が100点を超えても、実Path自体が1〜3 mしかない場面があります。
+
+2走目の代表例ではPath全長2.907 m、カメラ前方2.601 mに対し、画角内は0.415 m・約35 pxでした。`visible_depth_min_m=2.165`が繰り返され、非表示の前方部分は約2.186 mでした。設定上の下端交点と一致するため、クリッピングによる遠方Path欠落ではなく、近距離床が画像下側の画角外にあることが主因です。1走目の72.067 m Pathは終点直線距離8.408 mですが、地図上で建物外周を大きく迂回するNav2の実Pathでした。AR側が架空に引き伸ばした値ではありません。
+
+1走目の右折Pathをbagの`/plan`と同時刻TFから再投影すると、録画された緑線へ数px程度で重なりました。ROS右（base Y負）が画像右へ出ており、map→baseのTF方向、ROS/OpenCV軸対応、左右・進行方向の反転は確認されませんでした。実データには同等に判定できる明瞭な左折表示がないため、左側は軸対称の単体テストでも維持します。
+
+直線廊下の長辺から得た11月9日録画の消失点候補は`v≈404 px`（複数フレームで約403.5〜405.0 px）でした。仮の`fy=525 px`、`cy=239.5 px`なら約17.4°上向き相当で、現設定7.5°の地平線`v=308.6 px`と約95 pxずれます。これは壁・扉の高さへ緑線が重なる現象を説明しますが、内部パラメータと歪みが未校正であり、廊下線の平行性も前提なので校正値ではありません。`camera_pitch_up_deg`、`fx/fy/cx/cy`は変更せず、チェッカーボード校正と水平基準を使った外部姿勢校正を次の必須確認とします。
+
+起動時の`camera_configuration`には、設定値から求めた`ground_horizon_v_px`、`ground_bottom_center_camera_distance_m`、`ground_bottom_center_base_x_m`、`ground_bottom_center_base_y_m`も記録します。これらは診断値であり、投影位置やPathを変更しません。
+
+## 固定したC920の校正
+
+校正中もC920の取付位置・向きは動かしません。内部校正ではカメラではなくチェッカーボードを動かし、外部校正では停止中のロボットと、位置を実測した目印を撮影します。`camera_pitch_up_deg=7.5`や録画から推定した約17.4°は、以下の実測と再投影確認が完了するまで変更しません。
+
+校正CLIはROS graphへ接続せず、Topic、Publisher、Action、Nav2サービスを一切使用しません。結果は新しいYAMLへだけ書き、既存設定を上書きしません。
+
+### 用意するもの
+
+- 9×6個の**内側交点**を持つ10×7マスのチェッカーボード
+- 1マス30.0 mmを目安に、A3相当の平らで反りにくい板へ100%倍率で固定したもの
+- 1 m以上を測れるレーザー距離計または巻尺、下げ振り、水平器
+- 外部校正用の、中心位置を5 mm程度以内で特定できる丸印を10～12点
+
+印刷後は複数のマスを実測し、1マスの実寸を`--square-size-m`へ入力します。30 mmと印刷しても実測が29.8 mmなら`0.0298`を使います。
+
+### 走行なしで行う内部校正
+
+1. ロボットを停止・固定し、AR ViewerとCamera V7を終了してC920の排他競合を避ける。人物検知の設定やCamera V7のファイルは変更しない。
+2. 実運用と同じデバイス、640×480、20 fps、同じフォーカス・露出条件を使用する。
+3. カメラには触れず、ボードを中央、四隅、上下左右端へ移動し、正面だけでなくyaw/pitchを約±20～35°傾ける。距離0.8、1.2、2.0、可能なら3.0 mを混ぜ、ボード全体が写る画像を30枚以上保存する。
+4. 同じ姿勢の連写、強いブレ、反射、交点が画面外の画像を避け、少なくとも20枚が検出されることを確認する。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /path/to/ar_ws/install/setup.bash
+
+ros2 run ar_path_viewer calibrate_camera capture \
+  --device /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_XXXXXXXX-video-index0 \
+  --output-dir ~/ar_navigation_project/calibration/intrinsics \
+  --fps 20
+
+ros2 run ar_path_viewer calibrate_camera intrinsics \
+  --images "$HOME/ar_navigation_project/calibration/intrinsics/*.png" \
+  --inner-columns 9 --inner-rows 6 --square-size-m 0.030 \
+  --min-images 20 \
+  --preview-dir ~/ar_navigation_project/calibration/corner_previews \
+  --output ~/ar_navigation_project/calibration/intrinsics.yaml
+```
+
+RMSだけで採否を決めず、全previewで順序正しく交点を検出していることを目視します。目安は平均再投影誤差0.5 px以下、最大1 px以下ですが、超えた場合は画像構成やボードの平面性を見直し、値を無理に採用しません。
+
+### 走行なしで行う外部校正
+
+座標は`base_footprint`原点を基準に、x=前、y=左、z=上のm単位です。近距離床が写らないため床点だけに依存せず、遠方床と壁・自立板の高さ違いを組み合わせ、非共面の10～12点を使います。例としてx=4、6、8 m、y=-0.6、+0.6 m付近の床点、およびx=4、6 m、y=-0.6、+0.6 m、z=0.6、1.2 m付近の垂直面上の点を、実際の安全な廊下に合わせて配置します。数字をそのまま仮定せず、各点を`base_footprint`基準で実測してください。
+
+基準点YAMLは次の形式です。
+
+```yaml
+points:
+  - {name: floor_far_left, base_xyz_m: [6.002, 0.604, 0.000]}
+  - {name: floor_far_right, base_xyz_m: [6.001, -0.597, 0.000]}
+  - {name: wall_left_low, base_xyz_m: [4.010, 0.601, 0.603]}
+  - {name: wall_left_high, base_xyz_m: [4.011, 0.602, 1.198]}
+# 実測点を合計10～12点記入する
+```
+
+ロボットを動かさず撮った静止画で、YAML順に印の中心をクリックします。Backspaceで1点戻り、Enterで全点を保存します。
+
+```bash
+ros2 run ar_path_viewer calibrate_camera mark-points \
+  --image ~/ar_navigation_project/calibration/extrinsics/reference.png \
+  --reference-points ~/ar_navigation_project/calibration/reference_points.yaml \
+  --output ~/ar_navigation_project/calibration/correspondences.yaml
+
+ros2 run ar_path_viewer calibrate_camera extrinsics \
+  --intrinsics ~/ar_navigation_project/calibration/intrinsics.yaml \
+  --correspondences ~/ar_navigation_project/calibration/correspondences.yaml \
+  --output ~/ar_navigation_project/calibration/extrinsics.yaml
+
+ros2 run ar_path_viewer calibrate_camera export \
+  --intrinsics ~/ar_navigation_project/calibration/intrinsics.yaml \
+  --extrinsics ~/ar_navigation_project/calibration/extrinsics.yaml \
+  --output ~/ar_navigation_project/calibration/review_only_overlay.yaml
+```
+
+位置・姿勢を独立に撮り直した2～3組でも求め、sample RMSが概ね2 px以下、yaw/pitch/rollと位置の組間差が測定誤差に収まることを確認します。壁の平面だけなど共面点のみで得た解や、左右符号が実景と合わない解は採用しません。
+
+### 校正前後の比較と設定反映
+
+`path_points`は実Pathをbase座標へ変換して保存したCSV（x,y,z列）または同じ点列を持つYAMLです。比較画像は左が現設定、右が歪み補正後の校正候補で、走行制御には接続しません。
+
+```bash
+ros2 run ar_path_viewer calibrate_camera compare \
+  --image reference.png --path-points path_base.csv \
+  --before-config ar_path_viewer_nav2_test.yaml \
+  --after-overlay review_only_overlay.yaml \
+  --output projection_before_after.png
+```
+
+採用時もNUC固有YAML全体を置換しません。バックアップを作り、review overlayの`fx/fy/cx/cy`、歪み係数、undistort、確認済みの外部パラメータだけを手作業で反映し、C920デバイス、MP4出力、ログ、診断設定を維持します。歪み補正は初期値`false`であり、実測結果を採用した場合だけ有効にします。補正後も出力と録画は640×480です。
+
+## 画角外経路の補助案内
+
+新しい橙色の`PATH AHEAD`矢印は、緑線を描画できる線分が1本もない`PATH OUT OF VIEW`時だけ表示します。これは床へ投影した線ではなく固定UIであり、実Pathの現在位置に最も近い点から1.5 m先までをたどって`STRAIGHT`、`LEFT`、`RIGHT`を判定します。Pathを延長、移動、変形しません。
+
+次の場合は誤案内防止のため矢印も出しません。
+
+- `NO PATH`、`PATH STALE`、`LOCALIZING`、`LOCALIZATION UNSTABLE`、TF/カメラ/設定異常
+- 終点まで0.6 m以内、残りPathが0.6 m未満
+- 実Pathがロボットから1.0 m以上離れて始まる
+- 進行方位が前方±80°を超える、1.5 m内で方位が65°以上急変する、または左右をまたいで曖昧
+
+正しく投影できる部分があれば従来どおり緑線だけを優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*` ROS parametersで調整できます。
+
+## 長い参考経路の将来設計（未実装）
+
+2走目の約2 m PathはWaypoint Followerの`to_pose`が次の1地点へ使う実Pathです。Viewerがその先を緑線として足すことはしません。将来の候補は、AR Viewerとは別の読み取り専用参考計画ノードが、今後のWaypoint列とmap/poseを受け、Nav2の`ComputePathThroughPoses`または`ComputePathToPose`を低頻度で呼び、その結果だけを`/ar_reference_plan`等へ出す構成です。Viewer自身は購読専用を維持します。
+
+参考Pathは実行中の`/plan`と別Topic・別generation・別stale判定にし、例えば「実Path=実線緑」「参考Path=破線シアン+REFERENCE」のように視覚とログの両方で区別します。Waypoint index/map frame/route IDが一致しない場合は表示しません。リスクは、planner/costmap負荷、実行Pathとの不一致、Waypoint進行同期ずれ、地図更新時の陳腐化、Nav2停止時の利用不能です。走行制御へ渡さず、ユーザー承認と負荷試験後に別フェーズで実装します。
 
 ## ビルドとテスト
 

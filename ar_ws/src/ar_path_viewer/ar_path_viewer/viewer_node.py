@@ -15,6 +15,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
+from .camera_model import CameraUndistorter
 from .diagnostics import DiagnosticReporter
 from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
 from .image_source import SimulationSource, make_image_source
@@ -24,12 +25,18 @@ from .localization_monitor import (
     LocalizationThresholds,
     amcl_message_to_observation,
 )
+from .offscreen_guidance import GuidanceSettings
 from .path_adapter import PathStore, path_message_to_array
-from .projection import DEFAULT_CAMERA_Y_M, CameraIntrinsics, CameraMount
+from .projection import (
+    DEFAULT_CAMERA_Y_M,
+    CameraIntrinsics,
+    CameraMount,
+    ground_plane_view,
+)
 from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
-from .viewer_logic import project_path_state_detailed
+from .viewer_logic import evaluate_path_state
 
 
 class ArPathViewerNode(Node):
@@ -63,6 +70,9 @@ class ArPathViewerNode(Node):
             "fy": 525.0,
             "cx": 319.5,
             "cy": 239.5,
+            "camera_undistort": False,
+            "camera_undistort_alpha": 0.0,
+            "camera_distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
             "camera_x": 0.20,
             "camera_y": DEFAULT_CAMERA_Y_M,
             "camera_z": 0.6967,
@@ -70,6 +80,17 @@ class ArPathViewerNode(Node):
             "camera_pitch_up_deg": 7.5,
             "camera_roll_deg": 0.0,
             "near_clip_m": 0.10,
+            "offscreen_guidance_enabled": True,
+            "offscreen_guidance_lookahead_m": 1.5,
+            "offscreen_guidance_min_remaining_m": 0.6,
+            "offscreen_guidance_near_goal_m": 0.6,
+            "offscreen_guidance_max_path_start_distance_m": 1.0,
+            "offscreen_guidance_straight_angle_deg": 15.0,
+            "offscreen_guidance_max_bearing_deg": 80.0,
+            "offscreen_guidance_max_bearing_change_deg": 65.0,
+            "guidance_line_b": 0,
+            "guidance_line_g": 165,
+            "guidance_line_r": 255,
             "line_b": 0,
             "line_g": 255,
             "line_r": 0,
@@ -103,12 +124,21 @@ class ArPathViewerNode(Node):
         self._session_log = SessionLog(self._session_paths.log, log_max_entries)
         self._log_gui = LogGui()
         try:
-            self._intrinsics = CameraIntrinsics(
+            self._source_intrinsics = CameraIntrinsics(
                 width=self._int("width"), height=self._int("height"),
                 fx=self._float("fx"), fy=self._float("fy"),
                 cx=self._float("cx"), cy=self._float("cy"),
             )
-            self._intrinsics.validate()
+            self._source_intrinsics.validate()
+            self._undistorter = None
+            self._intrinsics = self._source_intrinsics
+            if self._bool("camera_undistort"):
+                self._undistorter = CameraUndistorter(
+                    self._source_intrinsics,
+                    self._float_list("camera_distortion_coefficients"),
+                    self._float("camera_undistort_alpha"),
+                )
+                self._intrinsics = self._undistorter.description.output_intrinsics
             self._mount = CameraMount(
                 x=self._float("camera_x"), y=self._float("camera_y"),
                 z=self._float("camera_z"), yaw_deg=self._float("camera_yaw_deg"),
@@ -118,13 +148,37 @@ class ArPathViewerNode(Node):
             self._mount.validate()
             self._near = self._float("near_clip_m")
             self._path_store = PathStore(self._float("path_timeout_sec"))
+            self._guidance_settings = GuidanceSettings(
+                enabled=self._bool("offscreen_guidance_enabled"),
+                lookahead_m=self._float("offscreen_guidance_lookahead_m"),
+                min_remaining_m=self._float(
+                    "offscreen_guidance_min_remaining_m"
+                ),
+                near_goal_m=self._float("offscreen_guidance_near_goal_m"),
+                max_path_start_distance_m=self._float(
+                    "offscreen_guidance_max_path_start_distance_m"
+                ),
+                straight_angle_deg=self._float(
+                    "offscreen_guidance_straight_angle_deg"
+                ),
+                max_bearing_deg=self._float(
+                    "offscreen_guidance_max_bearing_deg"
+                ),
+                max_bearing_change_deg=self._float(
+                    "offscreen_guidance_max_bearing_change_deg"
+                ),
+            )
+            self._guidance_settings.validate()
         except ValueError as exc:
             self._config_error = str(exc)
             self._log_error(f"Invalid configuration: {exc}")
-            self._intrinsics = CameraIntrinsics()
+            self._source_intrinsics = CameraIntrinsics()
+            self._intrinsics = self._source_intrinsics
+            self._undistorter = None
             self._mount = CameraMount()
             self._near = 0.10
             self._path_store = PathStore()
+            self._guidance_settings = GuidanceSettings(enabled=False)
 
         try:
             self._image_source = make_image_source(
@@ -155,22 +209,54 @@ class ArPathViewerNode(Node):
             self._config_error = str(exc)
             self._log_error(f"Invalid diagnostic configuration: {exc}")
             self._diagnostics = DiagnosticReporter(False, self.get_logger())
+        ground_view = ground_plane_view(self._mount, self._intrinsics)
+
+        def geometry_value(value: float | None) -> str:
+            return "none" if value is None else f"{value:.3f}"
+
         self._log_info(
             "camera_configuration "
             f"width={self._intrinsics.width} height={self._intrinsics.height} "
             f"fx={self._intrinsics.fx:.3f} fy={self._intrinsics.fy:.3f} "
             f"cx={self._intrinsics.cx:.3f} cy={self._intrinsics.cy:.3f} "
+            f"source_fx={self._source_intrinsics.fx:.3f} "
+            f"source_fy={self._source_intrinsics.fy:.3f} "
+            f"source_cx={self._source_intrinsics.cx:.3f} "
+            f"source_cy={self._source_intrinsics.cy:.3f} "
+            f"undistort_enabled={self._undistorter is not None} "
+            "distortion_coefficients="
+            f"{self._float_list('camera_distortion_coefficients')} "
             f"camera_x={self._mount.x:.4f} camera_y={self._mount.y:.4f} "
             f"camera_z={self._mount.z:.4f} "
             f"camera_yaw_deg={self._mount.yaw_deg:.3f} "
             f"camera_pitch_up_deg={self._mount.pitch_up_deg:.3f} "
             f"camera_roll_deg={self._mount.roll_deg:.3f} "
-            f"near_clip_m={self._near:.3f}"
+            f"near_clip_m={self._near:.3f} "
+            f"ground_horizon_v_px={geometry_value(ground_view.horizon_v_px)} "
+            "ground_bottom_center_camera_distance_m="
+            f"{geometry_value(ground_view.bottom_center_camera_distance_m)} "
+            "ground_bottom_center_base_x_m="
+            f"{geometry_value(ground_view.bottom_center_base_x_m)} "
+            "ground_bottom_center_base_y_m="
+            f"{geometry_value(ground_view.bottom_center_base_y_m)}"
         )
         self._log_info(
             "output_files "
             f"video={str(self._session_paths.video)!r} "
             f"log={str(self._session_paths.log)!r}"
+        )
+        self._log_info(
+            "offscreen_guidance_configuration "
+            f"enabled={self._guidance_settings.enabled} "
+            f"lookahead_m={self._guidance_settings.lookahead_m:.3f} "
+            f"min_remaining_m={self._guidance_settings.min_remaining_m:.3f} "
+            f"near_goal_m={self._guidance_settings.near_goal_m:.3f} "
+            "max_path_start_distance_m="
+            f"{self._guidance_settings.max_path_start_distance_m:.3f} "
+            f"straight_angle_deg={self._guidance_settings.straight_angle_deg:.3f} "
+            f"max_bearing_deg={self._guidance_settings.max_bearing_deg:.3f} "
+            "max_bearing_change_deg="
+            f"{self._guidance_settings.max_bearing_change_deg:.3f}"
         )
         if self._session_log.file_error:
             self._log_warning(
@@ -213,6 +299,11 @@ class ArPathViewerNode(Node):
             self._log_error(f"Invalid localization configuration: {exc}")
             self._localization = LocalizationMonitor()
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
+        self._guidance_color = (
+            self._int("guidance_line_b"),
+            self._int("guidance_line_g"),
+            self._int("guidance_line_r"),
+        )
         self._thickness = self._int("line_thickness")
         self._display = self._bool("display")
         self._display_window = None
@@ -261,6 +352,9 @@ class ArPathViewerNode(Node):
 
     def _bool(self, name: str) -> bool:
         return bool(self.get_parameter(name).value)
+
+    def _float_list(self, name: str) -> list[float]:
+        return [float(value) for value in self.get_parameter(name).value]
 
     def _log_info(self, message: str) -> None:
         self._session_log.record("INFO", message)
@@ -414,6 +508,7 @@ class ArPathViewerNode(Node):
         image = self._image_source.read()
         state = "NO PATH"
         detail = ""
+        guidance = None
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
             state = "CAMERA UNAVAILABLE"
@@ -428,8 +523,20 @@ class ArPathViewerNode(Node):
             detail = self._config_error
             frame = render_frame(image, [], state, detail=detail)
         else:
-            if image.shape[:2] != (self._intrinsics.height, self._intrinsics.width):
-                image = cv2.resize(image, (self._intrinsics.width, self._intrinsics.height))
+            source_shape = (
+                self._source_intrinsics.height,
+                self._source_intrinsics.width,
+            )
+            if image.shape[:2] != source_shape:
+                image = cv2.resize(
+                    image,
+                    (
+                        self._source_intrinsics.width,
+                        self._source_intrinsics.height,
+                    ),
+                )
+            if self._undistorter is not None:
+                image = self._undistorter.apply(image)
             state, snapshot = self._path_store.state()
             segments = []
             if state == "ACTIVE" and snapshot is not None:
@@ -451,13 +558,18 @@ class ArPathViewerNode(Node):
                     detail = tf_detail
                 else:
                     try:
-                        state, segments, projection_stats = project_path_state_detailed(
+                        evaluation = evaluate_path_state(
                             snapshot.points, snapshot.frame_id, self._base_frame,
                             self._points_in_base, self._mount, self._intrinsics, self._near,
+                            guidance_settings=self._guidance_settings,
                             on_tf_error=lambda exc: self._diagnostics.tf_failure(
                                 snapshot.frame_id, self._base_frame, exc
                             ),
                         )
+                        state = evaluation.state
+                        segments = evaluation.segments
+                        projection_stats = evaluation.stats
+                        guidance = evaluation.guidance
                         if projection_stats is not None:
                             self._diagnostics.projection_update(
                                 snapshot.frame_id,
@@ -465,10 +577,19 @@ class ArPathViewerNode(Node):
                                 projection_stats.out_of_view_reason,
                             )
                         if state == "PATH OUT OF VIEW" and projection_stats is not None:
+                            self._diagnostics.offscreen_guidance(
+                                snapshot.frame_id, evaluation.guidance_detail
+                            )
+                            guidance_suffix = (
+                                f"; guide={guidance.direction}"
+                                if guidance is not None
+                                else "; guide=none"
+                            )
                             detail = (
                                 f"frame={snapshot.frame_id} "
                                 f"{projection_stats.out_of_view_reason}; "
                                 f"{projection_stats.compact_detail()}"
+                                f"{guidance_suffix}"
                             )
                         elif state == "TF UNAVAILABLE":
                             detail = (
@@ -492,7 +613,14 @@ class ArPathViewerNode(Node):
                     f"generation={snapshot.generation}"
                 )
             frame = render_frame(
-                image, segments, state, self._color, self._thickness, detail=detail
+                image,
+                segments,
+                state,
+                self._color,
+                self._thickness,
+                detail=detail,
+                guidance=guidance,
+                guidance_color_bgr=self._guidance_color,
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:

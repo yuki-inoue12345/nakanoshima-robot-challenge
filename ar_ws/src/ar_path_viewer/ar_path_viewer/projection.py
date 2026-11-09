@@ -52,6 +52,21 @@ class CameraMount:
 
 
 @dataclass(frozen=True)
+class GroundPlaneView:
+    """Center-view ground geometry derived from the effective camera model.
+
+    ``bottom_center_*`` is ``None`` when the bottom-center image ray does not
+    meet the ground in front of the camera. These values are diagnostic only;
+    they never move or synthesize a Path.
+    """
+
+    horizon_v_px: float | None
+    bottom_center_camera_distance_m: float | None
+    bottom_center_base_x_m: float | None
+    bottom_center_base_y_m: float | None
+
+
+@dataclass(frozen=True)
 class ProjectionStats:
     """Counts that explain how a transformed Path relates to the camera frustum."""
 
@@ -156,6 +171,63 @@ def _rot_y(angle: float) -> np.ndarray:
 def _rot_z(angle: float) -> np.ndarray:
     c, s = np.cos(angle), np.sin(angle)
     return np.array(((c, -s, 0.0), (s, c, 0.0), (0.0, 0.0, 1.0)))
+
+
+def ground_plane_view(
+    mount: CameraMount, intrinsics: CameraIntrinsics
+) -> GroundPlaneView:
+    """Return the horizon and bottom-center ground intersection.
+
+    The calculation uses the same yaw/pitch/roll convention as
+    :func:`world_to_optical`. It exposes the physical near-floor limitation in
+    field logs without altering the projected geometry.
+    """
+    mount.validate()
+    intrinsics.validate()
+    yaw_m = np.deg2rad(mount.yaw_deg)
+    pitch_m = np.deg2rad(-mount.pitch_up_deg)
+    roll_m = np.deg2rad(mount.roll_deg)
+    rotation_body_from_camera = _rot_z(yaw_m) @ _rot_y(pitch_m) @ _rot_x(roll_m)
+
+    # Project the horizontal component of the camera forward axis. This is the
+    # horizon point in the center vertical plane for level ground.
+    camera_forward_body = rotation_body_from_camera[:, 0]
+    horizontal_forward = np.array(
+        (camera_forward_body[0], camera_forward_body[1], 0.0), dtype=float
+    )
+    horizontal_norm = float(np.linalg.norm(horizontal_forward))
+    horizon_v = None
+    if horizontal_norm > 1e-12:
+        horizontal_forward /= horizontal_norm
+        horizon_camera = rotation_body_from_camera.T @ horizontal_forward
+        horizon_optical_y = -float(horizon_camera[2])
+        horizon_optical_z = float(horizon_camera[0])
+        if horizon_optical_z > 1e-12:
+            horizon_v = (
+                intrinsics.fy * horizon_optical_y / horizon_optical_z
+                + intrinsics.cy
+            )
+
+    # Optical (right, down, forward) -> camera body (forward, left, up).
+    bottom_ratio = (intrinsics.height - 1.0 - intrinsics.cy) / intrinsics.fy
+    bottom_ray_camera = np.array((1.0, 0.0, -bottom_ratio), dtype=float)
+    bottom_ray_body = rotation_body_from_camera @ bottom_ray_camera
+    camera_origin = np.array((mount.x, mount.y, mount.z), dtype=float)
+    if bottom_ray_body[2] >= -1e-12:
+        return GroundPlaneView(horizon_v, None, None, None)
+    ray_scale = -mount.z / float(bottom_ray_body[2])
+    if ray_scale <= 0.0:
+        return GroundPlaneView(horizon_v, None, None, None)
+    ground_point = camera_origin + ray_scale * bottom_ray_body
+    horizontal_distance = float(
+        np.linalg.norm(ground_point[:2] - camera_origin[:2])
+    )
+    return GroundPlaneView(
+        horizon_v,
+        horizontal_distance,
+        float(ground_point[0]),
+        float(ground_point[1]),
+    )
 
 
 def world_to_optical(

@@ -125,6 +125,13 @@ class DiagnosticReporter:
             f"{event} frame_id={frame_id!r} {stats_detail}{reason}",
         )
 
+    def offscreen_guidance(self, frame_id: str, detail: str) -> None:
+        self._emit(
+            "info",
+            "offscreen_guidance",
+            f"offscreen_guidance frame_id={frame_id!r} {detail}",
+        )
+
     def camera_configuration(self, detail: str) -> None:
         """Record the effective projection model once for field-log correlation."""
         self._emit(

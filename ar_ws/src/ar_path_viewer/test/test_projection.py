@@ -8,6 +8,7 @@ from ar_path_viewer.projection import (
     DEFAULT_CAMERA_Y_M,
     CameraIntrinsics,
     CameraMount,
+    ground_plane_view,
     project_path,
     project_clipped_segments,
     world_to_optical,
@@ -122,6 +123,51 @@ def test_default_upward_pitch_ground_visibility_matches_independent_geometry():
     ))
     assert math.isclose(camera_distance, 2.275675, abs_tol=1e-6)
     assert np.allclose(pixel, (intrinsics.cx, intrinsics.height - 1), atol=1e-6)
+
+    view = ground_plane_view(mount, intrinsics)
+    assert math.isclose(view.horizon_v_px, 308.617561, abs_tol=1e-6)
+    assert math.isclose(
+        view.bottom_center_camera_distance_m, camera_distance, abs_tol=1e-9
+    )
+    assert math.isclose(view.bottom_center_base_x_m, base_x, abs_tol=1e-9)
+    assert math.isclose(view.bottom_center_base_y_m, mount.y, abs_tol=1e-9)
+
+
+def test_bottom_center_ray_reports_when_upward_camera_cannot_see_ground():
+    view = ground_plane_view(
+        CameraMount(pitch_up_deg=30.0), CameraIntrinsics()
+    )
+    assert view.horizon_v_px > CameraIntrinsics().height
+    assert view.bottom_center_camera_distance_m is None
+    assert view.bottom_center_base_x_m is None
+    assert view.bottom_center_base_y_m is None
+
+
+def test_november_9_bag_right_turn_is_not_mirrored():
+    # Downsampled from ar_1109 /plan at 2026-11-09 13:12:23.939 JST after
+    # applying the bag's map -> robot/base_footprint TF at render time.
+    points_base = np.array((
+        (-0.0504, 0.0058, 0.0),
+        (1.4774, 0.0739, 0.0),
+        (3.0236, 0.1735, 0.0),
+        (4.5672, 0.3007, 0.0),
+        (6.0899, 0.3270, 0.0),
+        (7.6235, 0.1121, 0.0),
+        (9.0544, -0.3838, 0.0),
+        (9.3484, -1.9126, 0.0),
+        (9.4530, -3.4340, 0.0),
+        (9.5876, -4.9781, 0.0),
+        (9.7738, -6.5169, 0.0),
+        (10.0605, -8.1976, 0.0),
+    ))
+    result = project_path(
+        points_base, (0.0, 0.0, 0.0), CameraMount(), CameraIntrinsics()
+    )
+    assert points_base[-1, 1] < 0.0  # ROS right side.
+    assert result.stats.drawable_segments == 9
+    assert result.segments[0][0][0] < CameraIntrinsics().cx
+    assert result.segments[-1][1][0] == CameraIntrinsics().width - 1
+    assert result.stats.visible_width_px > 300
 
 
 def test_projection_stats_classify_behind_below_and_visible_paths():

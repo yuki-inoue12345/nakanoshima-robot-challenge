@@ -25,6 +25,7 @@ setup(
     entry_points={
         "console_scripts": [
             "ar_path_viewer = ar_path_viewer.viewer_node:main",
+            "calibrate_camera = ar_path_viewer.calibration_tool:main",
             "simulate_lap = ar_path_viewer.simulation:main",
         ],
     },
