@@ -124,6 +124,30 @@ def test_late_result_from_old_goal_generation_is_never_adopted():
     assert events[1] == ('finish', True)
 
 
+def test_late_result_is_rejected_after_keepout_environment_is_lost():
+    """Never adopt a successful action result after its map gate changed."""
+    node = ReferencePathRequestNode.__new__(ReferencePathRequestNode)
+    node._active_generation = 8
+    node._active_state_identity = ('route', 1, 2)
+    node._state_identity = ('route', 1, 2)
+    node._active_state_snapshot = object()
+    node._follower_state = None
+    node._request_started = monotonic()
+    node._keepout_gate = SimpleNamespace(
+        ready=False, reason='mask_content_mismatch')
+    events = []
+    node._invalidate = lambda reason: events.append(('invalidate', reason))
+    node._finish_cycle = lambda _now, immediate=False: events.append(
+        ('finish', immediate))
+    future = SimpleNamespace(result=lambda: SimpleNamespace(result=object()))
+
+    node._result(future, 8)
+
+    assert 'outdated_environment_result_rejected' in events[0][1]
+    assert 'mask_content_mismatch' in events[0][1]
+    assert events[1] == ('finish', True)
+
+
 def test_outdated_request_is_canceled_once_while_ownership_is_retained():
     node = ReferencePathRequestNode.__new__(ReferencePathRequestNode)
     node._active_generation = 4

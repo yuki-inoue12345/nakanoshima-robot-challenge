@@ -1,6 +1,7 @@
 """Request a Nav2-computed path from the isolated reference planner."""
 
 import math
+from pathlib import Path as FilePath
 from time import monotonic
 
 from action_msgs.msg import GoalStatus
@@ -8,6 +9,8 @@ from geometry_msgs.msg import PoseStamped
 from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import ComputePathThroughPoses
+from nav2_msgs.msg import CostmapFilterInfo
+from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Path
 import rclpy
 from rclpy.action import ActionClient
@@ -16,6 +19,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollowerState
 
 from .follower_state import FollowerSnapshot, validate_snapshot
+from .keepout_config import MapSignature
+from .keepout_gate import KeepoutReadinessGate
 from .route import (
     load_route,
     planar_path_length,
@@ -52,6 +57,24 @@ class ReferencePathRequestNode(Node):
         self.declare_parameter('validity_sec', 6.5)
         self.declare_parameter('max_result_stamp_age_sec', 3.0)
         self.declare_parameter('max_follower_state_age_sec', 2.5)
+        self.declare_parameter('map_topic', '/map')
+        self.declare_parameter('keepout_required', False)
+        self.declare_parameter(
+            'keepout_filter_info_topic', '/costmap_filter_info')
+        self.declare_parameter('keepout_mask_topic', '/keepout_filter_mask')
+        self.declare_parameter(
+            'keepout_mask_state_service', '/filter_mask_server/get_state')
+        self.declare_parameter(
+            'keepout_info_state_service',
+            '/costmap_filter_info_server/get_state')
+        for prefix in ('map', 'mask'):
+            self.declare_parameter(f'expected_{prefix}_width', 0)
+            self.declare_parameter(f'expected_{prefix}_height', 0)
+            self.declare_parameter(f'expected_{prefix}_resolution', 0.0)
+            self.declare_parameter(f'expected_{prefix}_origin_x', 0.0)
+            self.declare_parameter(f'expected_{prefix}_origin_y', 0.0)
+            self.declare_parameter(f'expected_{prefix}_origin_yaw', 0.0)
+            self.declare_parameter(f'expected_{prefix}_data_sha256', '')
 
         waypoint_file = str(self.get_parameter('waypoint_file').value)
         if not waypoint_file:
@@ -91,6 +114,21 @@ class ReferencePathRequestNode(Node):
         self._map_frame = str(self.get_parameter('map_frame').value)
         self._planner_id = str(self.get_parameter('planner_id').value)
         self._route = load_route(waypoint_file)
+        keepout_required = bool(self.get_parameter('keepout_required').value)
+        map_signature = self._signature_from_parameters('map')
+        mask_signature = (
+            self._signature_from_parameters('mask') if keepout_required else None
+        )
+        filter_info_topic = str(
+            self.get_parameter('keepout_filter_info_topic').value)
+        mask_topic = str(self.get_parameter('keepout_mask_topic').value)
+        self._keepout_gate = KeepoutReadinessGate(
+            map_signature,
+            keepout_required=keepout_required,
+            mask_signature=mask_signature,
+            filter_info_topic=filter_info_topic,
+            mask_topic=mask_topic,
+        )
         qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -115,6 +153,41 @@ class ReferencePathRequestNode(Node):
             self._follower_state_callback,
             state_qos,
         )
+        self._map_subscription = self.create_subscription(
+            OccupancyGrid,
+            str(self.get_parameter('map_topic').value),
+            self._keepout_gate.observe_map,
+            state_qos,
+        )
+        self._mask_subscription = None
+        self._filter_info_subscription = None
+        self._keepout_state_clients = {}
+        self._keepout_state_futures = {}
+        if keepout_required:
+            self._mask_subscription = self.create_subscription(
+                OccupancyGrid,
+                mask_topic,
+                self._keepout_gate.observe_mask,
+                state_qos,
+            )
+            self._filter_info_subscription = self.create_subscription(
+                CostmapFilterInfo,
+                filter_info_topic,
+                self._keepout_gate.observe_filter_info,
+                state_qos,
+            )
+            self._keepout_state_clients = {
+                'mask': self.create_client(
+                    GetState,
+                    str(self.get_parameter(
+                        'keepout_mask_state_service').value),
+                ),
+                'info': self.create_client(
+                    GetState,
+                    str(self.get_parameter(
+                        'keepout_info_state_service').value),
+                ),
+            }
         self._action = ActionClient(
             self,
             ComputePathThroughPoses,
@@ -127,6 +200,7 @@ class ReferencePathRequestNode(Node):
         self._planner_active = False
         self._planner_state_future = None
         self._last_planner_state_query = float('-inf')
+        self._last_keepout_state_query = float('-inf')
         self._generation = 0
         self._active_generation = None
         self._request_started = None
@@ -151,8 +225,33 @@ class ReferencePathRequestNode(Node):
             'reference_route_loaded '
             f'route_sha256={self._route.sha256} '
             f'waypoints={len(self._route.waypoints)} '
-            'waiting_for_follower_state=true'
+            'waiting_for_follower_state=true '
+            f'keepout_required={keepout_required}'
         )
+
+    def _signature_from_parameters(self, prefix: str) -> MapSignature:
+        """Create a launch-verified signature from typed ROS parameters."""
+        signature = MapSignature(
+            yaml_path=FilePath(f'<launch-verified-{prefix}>'),
+            width=int(self.get_parameter(f'expected_{prefix}_width').value),
+            height=int(self.get_parameter(f'expected_{prefix}_height').value),
+            resolution=float(
+                self.get_parameter(f'expected_{prefix}_resolution').value),
+            origin_x=float(
+                self.get_parameter(f'expected_{prefix}_origin_x').value),
+            origin_y=float(
+                self.get_parameter(f'expected_{prefix}_origin_y').value),
+            origin_yaw=float(
+                self.get_parameter(f'expected_{prefix}_origin_yaw').value),
+            data_sha256=str(
+                self.get_parameter(f'expected_{prefix}_data_sha256').value),
+        )
+        if (
+            signature.width <= 0 or signature.height <= 0
+            or signature.resolution <= 0.0 or len(signature.data_sha256) != 64
+        ):
+            raise ValueError(f'invalid expected {prefix} signature parameters')
+        return signature
 
     def _state_error(self, snapshot: FollowerSnapshot) -> str:
         return validate_snapshot(
@@ -236,6 +335,12 @@ class ReferencePathRequestNode(Node):
     def _tick(self) -> None:
         now = monotonic()
         self._query_planner_state(now)
+        self._query_keepout_states(now)
+        if not self._keepout_gate.ready:
+            self._invalidate(
+                f'keepout_not_ready reason={self._keepout_gate.reason}')
+            self._cancel_environment_request()
+            return
         if self._follower_state is not None:
             state_error = self._state_error(self._follower_state)
             if state_error:
@@ -281,6 +386,56 @@ class ReferencePathRequestNode(Node):
             )
             return
         self._send_request(now)
+
+    def _cancel_environment_request(self) -> None:
+        """Cancel a result that can no longer be tied to the selected map."""
+        if self._active_generation is None or self._goal_handle is None:
+            return
+        if self._cancel_requested_generation == self._active_generation:
+            return
+        try:
+            self._goal_handle.cancel_goal_async()
+            self._cancel_requested_generation = self._active_generation
+        except Exception as error:  # noqa: BLE001 - timeout remains fallback
+            self.get_logger().warning(
+                f'environment_reference_cancel_failed error={error}'
+            )
+
+    def _query_keepout_states(self, now: float) -> None:
+        """Poll shared Keepout servers without changing their lifecycle."""
+        if not self._keepout_gate.keepout_required:
+            return
+        if now - self._last_keepout_state_query < 1.0:
+            return
+        self._last_keepout_state_query = now
+        for server, client in self._keepout_state_clients.items():
+            if server in self._keepout_state_futures:
+                continue
+            if not client.service_is_ready():
+                self._keepout_gate.set_lifecycle(server, False)
+                continue
+            future = client.call_async(GetState.Request())
+            self._keepout_state_futures[server] = future
+            future.add_done_callback(
+                lambda completed, name=server: self._keepout_state_response(
+                    name, completed))
+
+    def _keepout_state_response(self, server: str, future) -> None:
+        self._keepout_state_futures.pop(server, None)
+        try:
+            active = (
+                future.result().current_state.id
+                == State.PRIMARY_STATE_ACTIVE
+            )
+        except Exception as error:  # noqa: BLE001 - retry on next poll
+            active = False
+            self.get_logger().warning(
+                f'keepout_server_state_query_failed server={server} error={error}'
+            )
+        self._keepout_gate.set_lifecycle(server, active)
+        if not active:
+            self._invalidate(
+                f'keepout_not_ready reason={self._keepout_gate.reason}')
 
     def _query_planner_state(self, now: float) -> None:
         """Poll only this package's namespaced Planner lifecycle state."""
@@ -400,6 +555,14 @@ class ReferencePathRequestNode(Node):
         if request_identity != self._state_identity:
             self._invalidate(
                 f'outdated_result_rejected generation={generation}'
+            )
+            self._finish_cycle(monotonic(), immediate=True)
+            return
+        gate = getattr(self, '_keepout_gate', None)
+        if gate is not None and not gate.ready:
+            self._invalidate(
+                f'outdated_environment_result_rejected generation={generation} '
+                f'reason={gate.reason}'
             )
             self._finish_cycle(monotonic(), immediate=True)
             return

@@ -23,8 +23,8 @@ global_costmap:
       track_unknown_space: true
       footprint: "[[0.30, 0.29], [0.30, -0.29], [-0.30, -0.29], [-0.30, 0.29]]"
       plugins: [static_layer, velodyne_obstacle_layer, hokuyo_obstacle_layer, inflation_layer]
-      # Phase 1 leaves the filters parameter unset. A matching filter server and
-      # an explicit derived params file are required before enabling keepout_filter.
+      # Keepout is injected into a temporary derived file only when the selected
+      # map's saved settings and mask pass the launch-time validation.
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true

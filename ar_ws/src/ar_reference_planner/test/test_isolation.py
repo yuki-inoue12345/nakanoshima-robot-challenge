@@ -15,6 +15,10 @@ def test_launch_remaps_internal_plan_and_uses_reference_topic():
     assert "'reference_path_state_topic': '/ar/reference_path_state'" in launch
     assert "package='nav2_controller'" not in launch
     assert "package='nav2_bt_navigator'" not in launch
+    assert "DeclareLaunchArgument('map', default_value='')" in launch
+    assert "default_value='/costmap_filter_info'" in launch
+    assert "default_value='/keepout_filter_mask'" in launch
+    assert "package='nav2_map_server'" not in launch
 
 
 def test_request_node_uses_only_compute_path_action():
@@ -28,6 +32,8 @@ def test_request_node_uses_only_compute_path_action():
     assert "self._invalidate('startup_no_reference_path')" in source
     assert 'GetState' in source
     assert 'State.PRIMARY_STATE_ACTIVE' in source
+    assert 'KeepoutReadinessGate' in source
+    assert 'keepout_not_ready' in source
 
 
 def test_production_topics_are_absolute_for_shared_inputs():
