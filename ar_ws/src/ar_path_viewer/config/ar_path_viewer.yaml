@@ -5,6 +5,13 @@ ar_path_viewer:
     base_frame: robot/base_footprint
     localization_global_frame: map
     path_timeout_sec: 6.5
+    # Phase 3 safety default: enable only for development until the production
+    # reference costmap/keepout configuration is verified on the NUC.
+    reference_path_enabled: false
+    reference_path_state_topic: /ar/reference_path_state
+    reference_follower_state_topic: /waypoint_follower/reference_state
+    reference_path_timeout_sec: 6.5
+    reference_follower_timeout_sec: 2.5
     localization_pose_timeout_sec: 3.0
     localization_stamp_max_age_sec: 3.0
     localization_future_tolerance_sec: 1.5
@@ -55,6 +62,13 @@ ar_path_viewer:
     line_g: 255
     line_r: 0
     line_thickness: 5
+    # BGR cyan dashed reference route, deliberately distinct from /plan green.
+    reference_line_b: 255
+    reference_line_g: 255
+    reference_line_r: 0
+    reference_line_thickness: 3
+    reference_dash_px: 14.0
+    reference_gap_px: 9.0
     image_input_type: simulation  # simulation | image | video | camera
     image_input_uri: ""
     display: false

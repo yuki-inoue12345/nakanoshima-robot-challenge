@@ -302,11 +302,25 @@ ros2 run ar_path_viewer calibrate_camera compare \
 
 正しく投影できる部分があれば従来どおり緑線だけを優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*` ROS parametersで調整できます。
 
-## 長い参考経路の将来設計（未実装）
+## 長い参考経路の分離設計
 
-2走目の約2 m PathはWaypoint Followerの`to_pose`が次の1地点へ使う実Pathです。Viewerがその先を緑線として足すことはしません。将来の候補は、AR Viewerとは別の読み取り専用参考計画ノードが、今後のWaypoint列とmap/poseを受け、Nav2の`ComputePathThroughPoses`または`ComputePathToPose`を低頻度で呼び、その結果だけを`/ar_reference_plan`等へ出す構成です。Viewer自身は購読専用を維持します。
+2走目の約2 m PathはWaypoint Followerの`to_pose`が次の1地点へ使う実Pathです。Viewerがその先を緑線として足すことはしません。Phase 1・2ではAR Viewerとは別の読み取り専用参考計画ノードが、Followerの安全な進行状態と今後のWaypoint列を受け、独立Nav2の`ComputePathThroughPoses`を3秒周期で呼び、その結果だけを`/ar/reference_path`へ出す構成を実装しました。Viewer自身は購読専用を維持します。
 
-参考Pathは実行中の`/plan`と別Topic・別generation・別stale判定にし、例えば「実Path=実線緑」「参考Path=破線シアン+REFERENCE」のように視覚とログの両方で区別します。Waypoint index/map frame/route IDが一致しない場合は表示しません。リスクは、planner/costmap負荷、実行Pathとの不一致、Waypoint進行同期ずれ、地図更新時の陳腐化、Nav2停止時の利用不能です。走行制御へ渡さず、ユーザー承認と負荷試験後に別フェーズで実装します。
+### Phase 3 長距離参考Path表示
+
+走行用`/plan`は従来どおり緑実線（進行矢印付き）です。独立PlannerがNav2で計算した参考Pathは、水色破線と`REFERENCE`表示で重ねます。参考線は同じTF・AMCLゲート・3Dクリッピング・カメラモデルを通り、画角内へ実際に入る線分だけを描画します。画面へ移動、直線延長、走行用緑線への代用はしません。橙色の画角外案内は走行用`/plan`だけを根拠とする従来仕様です。
+
+Viewerは生の`/ar/reference_path`だけでは採用しません。Pathとroute SHA-256、Waypoint index、navigation mode、goal generation、安全区間終端、Follower状態時刻、Planner generationを一体化した`/ar/reference_path_state`を購読し、別途受信した最新`/waypoint_follower/reference_state`と完全一致した場合だけ表示します。pause、人物探索、待機、route/index/generation変更、Plannerの空/失敗通知、Follower状態2.5秒超、参考Path 6.5秒超では即座に破線を消します。更新順序の異なるPathとメタデータを組み合わせることはありません。
+
+本番の参考CostmapとKeepoutの一致はPhase 4で確認するため、`reference_path_enabled`の既定値は`false`です。開発PCの分離環境だけで次のように明示的に有効化します。
+
+```bash
+ros2 run ar_path_viewer ar_path_viewer --ros-args \
+  --params-file ar_ws/src/ar_path_viewer/config/ar_path_viewer.yaml \
+  -p reference_path_enabled:=true
+```
+
+診断ログの`reference_path_state`には有効性、route/index/generation、点数、全長を、`reference_path_projection`には画角内実長、描画線分数、非表示理由を残します。録画はGUI操作バーを含まない640×480フレームへ、実際に描いた緑実線・水色破線・橙案内をそのまま保存します。
 
 ## ビルドとテスト
 

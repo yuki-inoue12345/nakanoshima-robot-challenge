@@ -13,6 +13,7 @@ from ar_path_viewer.localization_monitor import (
 from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.offscreen_guidance import GuidanceSettings
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
+from ar_path_viewer.reference_path import ReferencePathGate
 from ar_path_viewer import viewer_node
 
 
@@ -167,6 +168,7 @@ def make_viewer(clock=None):
 def path_message(points, frame="map", stamp=1.0):
     poses = [
         SimpleNamespace(
+            header=SimpleNamespace(frame_id=frame),
             pose=SimpleNamespace(
                 position=SimpleNamespace(x=float(x), y=float(y), z=float(z))
             )
@@ -181,6 +183,75 @@ def path_message(points, frame="map", stamp=1.0):
         ),
         poses=poses,
     )
+
+
+def reference_follower_message(
+    *, stamp=100.0, route="a" * 64, index=1, generation=4,
+    activity=1, allowed=True,
+):
+    seconds = int(stamp)
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            frame_id="map",
+            stamp=SimpleNamespace(
+                sec=seconds, nanosec=int((stamp - seconds) * 1e9)
+            ),
+        ),
+        schema_version=1,
+        route_sha256=route,
+        next_waypoint_index=index,
+        next_waypoint_number=20 + index,
+        navigation_mode="to_pose",
+        goal_generation=generation,
+        activity=activity,
+        reference_allowed=allowed,
+        safe_section_end_index=7,
+        waypoint_count=8,
+    )
+
+
+def reference_path_message(
+    points, *, stamp=100.0, route="a" * 64, index=1, generation=4,
+    valid=True, reason="",
+):
+    seconds = int(stamp)
+    stamp_message = SimpleNamespace(
+        sec=seconds, nanosec=int((stamp - seconds) * 1e9)
+    )
+    planar_length = sum(
+        np.linalg.norm(np.asarray(b[:2]) - np.asarray(a[:2]))
+        for a, b in zip(points, points[1:])
+    )
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id="map", stamp=stamp_message),
+        schema_version=1,
+        valid=valid,
+        invalid_reason=reason,
+        route_sha256=route,
+        next_waypoint_index=index,
+        next_waypoint_number=20 + index,
+        navigation_mode="to_pose",
+        goal_generation=generation,
+        safe_section_end_index=7,
+        waypoint_count=8,
+        planner_generation=5,
+        follower_state_stamp=stamp_message,
+        path_length_m=planar_length,
+        path=path_message(points, stamp=stamp),
+    )
+
+
+def enable_reference(fake, now=100.0):
+    fake._reference_enabled = True
+    fake._reference_gate = ReferencePathGate(clock=lambda: 10.0)
+    fake._reference_color = (255, 255, 0)
+    fake._reference_thickness = 3
+    fake._reference_dash_px = 14.0
+    fake._reference_gap_px = 9.0
+    fake._ros_now_sec = lambda: now
+    follower = reference_follower_message(stamp=now)
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, follower)
+    return follower
 
 
 def capture_states(monkeypatch):
@@ -227,6 +298,113 @@ def test_start_before_path_then_adopt_and_update_route_while_recording(monkeypat
     viewer_node.ArPathViewerNode._tick(fake)
     assert states[-1] == ("NO PATH", [])
     assert len(fake._writer.frames) == 4
+
+
+def test_reference_path_is_cyan_in_recording_and_does_not_replace_green_plan():
+    fake = make_viewer()
+    enable_reference(fake)
+    viewer_node.ArPathViewerNode._on_reference_path_state(
+        fake,
+        reference_path_message(
+            ((1.0, 0.6, 0.0), (4.0, 0.6, 0.0), (10.0, 0.6, 0.0))
+        ),
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake,
+        path_message(((1.0, -0.4, 0.0), (5.0, -0.4, 0.0))),
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    frame = fake._writer.frames[-1]
+    cyan = (
+        (frame[:, :, 0] > 150)
+        & (frame[:, :, 1] > 150)
+        & (frame[:, :, 2] < 100)
+    )
+    green = (
+        (frame[:, :, 0] < 100)
+        & (frame[:, :, 1] > 150)
+        & (frame[:, :, 2] < 100)
+    )
+    assert np.count_nonzero(cyan) > 20
+    assert np.count_nonzero(green) > 20
+    assert fake._path_store.snapshot() is not None
+    assert fake._reference_gate.path_store.snapshot() is not None
+
+
+def test_pause_and_planner_invalidation_remove_reference_from_next_recorded_frame():
+    fake = make_viewer()
+    enable_reference(fake)
+    points = ((1.0, 0.5, 0.0), (5.0, 0.5, 0.0), (10.0, 0.5, 0.0))
+    viewer_node.ArPathViewerNode._on_reference_path_state(
+        fake, reference_path_message(points)
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    first = fake._writer.frames[-1]
+    assert np.count_nonzero(
+        (first[:, :, 0] > 150)
+        & (first[:, :, 1] > 150)
+        & (first[:, :, 2] < 100)
+    ) > 20
+
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake,
+        reference_follower_message(activity=4, allowed=False),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    paused = fake._writer.frames[-1]
+    assert np.count_nonzero(
+        (paused[:, :, 0] > 150)
+        & (paused[:, :, 1] > 150)
+        & (paused[:, :, 2] < 100)
+    ) == 0
+
+    enable_reference(fake)
+    viewer_node.ArPathViewerNode._on_reference_path_state(
+        fake, reference_path_message(points)
+    )
+    viewer_node.ArPathViewerNode._on_reference_path_state(
+        fake,
+        reference_path_message(
+            (), valid=False, reason="reference_planner_not_active"
+        ),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    stopped = fake._writer.frames[-1]
+    assert np.count_nonzero(
+        (stopped[:, :, 0] > 150)
+        & (stopped[:, :, 1] > 150)
+        & (stopped[:, :, 2] < 100)
+    ) == 0
+
+
+def test_reference_path_obeys_localization_gate_and_does_not_create_orange_guidance():
+    fake = make_viewer(clock=lambda: 100.0)
+    enable_reference(fake)
+    viewer_node.ArPathViewerNode._on_reference_path_state(
+        fake,
+        reference_path_message(
+            ((1.0, 0.0, 0.0), (8.0, 0.0, 0.0))
+        ),
+    )
+    fake._localization = LocalizationMonitor(clock=lambda: 100.0)
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    frame = fake._writer.frames[-1]
+    cyan = (
+        (frame[:, :, 0] > 150)
+        & (frame[:, :, 1] > 150)
+        & (frame[:, :, 2] < 100)
+    )
+    orange = (
+        (frame[:, :, 0] < 80)
+        & (frame[:, :, 1] > 80)
+        & (frame[:, :, 2] > 180)
+    )
+    assert np.count_nonzero(cyan) == 0
+    assert np.count_nonzero(orange[100:]) == 0
 
 
 def test_plan_is_adopted_and_processing_continues_with_real_rclpy_logger(monkeypatch):

@@ -13,6 +13,10 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from robotbase_waypoint_interfaces.msg import (
+    ReferencePathState,
+    WaypointFollowerState,
+)
 from tf2_ros import Buffer, TransformListener
 
 from .camera_model import CameraUndistorter
@@ -33,6 +37,7 @@ from .projection import (
     CameraMount,
     ground_plane_view,
 )
+from .reference_path import ReferencePathGate
 from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
@@ -50,6 +55,12 @@ class ArPathViewerNode(Node):
             "base_frame": "robot/base_footprint",
             "localization_global_frame": "map",
             "path_timeout_sec": 6.5,
+            # Kept off until Phase 4 verifies production keepout/costmap parity.
+            "reference_path_enabled": False,
+            "reference_path_state_topic": "/ar/reference_path_state",
+            "reference_follower_state_topic": "/waypoint_follower/reference_state",
+            "reference_path_timeout_sec": 6.5,
+            "reference_follower_timeout_sec": 2.5,
             "localization_pose_timeout_sec": 3.0,
             "localization_stamp_max_age_sec": 3.0,
             "localization_future_tolerance_sec": 1.5,
@@ -95,6 +106,12 @@ class ArPathViewerNode(Node):
             "line_g": 255,
             "line_r": 0,
             "line_thickness": 5,
+            "reference_line_b": 255,
+            "reference_line_g": 255,
+            "reference_line_r": 0,
+            "reference_line_thickness": 3,
+            "reference_dash_px": 14.0,
+            "reference_gap_px": 9.0,
             "image_input_type": "simulation",
             "image_input_uri": "",
             "display": False,
@@ -148,6 +165,13 @@ class ArPathViewerNode(Node):
             self._mount.validate()
             self._near = self._float("near_clip_m")
             self._path_store = PathStore(self._float("path_timeout_sec"))
+            self._reference_gate = ReferencePathGate(
+                timeout_sec=self._float("reference_path_timeout_sec"),
+                follower_timeout_sec=self._float(
+                    "reference_follower_timeout_sec"
+                ),
+                expected_frame=self._str("localization_global_frame"),
+            )
             self._guidance_settings = GuidanceSettings(
                 enabled=self._bool("offscreen_guidance_enabled"),
                 lookahead_m=self._float("offscreen_guidance_lookahead_m"),
@@ -178,6 +202,7 @@ class ArPathViewerNode(Node):
             self._mount = CameraMount()
             self._near = 0.10
             self._path_store = PathStore()
+            self._reference_gate = ReferencePathGate()
             self._guidance_settings = GuidanceSettings(enabled=False)
 
         try:
@@ -299,6 +324,15 @@ class ArPathViewerNode(Node):
             self._log_error(f"Invalid localization configuration: {exc}")
             self._localization = LocalizationMonitor()
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
+        self._reference_enabled = self._bool("reference_path_enabled")
+        self._reference_color = (
+            self._int("reference_line_b"),
+            self._int("reference_line_g"),
+            self._int("reference_line_r"),
+        )
+        self._reference_thickness = self._int("reference_line_thickness")
+        self._reference_dash_px = self._float("reference_dash_px")
+        self._reference_gap_px = self._float("reference_gap_px")
         self._guidance_color = (
             self._int("guidance_line_b"),
             self._int("guidance_line_g"),
@@ -328,6 +362,27 @@ class ArPathViewerNode(Node):
         self._subscription = self.create_subscription(
             PathMessage, self._str("path_topic"), self._on_path, qos
         )
+        self._reference_subscription = None
+        self._reference_follower_subscription = None
+        if self._reference_enabled:
+            self._reference_subscription = self.create_subscription(
+                ReferencePathState,
+                self._str("reference_path_state_topic"),
+                self._on_reference_path_state,
+                qos,
+            )
+            reference_state_qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._reference_follower_subscription = self.create_subscription(
+                WaypointFollowerState,
+                self._str("reference_follower_state_topic"),
+                self._on_reference_follower_state,
+                reference_state_qos,
+            )
         self._amcl_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
             self._str("amcl_pose_topic"),
@@ -340,6 +395,15 @@ class ArPathViewerNode(Node):
         self._writer = self._make_writer(output_video, self._float("fps"))
         self._timer = self.create_timer(1.0 / max(1.0, self._float("fps")), self._tick)
         self._log_info("AR Path Viewer started in read-only/subscriber-only mode")
+        self._log_info(
+            "reference_path_configuration "
+            f"enabled={self._reference_enabled} "
+            f"state_topic={self._str('reference_path_state_topic')!r} "
+            f"follower_topic={self._str('reference_follower_state_topic')!r} "
+            f"timeout_sec={self._reference_gate.path_store.timeout_sec:.3f} "
+            f"follower_timeout_sec={self._reference_gate.follower_timeout_sec:.3f} "
+            f"color_bgr={self._reference_color} style=dashed"
+        )
 
     def _str(self, name: str) -> str:
         return str(self.get_parameter(name).value)
@@ -440,6 +504,36 @@ class ArPathViewerNode(Node):
             status.state, status.detail, status.receive_count
         )
 
+    def _on_reference_follower_state(
+        self, message: WaypointFollowerState
+    ) -> None:
+        accepted = self._reference_gate.update_follower(
+            message, self._ros_now_sec()
+        )
+        self._diagnostics.reference_update(
+            "follower_state",
+            accepted,
+            self._reference_gate.reason,
+        )
+
+    def _on_reference_path_state(self, message: ReferencePathState) -> None:
+        accepted = self._reference_gate.update_reference(
+            message, self._ros_now_sec()
+        )
+        point_count = len(getattr(getattr(message, "path", None), "poses", ()))
+        metadata = self._reference_gate.metadata
+        detail = self._reference_gate.reason
+        if accepted and metadata is not None:
+            detail = (
+                f"route={metadata.identity.route_sha256[:12]} "
+                f"next_index={metadata.identity.next_index} "
+                f"goal_generation={metadata.identity.goal_generation} "
+                f"planner_generation={metadata.planner_generation} "
+                f"points={point_count} "
+                f"path_length_m={metadata.declared_length_m:.3f}"
+            )
+        self._diagnostics.reference_update("path_state", accepted, detail)
+
     def _ros_now_sec(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -539,7 +633,23 @@ class ArPathViewerNode(Node):
                 image = self._undistorter.apply(image)
             state, snapshot = self._path_store.state()
             segments = []
-            if state == "ACTIVE" and snapshot is not None:
+            reference_segments = []
+            reference_enabled = bool(
+                getattr(self, "_reference_enabled", False)
+            )
+            reference_state = "DISABLED"
+            reference_snapshot = None
+            reference_reason = "disabled_by_configuration"
+            reference_gate = getattr(self, "_reference_gate", None)
+            if reference_enabled and reference_gate is not None:
+                reference_state, reference_snapshot, reference_reason = (
+                    reference_gate.state(self._ros_now_sec())
+                )
+
+            localization = None
+            tf_available = False
+            tf_detail = ""
+            if state == "ACTIVE" or reference_state == "ACTIVE":
                 tf_available, tf_detail, tf_pose = self._check_localization_tf()
                 localization = self._localization.status(
                     freshness_confirmed=tf_available,
@@ -550,6 +660,8 @@ class ArPathViewerNode(Node):
                     localization.detail,
                     localization.receive_count,
                 )
+
+            if state == "ACTIVE" and snapshot is not None:
                 if not localization.stable:
                     state = localization.state
                     detail = localization.detail
@@ -612,6 +724,87 @@ class ArPathViewerNode(Node):
                     f"age={age:.3f}s timeout={self._path_store.timeout_sec:.3f}s "
                     f"generation={snapshot.generation}"
                 )
+
+            if reference_state == "ACTIVE" and reference_snapshot is not None:
+                if localization is None or not localization.stable:
+                    reference_reason = (
+                        "localization_not_stable"
+                        if localization is None
+                        else localization.state
+                    )
+                elif not tf_available:
+                    reference_reason = f"tf_unavailable {tf_detail}"
+                else:
+                    try:
+                        reference_evaluation = evaluate_path_state(
+                            reference_snapshot.points,
+                            reference_snapshot.frame_id,
+                            self._base_frame,
+                            self._points_in_base,
+                            self._mount,
+                            self._intrinsics,
+                            self._near,
+                            on_tf_error=lambda exc: self._diagnostics.tf_failure(
+                                reference_snapshot.frame_id,
+                                self._base_frame,
+                                exc,
+                            ),
+                        )
+                    except ValueError as exc:
+                        reference_reason = f"invalid_projection {exc}"
+                    else:
+                        reference_segments = reference_evaluation.segments
+                        reference_stats = reference_evaluation.stats
+                        if reference_evaluation.state == "ACTIVE":
+                            reference_reason = "visible"
+                        elif reference_evaluation.state == "PATH OUT OF VIEW":
+                            out_reason = (
+                                "no_projectable_segment"
+                                if reference_stats is None
+                                else reference_stats.out_of_view_reason
+                            )
+                            reference_reason = f"out_of_view {out_reason}"
+                        else:
+                            reference_reason = reference_evaluation.state.lower()
+                        stats_detail = (
+                            "stats=unavailable"
+                            if reference_stats is None
+                            else reference_stats.log_detail()
+                        )
+                        self._diagnostics.reference_projection(
+                            reference_snapshot.frame_id,
+                            bool(reference_segments),
+                            f"{stats_detail} projected_segments="
+                            f"{len(reference_segments)}",
+                            reference_reason,
+                        )
+
+            if reference_enabled:
+                metadata = (
+                    None if reference_gate is None else reference_gate.metadata
+                )
+                age = (
+                    0.0 if reference_gate is None else max(0.0, reference_gate.age())
+                )
+                reference_summary = (
+                    f"ref={reference_reason} points="
+                    f"{0 if reference_snapshot is None else len(reference_snapshot.points)} "
+                    f"length_m={0.0 if metadata is None else metadata.declared_length_m:.2f} "
+                    f"age={age:.2f}s segments={len(reference_segments)}"
+                )
+                if not reference_segments:
+                    reference_frame = (
+                        self._localization.thresholds.expected_frame
+                        if reference_snapshot is None
+                        else reference_snapshot.frame_id
+                    )
+                    self._diagnostics.reference_projection(
+                        reference_frame,
+                        False,
+                        reference_summary,
+                        reference_reason,
+                    )
+                detail = f"{detail}; {reference_summary}" if detail else reference_summary
             frame = render_frame(
                 image,
                 segments,
@@ -621,6 +814,15 @@ class ArPathViewerNode(Node):
                 detail=detail,
                 guidance=guidance,
                 guidance_color_bgr=self._guidance_color,
+                reference_segments=reference_segments,
+                reference_color_bgr=getattr(
+                    self, "_reference_color", (255, 255, 0)
+                ),
+                reference_thickness=getattr(
+                    self, "_reference_thickness", 3
+                ),
+                reference_dash_px=getattr(self, "_reference_dash_px", 14.0),
+                reference_gap_px=getattr(self, "_reference_gap_px", 9.0),
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:

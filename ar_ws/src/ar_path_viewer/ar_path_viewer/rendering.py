@@ -82,6 +82,45 @@ def direction_arrow_segments(
     return arrows
 
 
+def dashed_line_segments(
+    segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
+    dash_px: float = 14.0,
+    gap_px: float = 9.0,
+) -> list[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """Split real projected segments into a stable dash pattern."""
+    if dash_px <= 0.0 or gap_px < 0.0:
+        raise ValueError("dash_px must be positive and gap_px non-negative")
+    period = dash_px + gap_px
+    phase = 0.0
+    output = []
+    for start, end in segments:
+        vector = np.asarray(end, dtype=float) - np.asarray(start, dtype=float)
+        length = float(np.linalg.norm(vector))
+        if length < 1.0:
+            continue
+        unit = vector / length
+        distance = 0.0
+        while distance < length - 1e-9:
+            in_period = phase % period
+            step = min(length - distance, period - in_period)
+            if in_period < dash_px:
+                visible = min(step, dash_px - in_period)
+                if visible > 0.5:
+                    dash_start = np.asarray(start, dtype=float) + unit * distance
+                    dash_end = dash_start + unit * visible
+                    output.append(
+                        (
+                            tuple(np.rint(dash_start).astype(int)),
+                            tuple(np.rint(dash_end).astype(int)),
+                        )
+                    )
+            distance += step
+            phase += step
+        # Projection clipping may split one continuous path by rounding only;
+        # retaining phase prevents every source segment looking like a solid line.
+    return output
+
+
 def offscreen_arrow_geometry(
     width: int,
     height: int,
@@ -140,11 +179,26 @@ def render_frame(
     detail: str = "",
     guidance: OffscreenGuidance | None = None,
     guidance_color_bgr: Tuple[int, int, int] = (0, 165, 255),
+    reference_segments: Iterable[
+        Tuple[Tuple[int, int], Tuple[int, int]]
+    ] = (),
+    reference_color_bgr: Tuple[int, int, int] = (255, 255, 0),
+    reference_thickness: int = 3,
+    reference_dash_px: float = 14.0,
+    reference_gap_px: float = 9.0,
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
     frame = image.copy()
     segment_list = list(segments)
+    reference_list = list(reference_segments)
+    for start, end in dashed_line_segments(
+        reference_list, reference_dash_px, reference_gap_px
+    ):
+        cv2.line(
+            frame, start, end, reference_color_bgr,
+            reference_thickness, cv2.LINE_AA,
+        )
     if state == "ACTIVE":
         for start, end in segment_list:
             cv2.line(frame, start, end, color_bgr, thickness, cv2.LINE_AA)
@@ -162,6 +216,24 @@ def render_frame(
     )
     cv2.putText(frame, state, (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.72,
                 label_color, 2, cv2.LINE_AA)
+    if reference_list:
+        label = "REFERENCE"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.52
+        label_thickness = 2
+        (label_width, _), _ = cv2.getTextSize(
+            label, font, scale, label_thickness
+        )
+        cv2.putText(
+            frame,
+            label,
+            (max(18, frame.shape[1] - label_width - 18), 34),
+            font,
+            scale,
+            reference_color_bgr,
+            label_thickness,
+            cv2.LINE_AA,
+        )
     for index, line in enumerate(detail_lines):
         cv2.putText(frame, line, (18, 58 + 24 * index), cv2.FONT_HERSHEY_SIMPLEX,
                     0.42, (230, 230, 230), 1, cv2.LINE_AA)

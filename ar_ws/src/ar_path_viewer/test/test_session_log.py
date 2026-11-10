@@ -57,6 +57,11 @@ def test_copy_text_prioritizes_latest_projection_configuration_and_errors(tmp_pa
         "camera_forward_path_length_m=7.5 visible_path_length_m=2.1 "
         "nonvisible_forward_path_length_m=5.4",
     )
+    log.record(
+        "INFO",
+        "reference_path_projection valid=true path_length_m=13.7 "
+        "projected_segments=42",
+    )
     copied = log.copy_text(3000)
     assert len(copied) <= 3000
     assert "log truncated for clipboard" in copied
@@ -64,6 +69,7 @@ def test_copy_text_prioritizes_latest_projection_configuration_and_errors(tmp_pa
     assert "camera exception test failure" in copied
     assert "path_projection" in copied
     assert "path_length_m=8.2" in copied
+    assert "reference_path_projection" in copied
 
 
 def test_file_failure_keeps_in_memory_log_available(tmp_path):

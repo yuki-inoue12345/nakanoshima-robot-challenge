@@ -15,6 +15,7 @@ from ar_path_viewer.display_window import (
 )
 from ar_path_viewer.rendering import (
     VALID_STATES,
+    dashed_line_segments,
     direction_arrow_segments,
     render_frame,
 )
@@ -78,6 +79,42 @@ def test_direction_arrow_follows_projected_path_direction():
     assert forward and reverse
     assert forward[0][0][0] < forward[0][1][0]
     assert reverse[0][0][0] > reverse[0][1][0]
+
+
+def test_reference_path_is_cyan_dashed_and_green_plan_remains_on_top():
+    image = np.zeros((180, 320, 3), np.uint8)
+    overlap = [((20, 120), (300, 120))]
+    reference_only = [((20, 150), (300, 150))]
+    frame = render_frame(
+        image,
+        overlap,
+        "ACTIVE",
+        thickness=5,
+        reference_segments=overlap + reference_only,
+        reference_thickness=3,
+        reference_dash_px=14.0,
+        reference_gap_px=9.0,
+    )
+
+    # The solid control path is painted after the reference path and remains green.
+    assert frame[120, 160, 1] > 180
+    assert frame[120, 160, 0] < 100
+    cyan = (
+        (frame[145:156, :, 0] > 150)
+        & (frame[145:156, :, 1] > 150)
+        & (frame[145:156, :, 2] < 100)
+    )
+    assert np.count_nonzero(cyan) > 50
+    # Gaps remain black; the reference route is not accidentally solid.
+    assert np.count_nonzero(np.all(frame[150, 20:301] == 0, axis=1)) > 20
+
+
+def test_dashed_reference_preserves_real_segment_endpoints_and_empty_is_noop():
+    dashes = dashed_line_segments([((5, 40), (95, 40))], 10.0, 5.0)
+    assert dashes
+    assert dashes[0][0] == (5, 40)
+    assert all(5 <= point[0] <= 95 for dash in dashes for point in dash)
+    assert dashed_line_segments([]) == []
 
 
 def test_offscreen_guidance_is_orange_ui_not_green_projected_path():

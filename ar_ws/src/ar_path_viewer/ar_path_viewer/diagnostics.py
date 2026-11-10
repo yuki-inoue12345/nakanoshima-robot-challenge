@@ -23,6 +23,7 @@ class DiagnosticReporter:
         self.clock = clock
         self.record_sink = record_sink
         self.path_receive_count = 0
+        self.reference_receive_count = 0
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -130,6 +131,31 @@ class DiagnosticReporter:
             "info",
             "offscreen_guidance",
             f"offscreen_guidance frame_id={frame_id!r} {detail}",
+        )
+
+    def reference_update(self, event: str, valid: bool, detail: str) -> None:
+        """Rate-limit reference-path diagnostics independently from /plan."""
+        self.reference_receive_count += int(event == "path_state")
+        level = "info" if valid else "warning"
+        self._emit(
+            level,
+            f"reference:{event}:{valid}:{detail}",
+            "reference_path_state "
+            f"event={event} valid={str(valid).lower()} "
+            f"reference_rx_count={self.reference_receive_count} detail={detail}",
+            force=event == "path_state" and self.reference_receive_count == 1,
+        )
+
+    def reference_projection(
+        self, frame_id: str, valid: bool, detail: str, reason: str
+    ) -> None:
+        level = "info" if valid else "warning"
+        self._emit(
+            level,
+            f"reference_projection:{valid}:{reason}",
+            "reference_path_projection "
+            f"valid={str(valid).lower()} frame_id={frame_id!r} "
+            f"reason={reason} {detail}",
         )
 
     def camera_configuration(self, detail: str) -> None:
