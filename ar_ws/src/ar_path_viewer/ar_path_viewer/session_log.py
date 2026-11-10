@@ -68,6 +68,7 @@ class SessionLog:
     _PRIORITY_MARKERS = (
         "session_start",
         "camera_configuration",
+        "path_display_configuration",
         "output_files",
         "viewer_state",
         "plan_rx",

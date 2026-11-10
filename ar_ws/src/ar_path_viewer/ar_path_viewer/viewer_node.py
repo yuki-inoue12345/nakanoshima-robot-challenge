@@ -41,7 +41,7 @@ from .reference_path import ReferencePathGate
 from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
-from .viewer_logic import evaluate_path_state
+from .viewer_logic import PathDisplayGeometry, evaluate_path_state
 
 
 class ArPathViewerNode(Node):
@@ -91,6 +91,8 @@ class ArPathViewerNode(Node):
             "camera_pitch_up_deg": 7.5,
             "camera_roll_deg": 0.0,
             "near_clip_m": 0.10,
+            "path_display_mode": "elevated",
+            "path_display_height_m": 0.50,
             "offscreen_guidance_enabled": True,
             "offscreen_guidance_lookahead_m": 1.5,
             "offscreen_guidance_min_remaining_m": 0.6,
@@ -164,6 +166,11 @@ class ArPathViewerNode(Node):
             )
             self._mount.validate()
             self._near = self._float("near_clip_m")
+            self._path_display_geometry = PathDisplayGeometry(
+                mode=self._str("path_display_mode"),
+                height_m=self._float("path_display_height_m"),
+            )
+            self._path_display_geometry.validate()
             self._path_store = PathStore(self._float("path_timeout_sec"))
             self._reference_gate = ReferencePathGate(
                 timeout_sec=self._float("reference_path_timeout_sec"),
@@ -201,6 +208,7 @@ class ArPathViewerNode(Node):
             self._undistorter = None
             self._mount = CameraMount()
             self._near = 0.10
+            self._path_display_geometry = PathDisplayGeometry()
             self._path_store = PathStore()
             self._reference_gate = ReferencePathGate()
             self._guidance_settings = GuidanceSettings(enabled=False)
@@ -282,6 +290,12 @@ class ArPathViewerNode(Node):
             f"max_bearing_deg={self._guidance_settings.max_bearing_deg:.3f} "
             "max_bearing_change_deg="
             f"{self._guidance_settings.max_bearing_change_deg:.3f}"
+        )
+        self._log_info(
+            "path_display_configuration "
+            f"mode={self._path_display_geometry.mode} "
+            f"height_m={self._path_display_geometry.height_m:.3f} "
+            "preserves_nav2_xy=true guidance_uses_original_path=true"
         )
         if self._session_log.file_error:
             self._log_warning(
@@ -673,6 +687,7 @@ class ArPathViewerNode(Node):
                         evaluation = evaluate_path_state(
                             snapshot.points, snapshot.frame_id, self._base_frame,
                             self._points_in_base, self._mount, self._intrinsics, self._near,
+                            display_geometry=self._path_display_geometry,
                             guidance_settings=self._guidance_settings,
                             on_tf_error=lambda exc: self._diagnostics.tf_failure(
                                 snapshot.frame_id, self._base_frame, exc
@@ -744,6 +759,7 @@ class ArPathViewerNode(Node):
                             self._mount,
                             self._intrinsics,
                             self._near,
+                            display_geometry=self._path_display_geometry,
                             on_tf_error=lambda exc: self._diagnostics.tf_failure(
                                 reference_snapshot.frame_id,
                                 self._base_frame,
@@ -823,6 +839,7 @@ class ArPathViewerNode(Node):
                 ),
                 reference_dash_px=getattr(self, "_reference_dash_px", 14.0),
                 reference_gap_px=getattr(self, "_reference_gap_px", 9.0),
+                display_mode_label=self._path_display_geometry.label,
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:

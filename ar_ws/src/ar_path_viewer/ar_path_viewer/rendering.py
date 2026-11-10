@@ -186,6 +186,7 @@ def render_frame(
     reference_thickness: int = 3,
     reference_dash_px: float = 14.0,
     reference_gap_px: float = 9.0,
+    display_mode_label: str = "",
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -216,6 +217,25 @@ def render_frame(
     )
     cv2.putText(frame, state, (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.72,
                 label_color, 2, cv2.LINE_AA)
+    right_edge = frame.shape[1] - 18
+    if display_mode_label:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.45
+        mode_thickness = 1
+        (mode_width, _), _ = cv2.getTextSize(
+            display_mode_label, font, scale, mode_thickness
+        )
+        cv2.putText(
+            frame,
+            display_mode_label,
+            (max(18, right_edge - mode_width), 34),
+            font,
+            scale,
+            (210, 210, 210),
+            mode_thickness,
+            cv2.LINE_AA,
+        )
+        right_edge -= mode_width + 18
     if reference_list:
         label = "REFERENCE"
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -227,7 +247,7 @@ def render_frame(
         cv2.putText(
             frame,
             label,
-            (max(18, frame.shape[1] - label_width - 18), 34),
+            (max(18, right_edge - label_width), 34),
             font,
             scale,
             reference_color_bgr,

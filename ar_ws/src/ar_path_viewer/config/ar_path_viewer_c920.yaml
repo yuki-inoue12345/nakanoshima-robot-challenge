@@ -45,6 +45,9 @@ ar_path_viewer:
     camera_pitch_up_deg: 7.5
     camera_roll_deg: 0.0
     near_clip_m: 0.10
+    # Display-only height; camera calibration and the Nav2 Path are unchanged.
+    path_display_mode: elevated
+    path_display_height_m: 0.50
     # Orange fixed-UI arrow for a fresh real /plan that is wholly outside view.
     offscreen_guidance_enabled: true
     offscreen_guidance_lookahead_m: 1.5

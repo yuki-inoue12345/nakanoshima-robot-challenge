@@ -15,6 +15,7 @@ from ar_path_viewer.offscreen_guidance import GuidanceSettings
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
 from ar_path_viewer import viewer_node
+from ar_path_viewer.viewer_logic import PathDisplayGeometry
 
 
 class RecordingLogger:
@@ -133,6 +134,9 @@ def make_viewer(clock=None):
     fake._undistorter = None
     fake._mount = CameraMount()
     fake._near = 0.1
+    # Existing runtime tests retain the former ground-plane baseline. Dedicated
+    # tests below exercise the new elevated mode explicitly.
+    fake._path_display_geometry = PathDisplayGeometry("ground", 0.5)
     fake._guidance_settings = GuidanceSettings()
     fake._guidance_color = (0, 165, 255)
     fake._path_store = PathStore(clock=active_clock)
@@ -298,6 +302,32 @@ def test_start_before_path_then_adopt_and_update_route_while_recording(monkeypat
     viewer_node.ArPathViewerNode._tick(fake)
     assert states[-1] == ("NO PATH", [])
     assert len(fake._writer.frames) == 4
+
+
+def test_elevated_mode_records_more_of_a_short_real_path_than_ground_mode():
+    points = tuple(
+        (float(x), 0.2 * float(x), 0.0) for x in np.linspace(0.4, 2.8, 49)
+    )
+    ground = make_viewer()
+    viewer_node.ArPathViewerNode._on_path(ground, path_message(points))
+    viewer_node.ArPathViewerNode._tick(ground)
+    ground_green = np.count_nonzero(
+        (ground._writer.frames[-1][:, :, 1] > 180)
+        & (ground._writer.frames[-1][:, :, 0] < 80)
+        & (ground._writer.frames[-1][:, :, 2] < 80)
+    )
+
+    elevated = make_viewer()
+    elevated._path_display_geometry = PathDisplayGeometry("elevated", 0.5)
+    viewer_node.ArPathViewerNode._on_path(elevated, path_message(points))
+    viewer_node.ArPathViewerNode._tick(elevated)
+    elevated_green = np.count_nonzero(
+        (elevated._writer.frames[-1][:, :, 1] > 180)
+        & (elevated._writer.frames[-1][:, :, 0] < 80)
+        & (elevated._writer.frames[-1][:, :, 2] < 80)
+    )
+
+    assert elevated_green > ground_green
 
 
 def test_reference_path_is_cyan_in_recording_and_does_not_replace_green_plan():

@@ -48,6 +48,7 @@ def test_session_log_streams_to_disk_and_keeps_selectable_text(tmp_path):
 def test_copy_text_prioritizes_latest_projection_configuration_and_errors(tmp_path):
     log = SessionLog(tmp_path / "copy.log", max_entries=200)
     log.record("INFO", "camera_configuration fx=525 camera_pitch_up_deg=7.5")
+    log.record("INFO", "path_display_configuration mode=elevated height_m=0.500")
     for index in range(150):
         log.record("INFO", f"routine filler index={index} " + "x" * 40)
     log.record("ERROR", "camera exception test failure")
@@ -66,6 +67,7 @@ def test_copy_text_prioritizes_latest_projection_configuration_and_errors(tmp_pa
     assert len(copied) <= 3000
     assert "log truncated for clipboard" in copied
     assert "camera_configuration" in copied
+    assert "path_display_configuration" in copied
     assert "camera exception test failure" in copied
     assert "path_projection" in copied
     assert "path_length_m=8.2" in copied

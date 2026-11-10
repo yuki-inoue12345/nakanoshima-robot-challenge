@@ -109,6 +109,19 @@ def test_reference_path_is_cyan_dashed_and_green_plan_remains_on_top():
     assert np.count_nonzero(np.all(frame[150, 20:301] == 0, axis=1)) > 20
 
 
+def test_display_mode_label_is_rendered_without_changing_route_geometry():
+    image = np.zeros((180, 640, 3), np.uint8)
+    route = [((20, 120), (300, 120))]
+    without_label = render_frame(image, route, "ACTIVE")
+    with_label = render_frame(
+        image, route, "ACTIVE", display_mode_label="AR FLOAT 0.50m"
+    )
+    assert np.array_equal(without_label[100:140], with_label[100:140])
+    assert not np.array_equal(
+        with_label[12:38, 430:630], without_label[12:38, 430:630]
+    )
+
+
 def test_dashed_reference_preserves_real_segment_endpoints_and_empty_is_noop():
     dashes = dashed_line_segments([((5, 40), (95, 40))], 10.0, 5.0)
     assert dashes

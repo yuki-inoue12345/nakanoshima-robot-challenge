@@ -57,6 +57,21 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 
 起動時の`camera_configuration`には、設定値から求めた`ground_horizon_v_px`、`ground_bottom_center_camera_distance_m`、`ground_bottom_center_base_x_m`、`ground_bottom_center_base_y_m`も記録します。これらは診断値であり、投影位置やPathを変更しません。
 
+### 短い実Path向けの表示高さ
+
+固定C920では1〜3 m先の床が画像下へ外れるため、AR表示は次の2方式をROS parameterで切り替えられます。
+
+```yaml
+path_display_mode: elevated  # elevated または ground
+path_display_height_m: 0.50  # elevated時だけ使用、0〜2 m
+```
+
+`ground`は従来どおりTF変換後のNav2 Pathを`base_footprint`のZ=0へ置く床面表示です。`elevated`は全点のX/Yと点順序を一切変えず、描画時のZだけを一定値へ置く仮想的な浮遊表示です。Nav2経路の延長、補間、画面座標への貼り付けではありません。TF、AMCL、Path鮮度、視錐台クリッピングも従来と同じです。橙色方向案内の判定には高さ変更前の実Pathを使います。
+
+2026-11-09の2走目bag（180 Path）を本番仮設定`fx=fy=525`、pitch 7.5°で再投影すると、Z=0は43/180（23.9%）のみ描画可能でした。Z=0.3/0.5/0.7/1.0 mではそれぞれ108/166/168/168 Pathが描画可能でした。0.7 mはカメラ高さ付近へ長い横線として出やすく、1.0 mは近傍が画像上へ外れやすいため、映像内で低めの遠近感を残しつつ1〜3 m Pathの94.3%（全長1 m以上）を描画できた0.50 mを初期値としました。これは床面位置を示す校正値ではなく、進行方向を見やすくする表示値です。画面には`AR FLOAT 0.50m`または`AR GROUND`を表示し、ログには`path_display_configuration`を記録します。
+
+2026-11-10走行ログではPath全長2.641〜3.060 mに対して床面の可視部分が0.014〜0.549 m（中央値0.420 m）、描画長が3.2〜43.6 px（中央値33.1 px）でした。画角外診断38回中35回が「前方Path全体が画像下」で、TF失敗はありません。したがって浮遊表示は校正誤差を解消するものではありませんが、この短い実Pathを架空に延ばさず視認可能にする目的に適合します。厳密な床面重畳を確認するときは`ground`へ戻します。
+
 ## 固定したC920の校正
 
 校正中もC920の取付位置・向きは動かしません。内部校正ではカメラではなくチェッカーボードを動かし、外部校正では停止中のロボットと、位置を実測した目印を撮影します。`camera_pitch_up_deg=7.5`や録画から推定した約17.4°は、以下の実測と再投影確認が完了するまで変更しません。
@@ -478,6 +493,7 @@ diagnostic_log_interval_sec: 5.0
 - `path_out_of_view`: 3Dクリップ後にカメラ視錐台と交差する線分がないこと
 - `path_projection`: TF変換後点数、入力線分数、Path全長、ロボットから終点までの距離、カメラ前方部分の実長、視錐台内部分と前方だが非表示の実長、前方全体と画角内線分それぞれの深度範囲、画像内点数、後方・near内・左右・上下の点数、描画線分数、可視画素長・表示範囲
 - `camera_configuration`: 実際に読み込まれた画像サイズ、内部パラメータ、カメラ位置・姿勢、near clip（起動時に1回）
+- `path_display_configuration`: `ground` / `elevated`、表示高さ、Nav2 XY保持（起動時に1回）
 - `localization_state`: AMCL受信数、`LOCALIZING` / `LOCALIZATION UNSTABLE` / `LOCALIZATION OK`、判定理由
 
 `path_out_of_view`の理由は、全点がカメラ後方、全点がnear clip内、前方点がすべて画像の下・上・左・右、または複数境界の組合せで視錐台と交差しない場合に分類します。点がすべて画像外でも、隣接点間の線分が画角を横切れば3Dクリッピング後に描画します。投影診断は`diagnostic_log_interval_sec`（初期値5秒）で集約されます。

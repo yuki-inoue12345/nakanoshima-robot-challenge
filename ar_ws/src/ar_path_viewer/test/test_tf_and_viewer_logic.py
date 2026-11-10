@@ -1,10 +1,16 @@
 import math
 
 import numpy as np
+import pytest
 
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.tf_adapter import quaternion_matrix_xyzw, transform_points
-from ar_path_viewer.viewer_logic import project_path_state, project_path_state_detailed
+from ar_path_viewer.viewer_logic import (
+    PathDisplayGeometry,
+    evaluate_path_state,
+    project_path_state,
+    project_path_state_detailed,
+)
 
 
 def test_quaternion_and_translation_transform_points():
@@ -77,3 +83,49 @@ def test_detailed_path_state_explains_out_of_view_reason():
     assert stats is not None
     assert stats.behind_points == 2
     assert stats.out_of_view_reason == "all Path points are behind the camera"
+
+
+def test_elevated_display_preserves_nav2_xy_and_makes_short_path_visible():
+    points = np.column_stack((
+        np.linspace(0.4, 2.8, 49),
+        np.linspace(0.0, 0.7, 49),
+        np.zeros(49),
+    ))
+    original = points.copy()
+    ground = evaluate_path_state(
+        points, "robot/base_footprint", "robot/base_footprint",
+        lambda values, frame: values, CameraMount(), CameraIntrinsics(), 0.1,
+        display_geometry=PathDisplayGeometry("ground", 0.5),
+    )
+    elevated = evaluate_path_state(
+        points, "robot/base_footprint", "robot/base_footprint",
+        lambda values, frame: values, CameraMount(), CameraIntrinsics(), 0.1,
+        display_geometry=PathDisplayGeometry("elevated", 0.5),
+    )
+
+    assert ground.state == "ACTIVE"
+    assert elevated.state == "ACTIVE"
+    assert elevated.stats is not None and ground.stats is not None
+    assert elevated.stats.visible_path_length_m > ground.stats.visible_path_length_m
+    assert elevated.stats.drawable_segments > ground.stats.drawable_segments
+    assert math.isclose(
+        elevated.stats.path_length_m, ground.stats.path_length_m, abs_tol=1e-12
+    )
+    assert math.isclose(
+        elevated.stats.endpoint_distance_m,
+        ground.stats.endpoint_distance_m,
+        abs_tol=1e-12,
+    )
+    assert np.array_equal(points, original)
+    rendered = PathDisplayGeometry("elevated", 0.5).apply(points)
+    assert np.array_equal(rendered[:, :2], points[:, :2])
+    assert np.allclose(rendered[:, 2], 0.5)
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    (PathDisplayGeometry("invalid", 0.5), PathDisplayGeometry("elevated", -0.1)),
+)
+def test_invalid_path_display_geometry_is_rejected(geometry):
+    with pytest.raises(ValueError):
+        geometry.validate()
