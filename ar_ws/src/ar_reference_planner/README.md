@@ -112,7 +112,51 @@ polyline. Use `keepout_enabled:=false` to test the normal-map path. Setting
 `keepout_enabled:=true start_keepout_servers:=false` is a fail-closed test: no
 reference action request or valid Path may be produced.
 
-## Production-shaped launch (not yet approved for the NUC)
+## Launcher2 automatic integration
+
+The automatic supervisor deliberately reuses the two existing sources of
+truth instead of adding another map/waypoint selection UI:
+
+- map: Launcher2's
+  `$HOME/.${ROBOTBASE_LAUNCHER_ID}_nav2_current_map.yaml` `current_map`;
+- route: the running `/koko_waypoint_follower` node's existing
+  `waypoint_file` ROS parameter, accepted only when its file SHA-256 and
+  waypoint count/index/number agree with `WaypointFollowerState`.
+
+The Viewer may start before the Follower. Until a fresh Follower heartbeat and
+the parameter service are present, the supervisor publishes an invalid atomic
+reference state and starts no Planner. A missing, relative, unreadable, or
+initially stale map state; a missing route; a route-hash mismatch; or an invalid
+Keepout bundle behaves the same way. The initial map-state age limit defaults
+to 24 hours and is configurable. Once a state written during this supervisor
+run is accepted, it remains selected until Launcher2 changes or removes it;
+the live map/Keepout gate still compares the complete OccupancyGrid content.
+
+Changing the map or route invalidates the old Path before stopping the owned
+reference launch process. After a map change, the still-running old route hash
+is rejected until the Follower publishes a different route or its old lifetime
+has ended; this prevents a transient new-map/old-route pair. A new isolated
+Planner is then launched from the verified pair. Follower
+index/generation/pause changes do not restart Nav2;
+the existing request node handles those fast state transitions atomically.
+When the Follower heartbeat stops, the reference launch is stopped and the
+water-blue path is cleared. The supervisor contains no control action client
+and publishes neither `/plan` nor a velocity topic.
+
+The checked-in Viewer YAML remains `reference_path_enabled: false`. This
+dedicated launch is the only place that explicitly overrides it for testing:
+
+```bash
+ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
+  viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/ar_path_viewer/config/ar_path_viewer_nav2_test.yaml
+```
+
+No `map:=` or `waypoint_file:=` argument is accepted. Start order is flexible:
+the command can run first, then Launcher2 can select/start Nav2 and later start
+the Follower. To use an already-running Viewer, add `start_viewer:=false`.
+`ROS_DOMAIN_ID` and `ROBOTBASE_TF_PREFIX` must already match Launcher2.
+
+## Manual production-shaped launch (diagnostics only)
 
 The root map server, TF, `/scan3`, and `/hokuyo_scan` must already exist.
 

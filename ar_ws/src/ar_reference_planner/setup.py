@@ -29,6 +29,8 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'reference_planner_auto_supervisor = '
+            'ar_reference_planner.auto_supervisor:main',
             'reference_path_request = ar_reference_planner.request_node:main',
             'mock_follower_state = ar_reference_planner.mock_follower_state:main',
             'synthetic_map_publisher = ar_reference_planner.synthetic_map:main',
