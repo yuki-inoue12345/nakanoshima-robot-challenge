@@ -1,6 +1,7 @@
 """Follow YAML routes continuously, stopping at task boundaries."""
 
 from dataclasses import dataclass, field
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
+from robotbase_waypoint_interfaces.msg import WaypointFollowerState
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -145,6 +147,15 @@ def person_search_response_qos() -> QoSProfile:
         depth=10,
         reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.VOLATILE,
+    )
+
+
+def reference_state_qos() -> QoSProfile:
+    """Keep the latest read-only route snapshot available to late subscribers."""
+    return QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
     )
 
 
@@ -299,11 +310,16 @@ class WaypointFollower(Node):
         self.declare_parameter('navigation_mode', 'to_pose')
         self.declare_parameter('max_section_length', 40.0)
         self.declare_parameter('section_switch_distance', 6.0)
+        self.declare_parameter(
+            'reference_state_topic', '/waypoint_follower/reference_state')
+        self.declare_parameter('reference_state_heartbeat_sec', 1.0)
 
         waypoint_file = str(self.get_parameter('waypoint_file').value)
         if not waypoint_file:
             raise ValueError('waypoint_file parameter is required')
         self.waypoints = load_waypoints(waypoint_file)
+        self.route_sha256 = hashlib.sha256(
+            Path(waypoint_file).expanduser().resolve().read_bytes()).hexdigest()
         requested_index = int(self.get_parameter('start_index').value)
         if requested_index < 1 or requested_index > len(self.waypoints):
             raise ValueError(
@@ -325,6 +341,11 @@ class WaypointFollower(Node):
         self.section_switch_distance = float(self.get_parameter('section_switch_distance').value)
         if not math.isfinite(self.section_switch_distance) or self.section_switch_distance < 0.0:
             raise ValueError('section_switch_distance must be finite and non-negative')
+        self.reference_state_heartbeat_sec = float(
+            self.get_parameter('reference_state_heartbeat_sec').value)
+        if (not math.isfinite(self.reference_state_heartbeat_sec)
+                or self.reference_state_heartbeat_sec <= 0.0):
+            raise ValueError('reference_state_heartbeat_sec must be finite and positive')
         validate_person_search_route(
             self.waypoints, requested_index, self.loop, self.navigation_only)
         self.default_threshold = float(self.get_parameter('default_threshold').value)
@@ -413,10 +434,20 @@ class WaypointFollower(Node):
         self.person_search_last_detail = ''
         self.finished = False
         self.timer = self.create_timer(0.1, self._timer_callback)
+        self.reference_state_publisher = self.create_publisher(
+            WaypointFollowerState,
+            str(self.get_parameter('reference_state_topic').value),
+            reference_state_qos(),
+        )
+        self._reference_state_fingerprint = None
+        self._reference_state_last_publish = None
+        self.reference_state_timer = self.create_timer(
+            0.2, self._publish_reference_state_if_needed)
         self.route_markers = RouteMarkerPublisher(self, self.waypoints, self.map_frame)
 
         if not self._is_shutting_down():
             self._publish_stop(False)
+        self._publish_reference_state_if_needed(force=True)
         self.get_logger().info(
             f"Loaded {len(self.waypoints)} waypoints from '{waypoint_file}', "
             f'start={requested_index}, loop={self.loop}, frame={self.base_frame}, '
@@ -435,6 +466,87 @@ class WaypointFollower(Node):
                 return
             self.get_logger().info(
                 f'Waiting for /{self.action_name} action server...', throttle_duration_sec=1.0)
+
+    def _reference_activity(self) -> int:
+        """Map existing mission state to a read-only activity label."""
+        if self._is_shutting_down():
+            return WaypointFollowerState.ACTIVITY_SHUTTING_DOWN
+        if self.finished:
+            return WaypointFollowerState.ACTIVITY_FINISHED
+        if self.manual_paused:
+            return WaypointFollowerState.ACTIVITY_MANUAL_PAUSED
+        if self.person_search_faulted:
+            return WaypointFollowerState.ACTIVITY_PERSON_SEARCH_FAULT
+        if self.person_search_waiting:
+            return WaypointFollowerState.ACTIVITY_PERSON_SEARCH_WAITING
+        if self.person_area_stop_pending:
+            return WaypointFollowerState.ACTIVITY_PERSON_SEARCH_STOPPING
+        if self.waiting_until is not None:
+            return WaypointFollowerState.ACTIVITY_TASK_WAITING
+        if self.transition_in_progress:
+            return WaypointFollowerState.ACTIVITY_TRANSITIONING
+        if self.holding_stop:
+            return WaypointFollowerState.ACTIVITY_HOLDING_STOP
+        if self.goal_serial == 0 and not self.goal_records:
+            return WaypointFollowerState.ACTIVITY_STARTING
+        return WaypointFollowerState.ACTIVITY_NAVIGATING
+
+    def _reference_state_message(self) -> WaypointFollowerState:
+        """Build one snapshot solely from the follower's committed state."""
+        message = WaypointFollowerState()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self.map_frame
+        message.schema_version = WaypointFollowerState.SCHEMA_VERSION
+        message.route_sha256 = self.route_sha256
+        message.next_waypoint_index = self.index
+        message.next_waypoint_number = self.waypoints[self.index].number
+        message.navigation_mode = self.navigation_mode
+        message.goal_generation = self.goal_serial
+        message.activity = self._reference_activity()
+        message.reference_allowed = (
+            message.activity == WaypointFollowerState.ACTIVITY_NAVIGATING)
+        message.safe_section_end_index = navigation_segment_end(
+            self.waypoints, self.index, self.navigation_only)
+        message.waypoint_count = len(self.waypoints)
+        return message
+
+    @staticmethod
+    def _reference_fingerprint(message: WaypointFollowerState):
+        """Return state fields whose changes require an immediate snapshot."""
+        return (
+            message.schema_version,
+            message.route_sha256,
+            message.next_waypoint_index,
+            message.next_waypoint_number,
+            message.navigation_mode,
+            message.goal_generation,
+            message.activity,
+            message.reference_allowed,
+            message.safe_section_end_index,
+            message.waypoint_count,
+        )
+
+    def _publish_reference_state_if_needed(self, *, force: bool = False) -> None:
+        """Publish state changes and a low-rate heartbeat without affecting control."""
+        now = monotonic()
+        try:
+            message = self._reference_state_message()
+            fingerprint = self._reference_fingerprint(message)
+            heartbeat_due = (
+                self._reference_state_last_publish is None
+                or now - self._reference_state_last_publish
+                >= self.reference_state_heartbeat_sec
+            )
+            if not force and fingerprint == self._reference_state_fingerprint:
+                if not heartbeat_due:
+                    return
+            self.reference_state_publisher.publish(message)
+            self._reference_state_fingerprint = fingerprint
+            self._reference_state_last_publish = now
+        except Exception as error:  # noqa: BLE001 - diagnostics must never stop navigation
+            self.get_logger().warning(
+                f'Read-only reference state publish failed: {error}',
+                throttle_duration_sec=2.0)
 
     def _init_shutdown_state(self, shutdown_request=None) -> None:
         self.shutdown_request = shutdown_request or ShutdownRequest()
@@ -458,6 +570,8 @@ class WaypointFollower(Node):
 
     def request_shutdown(self, reason: str) -> None:
         self.shutdown_request.request(reason)
+        if hasattr(self, 'reference_state_publisher'):
+            self._publish_reference_state_if_needed(force=True)
 
     def _record_for_handle(self, handle) -> GoalRecord:
         for record in self.goal_records.values():

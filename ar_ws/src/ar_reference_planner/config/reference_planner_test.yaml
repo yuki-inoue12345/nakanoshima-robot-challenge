@@ -1,0 +1,34 @@
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    action_server_result_timeout: 10.0
+    costmap_update_timeout: 2.0
+    planner_plugins: [GridBased]
+    GridBased:
+      plugin: nav2_navfn_planner::NavfnPlanner
+      tolerance: 0.0
+      use_astar: true
+      allow_unknown: false
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: robot/base_footprint
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      resolution: 0.05
+      track_unknown_space: false
+      footprint: "[[0.30, 0.29], [0.30, -0.29], [-0.30, -0.29], [-0.30, 0.29]]"
+      plugins: [static_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+        map_topic: /ar_reference_test/map
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.35
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
