@@ -4,9 +4,11 @@ import pytest
 import yaml
 
 from ar_path_viewer.calibration_tool import (
+    CalibrationFrameCandidate,
     DEFAULT_CHECKERBOARD_INNER_COLUMNS,
     DEFAULT_CHECKERBOARD_INNER_ROWS,
     DEFAULT_CHECKERBOARD_SQUARE_SIZE_M,
+    DEFAULT_MINIMUM_BOARD_AREA_RATIO,
     OPTICAL_FROM_CAMERA_BODY,
     _rotation_from_mount,
     build_argument_parser,
@@ -229,6 +231,30 @@ def test_video_cli_defaults_record_20fps_and_select_30_to_40_images():
     assert extract.target_images == 36
     assert extract.min_images == 30
     assert extract.analysis_fps == 4.0
+    assert extract.minimum_area_ratio == DEFAULT_MINIMUM_BOARD_AREA_RATIO == 0.015
+
+
+def test_diversity_selection_penalizes_tiny_board_when_pose_is_equivalent():
+    descriptor = (0.5, 0.5, 0.0, 0.0, 0.0, 0.0)
+    large = CalibrationFrameCandidate(
+        0, 0.0, 500.0, 0.080, 0.5, 0.5, 0.0, 0.0, 0.0, descriptor
+    )
+    anchor = CalibrationFrameCandidate(
+        1, 1.0, 500.0, 0.050, 0.2, 0.2, 0.0, 0.0, 0.0,
+        (0.2, 0.2, 0.0, 0.0, 0.0, 0.0),
+    )
+    tiny = CalibrationFrameCandidate(
+        2, 2.0, 2000.0, 0.015, 0.8, 0.8, 0.0, 0.0, 0.0,
+        (0.8, 0.8, -0.5, 0.0, 0.0, 0.0),
+    )
+    useful = CalibrationFrameCandidate(
+        3, 3.0, 500.0, 0.045, 0.8, 0.8, 0.0, 0.0, 0.0,
+        (0.8, 0.8, -0.45, 0.0, 0.0, 0.0),
+    )
+    selected = select_diverse_calibration_frames(
+        (large, anchor, tiny, useful), target_images=3, min_diversity_distance=0.01
+    )
+    assert useful in selected
 
 
 def test_undistorter_preserves_640_by_480_and_provides_effective_intrinsics():

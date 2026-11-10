@@ -69,7 +69,8 @@ v = cy + fy * (d sin(θ) + h cos(θ)) / (d cos(θ) - h sin(θ))
 - 1マス実測20.0 mm、パターン部約200×140 mm、用紙全体約295×210 mm（A4相当）の実物ボード
 - 用紙を平らで反りにくい板へ固定したもの（C920とロボット側は動かさない）
 - 1 m以上を測れるレーザー距離計または巻尺、下げ振り、水平器
-- 外部校正用の、中心位置を5 mm程度以内で特定できる丸印を10～12点
+- 外部校正用の巻尺、細い糸またはレーザー墨出し器、水平器（気泡式で可）
+- 10～12個の丸印は、自動チェッカーボード方式が使えない場合だけの予備
 
 この実物では`--inner-columns 9 --inner-rows 6 --square-size-m 0.020`を使用します。`square-size`は用紙寸法や白黒パターン全体ではなく、隣接する内側交点間、すなわち白または黒1マスの一辺です。複数マスをまとめて測り、実寸が20.0 mmから明確に異なる場合だけ、測定値をm単位へ換算して指定します。
 
@@ -98,7 +99,7 @@ ros2 run ar_path_viewer calibrate_camera record-video \
   --fps 20 --duration-sec 90
 ```
 
-保存済み動画を開発PCへコピーした後、次の1コマンドで自動選択と内部校正を実行します。`extract-video`は初期値4 fpsで候補を調べ、交点検出失敗、Laplacian sharpnessが低いブレ画像、内側交点領域が画面の0.6%未満の小さすぎるボード、構図descriptorが近い重複画像を除外します。位置、見かけの大きさ、回転、台形歪みから多様な36枚を選びます。
+保存済み動画を開発PCへコピーした後、次の1コマンドで自動選択と内部校正を実行します。`extract-video`は初期値4 fpsで候補を調べ、交点検出失敗、Laplacian sharpnessが低いブレ画像、内側交点領域が画面の1.5%未満の小さすぎるボード、構図descriptorが近い重複画像を除外します。位置、見かけの大きさ、回転、台形歪みから多様な36枚を選び、同程度に多様な候補では面積が大きく鮮明な画像を優先します。遠距離画像だけで焦点距離や歪みを決めないための下限であり、`--minimum-area-ratio`で明示的に変更できます。
 
 ```bash
 set -euo pipefail
@@ -158,6 +159,87 @@ RMSだけで採否を決めず、全previewで順序正しく交点を検出し�
 ### 走行なしで行う外部校正（チェッカーボード内部校正とは別作業）
 
 内部校正はチェッカーボードからC920の`fx/fy/cx/cy`とレンズ歪みを求める工程です。以下の外部校正は、その結果を使い、別途実測したロボット座標の3D基準点からC920の位置・姿勢を求める独立工程です。20 mmチェッカーボードの寸法を3D基準点の代用にはしません。
+
+#### 推奨：既知配置のチェッカーボード54交点を共同推定
+
+硬い板へ固定した同じ10×7マスのボードを4か所へ置き、各画像の9×6交点を自動検出します。ボードの20 mm寸法だけから配置を推測するのではなく、各配置の原点と軸を`base_footprint`基準で実測します。実測姿勢から54交点すべての3D座標を生成し、全配置の216点を一つのPnP問題として共同推定します。単一画像ごとの結果を平均する方式ではありません。
+
+`base_footprint`はx前、y左、z上です。現在のURDFでは左右駆動輪の中心が`x=0`、左右輪中心の中点が`y=0`、床面が`z=0`です。したがって実機では、左右車軸中心を結んだ線を床へ下ろした点の中点を原点候補にします。ただしURDF値だけで外観上の中心を決めず、左右の車軸中心と床面が実機の`base_footprint`に対応していることを最初に確認してください。確認できなければ座標を入力せず、Robotbase担当者へ基準位置を確認します。
+
+ボードは複雑な角度へ傾けません。ロボットへ正対した垂直面として置きます。
+
+- ロボットから見た左上の**内側交点**をボード原点とする。白黒パターン外周の左上ではなく、そこから右20 mm・下20 mmの交点である。
+- ボード原点から画像右方向の9交点目へ向かう軸は`[0, -1, 0]`。
+- ボード原点から画像下方向の6交点目へ向かう軸は`[0, 0, -1]`。
+- 水平器で板を垂直にし、上段左右の内側交点の床からの高さを測って2～3 mm以内に揃える。
+- ボード面の左右端から`x=0`車軸線までの前後距離を測り、2～3 mm以内に揃えてロボットへ正対させる。揃えられなければ軸を上記の値に固定してはいけない。
+
+推奨する4配置の範囲です。数値は置き場所の目安であり、YAMLには必ず実測値を記入します。
+
+1. 近・中央：ボード中心`x=1.2～1.4 m、y≈0 m`
+2. 中・左：`x=1.5～1.8 m、y=+0.30～+0.40 m`
+3. 中・右：左配置とは異なるxで、`y=-0.30～-0.40 m`
+4. 遠・中央：`x=1.9～2.2 m、y≈0 m`
+
+内側交点領域は幅160 mm、高さ100 mmです。ボード中心を実測した場合、垂直・正対配置の左上内側交点は`[center_x, center_y + 0.080, center_z + 0.050]`です。各配置で実際に画面内へ明瞭に写る高さへ置き、原点のx/y/zを個別に測ります。必要写真は各配置1枚、合計4枚です。同じ静止配置の連写を多数入れると、その配置だけを過大評価するので使用しません。
+
+水平器なしでも、3個の内側交点の3D座標を別々に正確に測れば軸を算出できますが、作業量と誤差が増えます。通常は小型水平器または垂直を保証できる直角治具を使う方が簡単です。
+
+実機NUCで、Camera V7、人物検知、AR ViewerがC920を使用していないことを確認してからPNGを保存します。オートフォーカス、ズーム、解像度は変更しません。各配置を測定後、Spaceまたは`C`を1回押します。
+
+```bash
+set -euo pipefail
+source /opt/ros/jazzy/setup.bash
+source /home/koko-chan-nuc/ar_navigation_project/install/setup.bash
+
+EXT_ROOT=/home/koko-chan-nuc/ar_navigation_project/calibration/extrinsics
+mkdir -p "$EXT_ROOT/images"
+
+# 読み取り確認だけ。値を変更しない。
+v4l2-ctl -d /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_66F7D3AF-video-index0 --all \
+  > "$EXT_ROOT/v4l2_before_capture.txt"
+
+ros2 run ar_path_viewer calibrate_camera capture \
+  --device /dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_66F7D3AF-video-index0 \
+  --output-dir "$EXT_ROOT/images" --fps 20
+```
+
+4枚を開発PCへコピーし、[`checkerboard_extrinsics_layout_example.yaml`](config/checkerboard_extrinsics_layout_example.yaml)を別名でコピーします。例の座標をすべて実測値へ置換し、写真パスを直し、最後にだけ`survey_confirmed: true`へ変更します。未確認のテンプレートはツールが拒否します。
+
+```bash
+set -euo pipefail
+source /opt/ros/jazzy/setup.bash
+source /home/inoue-yuki/care_patrol_ws/local_repositories/nakanoshima-robot-challenge/ar_ws/install/setup.bash
+
+EXT_ROOT=/home/inoue-yuki/ar_navigation_project/calibration/extrinsics
+PKG_ROOT=/home/inoue-yuki/care_patrol_ws/local_repositories/nakanoshima-robot-challenge/ar_ws/src/ar_path_viewer
+
+cp "$PKG_ROOT/config/checkerboard_extrinsics_layout_example.yaml" \
+  "$EXT_ROOT/measured_layout.yaml"
+# measured_layout.yamlを編集し、実測後にsurvey_confirmed: trueとする。
+
+ros2 run ar_path_viewer calibrate_camera extrinsics-board \
+  --intrinsics "$PKG_ROOT/config/c920_intrinsics_development_candidate.yaml" \
+  --layout "$EXT_ROOT/measured_layout.yaml" \
+  --output "$EXT_ROOT/extrinsics_review.yaml" \
+  --preview-dir "$EXT_ROOT/previews" \
+  --review-overlay "$EXT_ROOT/runtime_overlay_review_only.yaml" \
+  --monte-carlo-iterations 500
+```
+
+各previewでは緑丸が検出交点、紫十字が共同推定、橙十字が現行7.5°設定、赤丸がYAML原点へ対応する交点0です。`corner_order: auto`は180°の検出順序を全配置の整合性から選びますが、赤丸が実際に測った左上内側交点に対応することを必ず目視します。違う場合はその配置だけ`normal`または`reversed`へ固定して新しい出力先で再実行します。
+
+ツールは次を報告します。
+
+- 全配置共同RMS、最大誤差、配置ごとのRMS
+- 1配置ずつ除いたときのcamera x/y/z、yaw/pitch/rollの変動
+- YAMLの位置・角度測定誤差を加えたMonte Carlo感度
+- 代替内部校正YAMLを`--sensitivity-intrinsics`へ渡した場合の外部姿勢差
+- 配置が全て同一平面、前後差不足、左右差不足、単位・軸長・直交の誤り
+
+全配置が同じxの垂直面にある場合は、54点が何枚あっても全体が一平面なので拒否します。配置数ではなく、異なる前後距離と左右位置を持つことが必要です。
+
+#### 予備方式：個別に実測した10～12点
 
 座標は`base_footprint`原点を基準に、x=前、y=左、z=上のm単位です。近距離床が写らないため床点だけに依存せず、遠方床と壁・自立板の高さ違いを組み合わせ、非共面の10～12点を使います。例としてx=4、6、8 m、y=-0.6、+0.6 m付近の床点、およびx=4、6 m、y=-0.6、+0.6 m、z=0.6、1.2 m付近の垂直面上の点を、実際の安全な廊下に合わせて配置します。数字をそのまま仮定せず、各点を`base_footprint`基準で実測してください。
 

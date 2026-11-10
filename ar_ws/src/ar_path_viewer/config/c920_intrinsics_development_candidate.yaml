@@ -1,0 +1,22 @@
+format_version: 1
+calibration_type: opencv_pinhole
+adoption_status: development_only_not_nuc_approved
+image_size: [640, 480]
+checkerboard:
+  inner_columns: 9
+  inner_rows: 6
+  square_size_m: 0.020
+model_constraints:
+  tangential_distortion_fixed_zero: true
+  k3_fixed_zero: true
+  principal_point_fixed: false
+camera_matrix:
+  - [658.6575, 0.0, 322.9545]
+  - [0.0, 657.3184, 239.1993]
+  - [0.0, 0.0, 1.0]
+distortion_coefficients: [0.0554541, -0.0907945, 0.0, 0.0, 0.0]
+rms_reprojection_error_px: 0.31748
+warnings:
+  - Do not copy this file into the NUC runtime configuration.
+  - Use only for external-calibration development and review.
+  - Re-run extrinsics if the intrinsics model or C920 controls change.

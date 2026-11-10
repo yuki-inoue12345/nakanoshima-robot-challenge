@@ -25,6 +25,7 @@ OPTICAL_FROM_CAMERA_BODY = np.array(
 DEFAULT_CHECKERBOARD_INNER_COLUMNS = 9
 DEFAULT_CHECKERBOARD_INNER_ROWS = 6
 DEFAULT_CHECKERBOARD_SQUARE_SIZE_M = 0.020
+DEFAULT_MINIMUM_BOARD_AREA_RATIO = 0.015
 
 
 @dataclass(frozen=True)
@@ -202,23 +203,36 @@ def select_diverse_calibration_frames(
     remaining = list(candidates)
     if not remaining:
         return []
-    first = max(
-        remaining,
-        key=lambda item: item.sharpness * math.sqrt(max(item.area_ratio, 1e-9)),
-    )
+    def quality(candidate: CalibrationFrameCandidate) -> float:
+        area_quality = min(1.0, math.sqrt(
+            max(candidate.area_ratio, 1e-9) / 0.040
+        ))
+        sharpness_quality = min(1.0, math.sqrt(
+            max(candidate.sharpness, 0.0) / 500.0
+        ))
+        return 0.75 * area_quality + 0.25 * sharpness_quality
+
+    first = max(remaining, key=quality)
     selected = [first]
     remaining.remove(first)
     while remaining and len(selected) < target_images:
         best = None
+        best_score = -1.0
         best_distance = -1.0
         for candidate in remaining:
             vector = np.asarray(candidate.descriptor)
             distance = min(float(np.linalg.norm(
                 vector - np.asarray(existing.descriptor)
             )) for existing in selected)
-            if distance > best_distance:
+            # Calibration constraints become weak when the board occupies only
+            # a very small part of the frame.  Keep pose/position diversity,
+            # but prevent a distant sharp board from winning solely because
+            # its logarithmic scale descriptor is far from the current set.
+            score = distance * (0.55 + 0.45 * quality(candidate))
+            if score > best_score:
                 best = candidate
                 best_distance = distance
+                best_score = score
         if best is None or best_distance < min_diversity_distance:
             break
         selected.append(best)
@@ -772,7 +786,7 @@ def analyze_calibration_video(
     video_path: Path,
     analysis_fps: float = 4.0,
     sharpness_threshold: float = 80.0,
-    minimum_area_ratio: float = 0.006,
+    minimum_area_ratio: float = DEFAULT_MINIMUM_BOARD_AREA_RATIO,
 ) -> tuple[list[CalibrationFrameCandidate], dict[str, Any]]:
     if analysis_fps <= 0.0 or not math.isfinite(analysis_fps):
         raise ValueError("analysis_fps must be finite and positive")
@@ -905,7 +919,7 @@ def extract_calibration_video_frames(
     minimum_images: int = 30,
     analysis_fps: float = 4.0,
     sharpness_threshold: float = 80.0,
-    minimum_area_ratio: float = 0.006,
+    minimum_area_ratio: float = DEFAULT_MINIMUM_BOARD_AREA_RATIO,
     min_diversity_distance: float = 0.08,
     intrinsics_output: Path | None = None,
     preview_dir: Path | None = None,
@@ -1115,7 +1129,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     extract.add_argument("--min-images", type=int, default=30)
     extract.add_argument("--analysis-fps", type=float, default=4.0)
     extract.add_argument("--sharpness-threshold", type=float, default=80.0)
-    extract.add_argument("--minimum-area-ratio", type=float, default=0.006)
+    extract.add_argument(
+        "--minimum-area-ratio",
+        type=float,
+        default=DEFAULT_MINIMUM_BOARD_AREA_RATIO,
+        help=(
+            "minimum convex-hull area of detected inner corners as a fraction "
+            "of the image (default: 0.015)"
+        ),
+    )
     extract.add_argument("--min-diversity-distance", type=float, default=0.08)
     extract.add_argument("--intrinsics-output", type=Path)
     extract.add_argument("--preview-dir", type=Path)
@@ -1148,6 +1170,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
     extrinsics.add_argument("--intrinsics", type=Path, required=True)
     extrinsics.add_argument("--correspondences", type=Path, required=True)
     extrinsics.add_argument("--output", type=Path, required=True)
+
+    board_extrinsics = commands.add_parser("extrinsics-board")
+    board_extrinsics.add_argument("--intrinsics", type=Path, required=True)
+    board_extrinsics.add_argument("--layout", type=Path, required=True)
+    board_extrinsics.add_argument("--output", type=Path, required=True)
+    board_extrinsics.add_argument("--preview-dir", type=Path, required=True)
+    board_extrinsics.add_argument(
+        "--review-overlay", type=Path, required=True,
+        help="new review-only runtime overlay; existing YAML is never modified",
+    )
+    board_extrinsics.add_argument(
+        "--sensitivity-intrinsics", nargs="*", type=Path, default=(),
+        help="optional alternative intrinsics YAML files for mount sensitivity",
+    )
+    board_extrinsics.add_argument(
+        "--monte-carlo-iterations", type=int, default=200,
+    )
 
     mark = commands.add_parser("mark-points")
     mark.add_argument("--image", type=Path, required=True)
@@ -1224,6 +1263,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write_new_yaml(args.output, result)
         print(yaml.safe_dump(result["aggregate"], sort_keys=False))
+    elif args.command == "extrinsics-board":
+        from .board_extrinsics import calibrate_board_extrinsics
+
+        intrinsics_data = _read_yaml(args.intrinsics)
+        sensitivity = [
+            (str(path), _read_yaml(path))
+            for path in args.sensitivity_intrinsics
+        ]
+        result = calibrate_board_extrinsics(
+            _read_yaml(args.layout),
+            intrinsics_data,
+            args.preview_dir,
+            args.monte_carlo_iterations,
+            sensitivity,
+        )
+        _write_new_yaml(args.output, result)
+        overlay = export_runtime_overlay(intrinsics_data, result, 0.0)
+        overlay["source_extrinsics_review"] = str(args.output)
+        _write_new_yaml(args.review_overlay, overlay)
+        print(yaml.safe_dump(result["aggregate"], sort_keys=False))
+        print(f"wrote review-only overlay: {args.review_overlay}")
     elif args.command == "mark-points":
         count = mark_reference_points(
             args.image, args.reference_points, args.output
