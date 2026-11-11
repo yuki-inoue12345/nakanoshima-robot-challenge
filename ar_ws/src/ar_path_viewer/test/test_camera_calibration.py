@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -343,6 +345,46 @@ def test_export_is_review_only_and_does_not_replace_existing_configuration():
     assert params["camera_pitch_up_deg"] == 12.0
     assert "image_input_uri" not in params
     assert "output_video" not in params
+
+
+def test_post_remount_review_overlay_is_scoped_and_not_production_enabling():
+    overlay_path = (
+        Path(__file__).parents[1]
+        / "config"
+        / "c920_fixed_20261111_review_overlay.yaml"
+    )
+    overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+    params = overlay["ar_path_viewer"]["ros__parameters"]
+
+    assert params["width"] == 640
+    assert params["height"] == 480
+    assert params["fx"] == pytest.approx(658.6575)
+    assert params["fy"] == pytest.approx(657.3184)
+    assert params["cx"] == pytest.approx(322.9545)
+    assert params["cy"] == pytest.approx(239.1993)
+    assert params["camera_undistort"] is True
+    assert params["camera_distortion_coefficients"] == pytest.approx(
+        [0.0554541, -0.0907945, 0.0, 0.0, 0.0]
+    )
+    assert params["camera_pitch_up_deg"] == pytest.approx(11.70)
+    assert params["calibration_profile_label"] == "C920 REVIEW"
+    assert params["path_display_mode"] == "elevated"
+    assert params["path_display_height_m"] == pytest.approx(0.50)
+
+    # The overlay cannot silently select devices, destinations, or enable the
+    # display-only reference path. Those remain owned by the base/test launch.
+    for forbidden in (
+        "image_input_uri",
+        "output_video",
+        "log_output",
+        "reference_path_enabled",
+        "camera_x",
+        "camera_y",
+        "camera_z",
+        "camera_yaw_deg",
+        "camera_roll_deg",
+    ):
+        assert forbidden not in params
 
 
 def test_coplanar_survey_points_are_rejected_as_ambiguous():

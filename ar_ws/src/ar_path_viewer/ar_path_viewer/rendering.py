@@ -148,7 +148,7 @@ def _draw_offscreen_guidance(
     )
     cv2.arrowedLine(frame, start, end, (20, 20, 20), 10, cv2.LINE_AA, tipLength=0.32)
     cv2.arrowedLine(frame, start, end, color_bgr, 6, cv2.LINE_AA, tipLength=0.32)
-    label = f"PATH AHEAD: {guidance.direction}"
+    label = f"GO {guidance.direction}"
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.58
     thickness = 2
@@ -170,6 +170,37 @@ def _draw_offscreen_guidance(
     )
 
 
+def _draw_bottom_badge(
+    frame: np.ndarray,
+    label: str,
+    color_bgr: Tuple[int, int, int],
+    *,
+    align_right: bool = False,
+) -> None:
+    if not label:
+        return
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.50
+    thickness = 1
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, font, scale, thickness
+    )
+    x = frame.shape[1] - text_width - 14 if align_right else 14
+    x = max(8, x)
+    y = frame.shape[0] - 14
+    cv2.rectangle(
+        frame,
+        (x - 6, y - text_height - 6),
+        (min(frame.shape[1] - 1, x + text_width + 6), y + baseline + 5),
+        (20, 20, 20),
+        -1,
+    )
+    cv2.putText(
+        frame, label, (x, y), font, scale, color_bgr,
+        thickness, cv2.LINE_AA,
+    )
+
+
 def render_frame(
     image: np.ndarray,
     segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
@@ -187,6 +218,7 @@ def render_frame(
     reference_dash_px: float = 14.0,
     reference_gap_px: float = 9.0,
     display_mode_label: str = "",
+    waypoint_status: str = "",
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -207,8 +239,17 @@ def render_frame(
             cv2.arrowedLine(
                 frame, start, end, color_bgr, thickness, cv2.LINE_AA, tipLength=0.4
             )
+        if guidance is not None:
+            _draw_bottom_badge(
+                frame,
+                f"GO {guidance.direction}",
+                guidance_color_bgr,
+                align_right=True,
+            )
     elif state == "PATH OUT OF VIEW" and guidance is not None:
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
+    if waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
+        _draw_bottom_badge(frame, waypoint_status, (230, 230, 230))
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
     detail_lines = textwrap.wrap(detail, width=68)[:2] if detail else []
     box_bottom = 42 + 24 * len(detail_lines)

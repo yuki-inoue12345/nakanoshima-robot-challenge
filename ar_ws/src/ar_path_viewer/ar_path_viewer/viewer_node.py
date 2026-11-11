@@ -42,6 +42,7 @@ from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
 from .viewer_logic import PathDisplayGeometry, evaluate_path_state
+from .waypoint_progress import WaypointProgressGate
 
 
 class ArPathViewerNode(Node):
@@ -61,6 +62,7 @@ class ArPathViewerNode(Node):
             "reference_follower_state_topic": "/waypoint_follower/reference_state",
             "reference_path_timeout_sec": 6.5,
             "reference_follower_timeout_sec": 2.5,
+            "waypoint_distance_enabled": True,
             "localization_pose_timeout_sec": 3.0,
             "localization_stamp_max_age_sec": 3.0,
             "localization_future_tolerance_sec": 1.5,
@@ -93,6 +95,7 @@ class ArPathViewerNode(Node):
             "near_clip_m": 0.10,
             "path_display_mode": "elevated",
             "path_display_height_m": 0.50,
+            "calibration_profile_label": "",
             "offscreen_guidance_enabled": True,
             "offscreen_guidance_lookahead_m": 1.5,
             "offscreen_guidance_min_remaining_m": 0.6,
@@ -171,12 +174,26 @@ class ArPathViewerNode(Node):
                 height_m=self._float("path_display_height_m"),
             )
             self._path_display_geometry.validate()
+            self._calibration_profile_label = self._str(
+                "calibration_profile_label"
+            ).strip()
+            if (
+                len(self._calibration_profile_label) > 24
+                or any(ord(character) < 32 for character in self._calibration_profile_label)
+            ):
+                raise ValueError(
+                    "calibration_profile_label must be at most 24 printable characters"
+                )
             self._path_store = PathStore(self._float("path_timeout_sec"))
             self._reference_gate = ReferencePathGate(
                 timeout_sec=self._float("reference_path_timeout_sec"),
                 follower_timeout_sec=self._float(
                     "reference_follower_timeout_sec"
                 ),
+                expected_frame=self._str("localization_global_frame"),
+            )
+            self._waypoint_progress_gate = WaypointProgressGate(
+                timeout_sec=self._float("reference_follower_timeout_sec"),
                 expected_frame=self._str("localization_global_frame"),
             )
             self._guidance_settings = GuidanceSettings(
@@ -209,8 +226,10 @@ class ArPathViewerNode(Node):
             self._mount = CameraMount()
             self._near = 0.10
             self._path_display_geometry = PathDisplayGeometry()
+            self._calibration_profile_label = ""
             self._path_store = PathStore()
             self._reference_gate = ReferencePathGate()
+            self._waypoint_progress_gate = WaypointProgressGate()
             self._guidance_settings = GuidanceSettings(enabled=False)
 
         try:
@@ -295,6 +314,7 @@ class ArPathViewerNode(Node):
             "path_display_configuration "
             f"mode={self._path_display_geometry.mode} "
             f"height_m={self._path_display_geometry.height_m:.3f} "
+            f"calibration_profile={self._calibration_profile_label!r} "
             "preserves_nav2_xy=true guidance_uses_original_path=true"
         )
         if self._session_log.file_error:
@@ -339,6 +359,9 @@ class ArPathViewerNode(Node):
             self._localization = LocalizationMonitor()
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
         self._reference_enabled = self._bool("reference_path_enabled")
+        self._waypoint_distance_enabled = self._bool(
+            "waypoint_distance_enabled"
+        )
         self._reference_color = (
             self._int("reference_line_b"),
             self._int("reference_line_g"),
@@ -377,7 +400,6 @@ class ArPathViewerNode(Node):
             PathMessage, self._str("path_topic"), self._on_path, qos
         )
         self._reference_subscription = None
-        self._reference_follower_subscription = None
         if self._reference_enabled:
             self._reference_subscription = self.create_subscription(
                 ReferencePathState,
@@ -385,12 +407,14 @@ class ArPathViewerNode(Node):
                 self._on_reference_path_state,
                 qos,
             )
-            reference_state_qos = QoSProfile(
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            )
+        reference_state_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._reference_follower_subscription = None
+        if self._reference_enabled or self._waypoint_distance_enabled:
             self._reference_follower_subscription = self.create_subscription(
                 WaypointFollowerState,
                 self._str("reference_follower_state_topic"),
@@ -417,6 +441,12 @@ class ArPathViewerNode(Node):
             f"timeout_sec={self._reference_gate.path_store.timeout_sec:.3f} "
             f"follower_timeout_sec={self._reference_gate.follower_timeout_sec:.3f} "
             f"color_bgr={self._reference_color} style=dashed"
+        )
+        self._log_info(
+            "waypoint_distance_configuration "
+            f"enabled={self._waypoint_distance_enabled} "
+            "label='PLAN LEFT' meaning=remaining_real_plan_polyline "
+            "not_waypoint_distance=true"
         )
 
     def _str(self, name: str) -> str:
@@ -521,14 +551,26 @@ class ArPathViewerNode(Node):
     def _on_reference_follower_state(
         self, message: WaypointFollowerState
     ) -> None:
-        accepted = self._reference_gate.update_follower(
-            message, self._ros_now_sec()
+        snapshot = self._path_store.snapshot()
+        path_generation = 0 if snapshot is None else snapshot.generation
+        progress_accepted = self._waypoint_progress_gate.update(
+            message, self._ros_now_sec(), path_generation
         )
-        self._diagnostics.reference_update(
-            "follower_state",
-            accepted,
-            self._reference_gate.reason,
-        )
+        if self._reference_enabled:
+            accepted = self._reference_gate.update_follower(
+                message, self._ros_now_sec()
+            )
+            self._diagnostics.reference_update(
+                "follower_state",
+                accepted,
+                self._reference_gate.reason,
+            )
+        elif not progress_accepted:
+            self._diagnostics.reference_update(
+                "waypoint_progress",
+                False,
+                self._waypoint_progress_gate.reason,
+            )
 
     def _on_reference_path_state(self, message: ReferencePathState) -> None:
         accepted = self._reference_gate.update_reference(
@@ -617,6 +659,7 @@ class ArPathViewerNode(Node):
         state = "NO PATH"
         detail = ""
         guidance = None
+        waypoint_status = ""
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
             state = "CAMERA UNAVAILABLE"
@@ -697,6 +740,22 @@ class ArPathViewerNode(Node):
                         segments = evaluation.segments
                         projection_stats = evaluation.stats
                         guidance = evaluation.guidance
+                        progress = evaluation.progress
+                        if (
+                            self._waypoint_distance_enabled
+                            and progress is not None
+                        ):
+                            waypoint_status = (
+                                self._waypoint_progress_gate.label(
+                                    self._ros_now_sec(),
+                                    snapshot.generation,
+                                    progress.remaining_path_m,
+                                    progress.anchor_distance_m,
+                                    self._guidance_settings
+                                    .max_path_start_distance_m,
+                                )
+                                or ""
+                            )
                         if projection_stats is not None:
                             self._diagnostics.projection_update(
                                 snapshot.frame_id,
@@ -839,7 +898,11 @@ class ArPathViewerNode(Node):
                 ),
                 reference_dash_px=getattr(self, "_reference_dash_px", 14.0),
                 reference_gap_px=getattr(self, "_reference_gap_px", 9.0),
-                display_mode_label=self._path_display_geometry.label,
+                display_mode_label=" | ".join(filter(None, (
+                    self._path_display_geometry.label,
+                    self._calibration_profile_label,
+                ))),
+                waypoint_status=waypoint_status,
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:

@@ -148,8 +148,22 @@ dedicated launch is the only place that explicitly overrides it for testing:
 
 ```bash
 ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
-  viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/ar_path_viewer/config/ar_path_viewer_nav2_test.yaml
+  viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml
 ```
+
+固定し直したC920との比較走行だけは、本番YAMLを変更せずreview-only
+overlayを2つ目のparameter fileとして明示できます。`fx/fy`と
+`camera_pitch_up_deg=11.70`は確定値ではなく比較候補です。
+
+```bash
+ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
+  viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml \
+  viewer_calibration_overlay_file:=$(ros2 pkg prefix ar_path_viewer)/share/ar_path_viewer/config/c920_fixed_20261111_review_overlay.yaml
+```
+
+通常比較は`viewer_calibration_overlay_file`を省略して既存設定を使い、同じ
+ルート・停止位置・照明条件で録画を分けます。overlayはC920デバイス、録画先、
+Launcher2自動選択、参考Path既定OFFという所有関係を変更しません。
 
 No `map:=` or `waypoint_file:=` argument is accepted. Start order is flexible:
 the command can run first, then Launcher2 can select/start Nav2 and later start

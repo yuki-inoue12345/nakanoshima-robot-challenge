@@ -393,6 +393,8 @@ def test_dedicated_launch_has_no_manual_map_or_waypoint_argument():
         "DeclareLaunchArgument('start_viewer', default_value='true')"
         in launch
     )
+    assert "'viewer_calibration_overlay_file', default_value=''" in launch
+    assert 'if calibration_overlay:' in launch
 
 
 @pytest.mark.parametrize('bad_value', (-1.0, float('nan')))

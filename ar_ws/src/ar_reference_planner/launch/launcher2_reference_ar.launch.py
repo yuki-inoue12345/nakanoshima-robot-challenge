@@ -7,10 +7,30 @@ Follower remain their respective sources of truth.
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _launch_viewer(context):
+    """Build Viewer parameters, adding a review overlay only when requested."""
+    parameters = [LaunchConfiguration('viewer_config_file').perform(context)]
+    calibration_overlay = LaunchConfiguration(
+        'viewer_calibration_overlay_file').perform(context).strip()
+    if calibration_overlay:
+        parameters.append(calibration_overlay)
+    # The checked-in base YAML remains false. Only this explicit test launch
+    # enables reference rendering after all Viewer gates pass.
+    parameters.append({'reference_path_enabled': True})
+    return [Node(
+        package='ar_path_viewer',
+        executable='ar_path_viewer',
+        name='ar_path_viewer',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('start_viewer')),
+        parameters=parameters,
+    )]
 
 
 def generate_launch_description():
@@ -38,19 +58,6 @@ def generate_launch_description():
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
     )
-    viewer = Node(
-        package='ar_path_viewer',
-        executable='ar_path_viewer',
-        name='ar_path_viewer',
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('start_viewer')),
-        parameters=[
-            LaunchConfiguration('viewer_config_file'),
-            # The checked-in YAML remains false. Only this explicit test launch
-            # enables reference rendering after all Viewer gates pass.
-            {'reference_path_enabled': True},
-        ],
-    )
     return LaunchDescription([
         DeclareLaunchArgument('launcher_map_state_file', default_value=''),
         DeclareLaunchArgument(
@@ -70,6 +77,8 @@ def generate_launch_description():
         DeclareLaunchArgument('start_viewer', default_value='true'),
         DeclareLaunchArgument(
             'viewer_config_file', default_value=default_viewer_config),
+        DeclareLaunchArgument(
+            'viewer_calibration_overlay_file', default_value=''),
         supervisor,
-        viewer,
+        OpaqueFunction(function=_launch_viewer),
     ])

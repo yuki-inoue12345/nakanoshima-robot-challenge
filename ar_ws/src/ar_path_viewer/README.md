@@ -304,9 +304,9 @@ ros2 run ar_path_viewer calibrate_camera compare \
 
 採用時もNUC固有YAML全体を置換しません。バックアップを作り、review overlayの`fx/fy/cx/cy`、歪み係数、undistort、確認済みの外部パラメータだけを手作業で反映し、C920デバイス、MP4出力、ログ、診断設定を維持します。歪み補正は初期値`false`であり、実測結果を採用した場合だけ有効にします。補正後も出力と録画は640×480です。
 
-## 画角外経路の補助案内
+## 進行方向と次Waypoint残距離
 
-新しい橙色の`PATH AHEAD`矢印は、緑線を描画できる線分が1本もない`PATH OUT OF VIEW`時だけ表示します。これは床へ投影した線ではなく固定UIであり、実Pathの現在位置に最も近い点から1.5 m先までをたどって`STRAIGHT`、`LEFT`、`RIGHT`を判定します。Pathを延長、移動、変形しません。
+橙色の進行方向表示は、実Pathの現在位置に最も近い点から1.5 m先までをたどって`GO STRAIGHT`、`GO LEFT`、`GO RIGHT`を判定します。緑線が見える`ACTIVE`時は画面右下の小さな方向バッジ、緑線を描画できる線分がない`PATH OUT OF VIEW`時は大きな固定UI矢印として表示します。いずれも床へ投影した架空線ではなく、受信した実`/plan`だけが根拠です。Pathを延長、移動、変形しません。
 
 次の場合は誤案内防止のため矢印も出しません。
 
@@ -315,7 +315,11 @@ ros2 run ar_path_viewer calibrate_camera compare \
 - 実Pathがロボットから1.0 m以上離れて始まる
 - 進行方位が前方±80°を超える、1.5 m内で方位が65°以上急変する、または左右をまたいで曖昧
 
-正しく投影できる部分があれば従来どおり緑線だけを優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*` ROS parametersで調整できます。
+正しく投影できる部分は従来どおり緑線を維持し、その形状と線上矢印を優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*` ROS parametersで調整できます。
+
+`waypoint_distance_enabled: true`では、Followerの読み取り専用`/waypoint_follower/reference_state`を安全状態の確認に使い、画面左下に`PLAN LEFT: 2.4 m`を表示します。距離は直線距離でも次Waypointまでの距離でもなく、ロボットに最も近いPath位置からPath終点までの実`/plan`ポリライン残長です。1 m未満はcm表示です。`to_pose`と`through_poses`のどちらでも意味は「現在受信しているPlanの残長」に限定します。
+
+Followerのpause・待機・人物探索、状態期限切れ、AMCL/TF不良、Path開始位置がロボットから離れすぎている場合は表示しません。route/index/goal generationが変わると直ちに旧距離を消し、その変更後に受信した新しい`/plan`まで再表示を待ちます。Waypoint座標やWaypointまでの距離を推測しないため、現インターフェースでは`NEXT WP`という表記を使用しません。
 
 ## 長い参考経路の分離設計
 
@@ -581,7 +585,7 @@ Git管理外のNUC固有YAMLは、他の値をGitHub版で置換せず、`camera
 
 ```bash
 set -euo pipefail
-NUC_CONFIG=/home/koko-chan-nuc/ar_navigation_project/ar_path_viewer/config/ar_path_viewer_nav2_test.yaml
+NUC_CONFIG=/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml
 test -f "$NUC_CONFIG"
 test "$(grep -Ec '^[[:space:]]*camera_y:' "$NUC_CONFIG")" -eq 1
 BACKUP="${NUC_CONFIG}.bak.$(date +%Y%m%d_%H%M%S)"

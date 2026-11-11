@@ -158,6 +158,34 @@ def test_offscreen_guidance_is_orange_ui_not_green_projected_path():
     assert np.count_nonzero(no_path_orange[120:]) == 0
 
 
+def test_active_route_keeps_green_line_and_adds_direction_and_distance_badges():
+    image = np.zeros((480, 640, 3), np.uint8)
+    route = [((100, 350), (540, 240))]
+    baseline = render_frame(image, route, "ACTIVE")
+    frame = render_frame(
+        image,
+        route,
+        "ACTIVE",
+        guidance=OffscreenGuidance("RIGHT", -22.0, 2.4, 2.0),
+        waypoint_status="PLAN LEFT: 2.4 m",
+    )
+
+    # Existing projected line remains green and unchanged away from the badges.
+    assert np.array_equal(frame[292:304, 300:340], baseline[292:304, 300:340])
+    assert np.count_nonzero(frame[:, :, 1] > 180) > 100
+    # Both bottom corners differ because GO and remaining-distance badges exist.
+    assert not np.array_equal(frame[430:475, :310], baseline[430:475, :310])
+    assert not np.array_equal(frame[430:475, 430:], baseline[430:475, 430:])
+
+
+def test_waypoint_badge_is_suppressed_by_non_path_viewer_states():
+    image = np.zeros((480, 640, 3), np.uint8)
+    label = "PLAN LEFT: 82 cm"
+    no_path = render_frame(image, [], "NO PATH", waypoint_status=label)
+    baseline = render_frame(image, [], "NO PATH")
+    assert np.array_equal(no_path, baseline)
+
+
 def test_display_letterboxes_without_changing_source_frame():
     frame = np.full((480, 640, 3), 127, np.uint8)
     original = frame.copy()

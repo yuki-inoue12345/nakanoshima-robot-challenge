@@ -4,6 +4,7 @@ import pytest
 from ar_path_viewer.offscreen_guidance import (
     GuidanceSettings,
     decide_offscreen_guidance,
+    measure_path_progress,
 )
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount, project_path
 
@@ -105,3 +106,29 @@ def test_november_9_bag_short_path_gets_truthful_straight_guidance():
     assert decision.guidance is not None
     assert decision.guidance.direction == "STRAIGHT"
     assert abs(decision.guidance.bearing_deg) < 2.0
+
+
+def test_path_progress_measures_from_closest_anchor_not_first_pose():
+    points = np.array((
+        (-1.0, 0.2, 0.0),
+        (0.0, 0.2, 0.0),
+        (2.0, 0.2, 0.0),
+        (2.0, 2.2, 0.0),
+    ))
+    progress = measure_path_progress(points)
+    assert progress is not None
+    assert progress.anchor_distance_m == pytest.approx(0.2)
+    assert progress.remaining_path_m == pytest.approx(4.0)
+    assert progress.endpoint_distance_m == pytest.approx(np.hypot(2.0, 2.2))
+
+
+@pytest.mark.parametrize(
+    "points",
+    (
+        np.empty((0, 3)),
+        np.array(((1.0, 0.0, 0.0),)),
+        np.array(((0.0, 0.0, 0.0), (np.nan, 0.0, 0.0))),
+    ),
+)
+def test_path_progress_rejects_unmeasurable_paths(points):
+    assert measure_path_progress(points) is None

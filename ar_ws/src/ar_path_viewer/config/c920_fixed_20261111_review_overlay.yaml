@@ -1,0 +1,28 @@
+# REVIEW-ONLY comparison overlay for the post-remount C920.
+#
+# This is not a production calibration.  The intrinsic model is the existing
+# 79-frame rigid-board candidate and is independently supported by the two
+# 2026-11-11 wall distances.  The pitch is only the midpoint of two planar-PnP
+# diagnostics (10.36 and 13.02 degrees); wall/robot alignment was not measured.
+# Apply this after ar_path_viewer_c920.yaml so all unrelated runtime settings,
+# including the NUC recording destination, remain owned by the base config.
+ar_path_viewer:
+  ros__parameters:
+    width: 640
+    height: 480
+    fx: 658.6575
+    fy: 657.3184
+    cx: 322.9545
+    cy: 239.1993
+    camera_undistort: true
+    camera_undistort_alpha: 0.0
+    camera_distortion_coefficients: [0.0554541, -0.0907945, 0.0, 0.0, 0.0]
+    # REVIEW ONLY: do not copy to the production YAML without an independent
+    # floor-point or surveyed-wall validation after the camera was remounted.
+    camera_pitch_up_deg: 11.70
+    # Burned into Viewer/MP4 frames so review runs cannot be confused with the
+    # production profile. This is a label only; it changes no projection math.
+    calibration_profile_label: C920 REVIEW
+    # Keep the established display-only geometry; Nav2 Path XY is unchanged.
+    path_display_mode: elevated
+    path_display_height_m: 0.50

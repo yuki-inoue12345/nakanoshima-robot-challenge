@@ -9,7 +9,9 @@ from .offscreen_guidance import (
     GuidanceDecision,
     GuidanceSettings,
     OffscreenGuidance,
+    PathProgress,
     decide_offscreen_guidance,
+    measure_path_progress,
 )
 from .projection import (
     CameraIntrinsics,
@@ -27,6 +29,7 @@ class PathProjectionState:
     stats: ProjectionStats | None
     guidance: OffscreenGuidance | None
     guidance_detail: str = ""
+    progress: PathProgress | None = None
 
 
 @dataclass(frozen=True)
@@ -104,17 +107,22 @@ def evaluate_path_state(
         endpoint_distance_m=endpoint_distance_m,
     )
     segments = list(projection.segments)
-    if segments:
-        return PathProjectionState("ACTIVE", segments, stats, None)
+    progress = measure_path_progress(points_base)
     decision: GuidanceDecision = decide_offscreen_guidance(
         points_base, guidance_settings
     )
+    if segments:
+        return PathProjectionState(
+            "ACTIVE", segments, stats, decision.guidance,
+            decision.detail(), progress,
+        )
     return PathProjectionState(
         "PATH OUT OF VIEW",
         [],
         stats,
         decision.guidance,
         decision.detail(),
+        progress,
     )
 
 

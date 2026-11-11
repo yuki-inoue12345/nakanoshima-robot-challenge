@@ -11,6 +11,9 @@ ar_path_viewer:
     reference_follower_state_topic: /waypoint_follower/reference_state
     reference_path_timeout_sec: 6.5
     reference_follower_timeout_sec: 2.5
+    # Show only remaining distance along the fresh real /plan as PLAN LEFT.
+    # This is not presented as distance to the next Waypoint.
+    waypoint_distance_enabled: true
     localization_pose_timeout_sec: 3.0
     localization_stamp_max_age_sec: 3.0
     localization_future_tolerance_sec: 1.5
@@ -48,6 +51,8 @@ ar_path_viewer:
     # Display-only height; camera calibration and the Nav2 Path are unchanged.
     path_display_mode: elevated
     path_display_height_m: 0.50
+    # Empty for the normal profile; review overlays may label recorded frames.
+    calibration_profile_label: ""
     # Orange fixed-UI arrow for a fresh real /plan that is wholly outside view.
     offscreen_guidance_enabled: true
     offscreen_guidance_lookahead_m: 1.5

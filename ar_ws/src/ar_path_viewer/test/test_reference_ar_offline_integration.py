@@ -23,6 +23,7 @@ from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
 from ar_path_viewer.viewer_logic import PathDisplayGeometry
+from ar_path_viewer.waypoint_progress import WaypointProgressGate
 from ar_path_viewer import viewer_node
 
 
@@ -195,6 +196,7 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._mount = CameraMount()
     fake._near = 0.1
     fake._path_display_geometry = PathDisplayGeometry("elevated", 0.50)
+    fake._calibration_profile_label = ""
     fake._guidance_settings = GuidanceSettings()
     fake._guidance_color = (0, 165, 255)
     fake._path_store = PathStore(timeout_sec=6.5, clock=clock)
@@ -209,6 +211,10 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._writer = writer if writer is not None else MemoryWriter()
     fake._log_gui = None
     fake._reference_enabled = True
+    fake._waypoint_distance_enabled = True
+    fake._waypoint_progress_gate = WaypointProgressGate(
+        timeout_sec=2.5, expected_frame="map"
+    )
     fake._reference_gate = ReferencePathGate(
         timeout_sec=6.5,
         follower_timeout_sec=2.5,

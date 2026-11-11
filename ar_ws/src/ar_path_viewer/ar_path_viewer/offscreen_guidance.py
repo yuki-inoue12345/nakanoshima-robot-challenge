@@ -51,6 +51,15 @@ class OffscreenGuidance:
 
 
 @dataclass(frozen=True)
+class PathProgress:
+    """Remaining distance measured on the received Nav2 Path polyline."""
+
+    remaining_path_m: float
+    endpoint_distance_m: float
+    anchor_distance_m: float
+
+
+@dataclass(frozen=True)
 class GuidanceDecision:
     guidance: OffscreenGuidance | None
     reason: str
@@ -93,6 +102,35 @@ def _remaining_polyline(
     return np.asarray(filtered)
 
 
+def measure_path_progress(points_base: np.ndarray) -> PathProgress | None:
+    """Measure real Path distance from its closest point to its endpoint.
+
+    No waypoint coordinates or distance are inferred here.  This is only the
+    remaining length of the received Path polyline.
+    """
+    points = np.asarray(points_base, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 2:
+        return None
+    if not np.isfinite(points).all():
+        return None
+    points_xy = points[:, :2]
+    try:
+        index, _, anchor, anchor_distance = _closest_path_anchor(points_xy)
+    except ValueError:
+        return None
+    remaining = _remaining_polyline(points_xy, index, anchor)
+    if len(remaining) < 2:
+        return None
+    remaining_length = float(
+        np.linalg.norm(np.diff(remaining, axis=0), axis=1).sum()
+    )
+    return PathProgress(
+        remaining_path_m=remaining_length,
+        endpoint_distance_m=float(np.linalg.norm(remaining[-1])),
+        anchor_distance_m=anchor_distance,
+    )
+
+
 def _point_at_distance(polyline: np.ndarray, distance_m: float) -> np.ndarray:
     walked = 0.0
     for start, end in zip(polyline[:-1], polyline[1:]):
@@ -124,7 +162,8 @@ def decide_offscreen_guidance(
     """Use only the real remaining Path to choose straight/left/right guidance.
 
     This does not project, extend, or reshape a Path. The caller must additionally
-    require a valid, fresh Path/localization and zero drawable green segments.
+    require a valid, fresh Path and localization. It may render the result as a
+    compact badge beside a visible Path or a larger guide when no segment is visible.
     """
     settings.validate()
     if not settings.enabled:
@@ -145,9 +184,11 @@ def decide_offscreen_guidance(
     remaining = _remaining_polyline(points_xy, index, anchor)
     if len(remaining) < 2:
         return GuidanceDecision(None, "no remaining Path after closest point")
-    lengths = np.linalg.norm(np.diff(remaining, axis=0), axis=1)
-    remaining_length = float(lengths.sum())
-    endpoint_distance = float(np.linalg.norm(remaining[-1]))
+    progress = measure_path_progress(points)
+    if progress is None:
+        return GuidanceDecision(None, "no measurable remaining Path")
+    remaining_length = progress.remaining_path_m
+    endpoint_distance = progress.endpoint_distance_m
     if endpoint_distance <= settings.near_goal_m:
         return GuidanceDecision(None, "endpoint is near the robot")
     if remaining_length < settings.min_remaining_m:

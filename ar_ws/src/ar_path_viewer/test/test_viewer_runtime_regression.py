@@ -16,6 +16,7 @@ from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
 from ar_path_viewer import viewer_node
 from ar_path_viewer.viewer_logic import PathDisplayGeometry
+from ar_path_viewer.waypoint_progress import WaypointProgressGate
 
 
 class RecordingLogger:
@@ -137,9 +138,13 @@ def make_viewer(clock=None):
     # Existing runtime tests retain the former ground-plane baseline. Dedicated
     # tests below exercise the new elevated mode explicitly.
     fake._path_display_geometry = PathDisplayGeometry("ground", 0.5)
+    fake._calibration_profile_label = ""
     fake._guidance_settings = GuidanceSettings()
     fake._guidance_color = (0, 165, 255)
     fake._path_store = PathStore(clock=active_clock)
+    fake._reference_enabled = False
+    fake._waypoint_distance_enabled = True
+    fake._waypoint_progress_gate = WaypointProgressGate()
     fake._image_source = ImageSource()
     fake._camera_error = ""
     fake._config_error = ""
@@ -151,6 +156,7 @@ def make_viewer(clock=None):
     fake._writer = RecordingWriter()
     fake._points_in_base = lambda points, frame: points
     fake._check_localization_tf = lambda: (True, "", (0.0, 0.0, 0.0))
+    fake._ros_now_sec = lambda: 100.0
     fake.logger = RecordingLogger()
     fake.get_logger = lambda: fake.logger
     fake._log_info = lambda message: fake.logger.info(message)
@@ -191,7 +197,7 @@ def path_message(points, frame="map", stamp=1.0):
 
 def reference_follower_message(
     *, stamp=100.0, route="a" * 64, index=1, generation=4,
-    activity=1, allowed=True,
+    activity=1, allowed=True, mode="to_pose", number=None,
 ):
     seconds = int(stamp)
     return SimpleNamespace(
@@ -204,8 +210,8 @@ def reference_follower_message(
         schema_version=1,
         route_sha256=route,
         next_waypoint_index=index,
-        next_waypoint_number=20 + index,
-        navigation_mode="to_pose",
+        next_waypoint_number=20 + index if number is None else number,
+        navigation_mode=mode,
         goal_generation=generation,
         activity=activity,
         reference_allowed=allowed,
@@ -302,6 +308,72 @@ def test_start_before_path_then_adopt_and_update_route_while_recording(monkeypat
     viewer_node.ArPathViewerNode._tick(fake)
     assert states[-1] == ("NO PATH", [])
     assert len(fake._writer.frames) == 4
+
+
+def test_plan_remaining_distance_tracks_only_fresh_follower_goal(monkeypatch):
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((state, kwargs.get("waypoint_status", "")))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake,
+        reference_follower_message(index=2, number=12, generation=4),
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake,
+        path_message(((0.1, 0.0, 0.0), (2.5, 0.0, 0.0))),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][1] == "PLAN LEFT: 2.4 m"
+
+    # A changed Follower goal invalidates the old plan immediately.
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake,
+        reference_follower_message(index=3, number=13, generation=5),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][1] == ""
+
+    viewer_node.ArPathViewerNode._on_path(
+        fake,
+        path_message(((0.1, 0.0, 0.0), (0.92, 0.0, 0.0)), stamp=2.0),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][1] == "PLAN LEFT: 82 cm"
+
+    # Pause/person-search states clear the read-only display immediately.
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake,
+        reference_follower_message(
+            index=3, number=13, generation=5, activity=4, allowed=False
+        ),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][1] == ""
+
+
+def test_through_poses_shows_only_plan_remaining_distance(monkeypatch):
+    waypoint_statuses = []
+
+    def render(image, segments, state, *args, **kwargs):
+        waypoint_statuses.append(kwargs.get("waypoint_status", ""))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, reference_follower_message(mode="through_poses")
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((0.1, 0.0, 0.0), (4.0, 0.0, 0.0)))
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert waypoint_statuses[-1] == "PLAN LEFT: 3.9 m"
 
 
 def test_elevated_mode_records_more_of_a_short_real_path_than_ground_mode():
