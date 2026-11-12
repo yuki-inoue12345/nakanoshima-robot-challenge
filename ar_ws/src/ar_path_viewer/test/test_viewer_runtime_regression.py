@@ -5,12 +5,14 @@ import pytest
 from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
+from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.localization_monitor import (
     AmclObservation,
     LocalizationMonitor,
     LocalizationThresholds,
 )
 from ar_path_viewer.path_adapter import PathStore
+from ar_path_viewer.path_transition import PathTransitionGate
 from ar_path_viewer.offscreen_guidance import GuidanceSettings
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
@@ -141,6 +143,11 @@ def make_viewer(clock=None):
     fake._calibration_profile_label = ""
     fake._guidance_settings = GuidanceSettings()
     fake._guidance_color = (0, 165, 255)
+    fake._guidance_stability = GuidanceStabilityGate(0.0)
+    fake._path_transition_gate = PathTransitionGate(0.0)
+    fake._path_alpha = 1.0
+    fake._guidance_require_follower = False
+    fake._debug_overlay = False
     fake._path_store = PathStore(clock=active_clock)
     fake._reference_enabled = False
     fake._waypoint_distance_enabled = True
@@ -717,6 +724,104 @@ def test_q_and_backend_specific_f10_codes_request_exit(key_code):
 def test_unrelated_or_missing_keys_do_not_request_exit():
     assert not viewer_node.is_exit_key(-1)
     assert not viewer_node.is_exit_key(ord("y"))
+
+
+def test_d_key_toggles_debug_overlay_without_requesting_exit():
+    assert viewer_node.is_debug_toggle_key(ord("d"))
+    assert viewer_node.is_debug_toggle_key(ord("D"))
+    assert not viewer_node.is_debug_toggle_key(ord("q"))
+
+    fake = make_viewer()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow(ord("d"))
+    fake._session_log = MemorySessionLog()
+    fake._log_gui = RecordingLogGui()
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert fake._debug_overlay
+    assert not fake._shutdown_requested
+    assert fake._display_window.statuses == [("UI DEBUG", True)]
+
+
+def test_pause_suppresses_direction_guidance_on_the_next_frame(monkeypatch):
+    guidance_values = []
+
+    def render(image, segments, state, *args, **kwargs):
+        guidance_values.append(kwargs.get("guidance"))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._guidance_require_follower = True
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, reference_follower_message()
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((0.1, 0.0, 0.0), (3.0, 0.0, 0.0)))
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert guidance_values[-1] is not None
+
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake,
+        reference_follower_message(activity=4, allowed=False),
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert guidance_values[-1] is None
+
+
+def test_pause_and_person_search_hide_green_path_and_report_hold(monkeypatch):
+    calls = []
+
+    def render(image, segments, state, *args, **kwargs):
+        calls.append((state, list(segments), kwargs.get("navigation_status")))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, reference_follower_message()
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((0.1, 0.0, 0.0), (3.0, 0.0, 0.0)))
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert calls[-1][0] in ("ACTIVE", "PATH OUT OF VIEW")
+
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, reference_follower_message(activity=6, allowed=False)
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert calls[-1] == ("NAVIGATION HOLD", [], "PERSON SEARCH")
+
+
+def test_disruptive_plan_update_is_hidden_until_confirmed(monkeypatch):
+    now = [100.0]
+    calls = []
+
+    def render(image, segments, state, *args, **kwargs):
+        calls.append((state, list(segments), kwargs.get("navigation_status")))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._ros_now_sec = lambda: now[0]
+    fake._path_transition_gate = PathTransitionGate(hold_sec=0.35)
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 0.0, 0.0), (3.0, 0.0, 0.0)))
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert calls[-1][0] in ("ACTIVE", "PATH OUT OF VIEW")
+
+    now[0] = 100.1
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 0.0, 0.0), (1.0, 2.0, 0.0)))
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert calls[-1] == ("REPLANNING", [], "PATH CHANGE CHECK")
+
+    now[0] = 100.46
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert calls[-1][0] in ("ACTIVE", "PATH OUT OF VIEW")
 
 
 def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):

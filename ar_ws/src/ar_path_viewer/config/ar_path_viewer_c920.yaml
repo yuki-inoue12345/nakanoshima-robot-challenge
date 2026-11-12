@@ -62,6 +62,13 @@ ar_path_viewer:
     offscreen_guidance_straight_angle_deg: 15.0
     offscreen_guidance_max_bearing_deg: 80.0
     offscreen_guidance_max_bearing_change_deg: 65.0
+    guidance_require_follower_state: true
+    guidance_direction_hold_sec: 0.35
+    path_change_hold_sec: 0.35
+    path_change_max_displacement_m: 0.60
+    path_change_max_heading_deg: 35.0
+    path_overlay_alpha: 0.82
+    debug_overlay_default: false
     guidance_line_b: 0
     guidance_line_g: 165
     guidance_line_r: 255

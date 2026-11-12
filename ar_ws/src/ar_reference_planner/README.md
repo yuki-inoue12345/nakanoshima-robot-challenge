@@ -170,6 +170,14 @@ the command can run first, then Launcher2 can select/start Nav2 and later start
 the Follower. To use an already-running Viewer, add `start_viewer:=false`.
 `ROS_DOMAIN_ID` and `ROBOTBASE_TF_PREFIX` must already match Launcher2.
 
+次回走行では起動ログの`reference_path_configuration enabled=True`、
+supervisorのmap/waypoint選択、`reference_path`の`valid=true`、Viewerの
+`reference_projection ... reason=visible`を順に保存します。水色線が出ない場合は
+`waiting_for_follower_state`、Keepout不一致、route/generation/index不一致、鮮度、
+AMCL/TF、画角外をこの順で切り分けます。緑線の`REPLANNING`または
+`NAVIGATION HOLD`は実走行Pathの表示保留であり、水色Pathを緑線へ代用する状態では
+ありません。
+
 ## Manual production-shaped launch (diagnostics only)
 
 The root map server, TF, `/scan3`, and `/hokuyo_scan` must already exist.

@@ -19,6 +19,8 @@ VALID_STATES = {
     "PATH OUT OF VIEW",
     "LOCALIZING",
     "LOCALIZATION UNSTABLE",
+    "REPLANNING",
+    "NAVIGATION HOLD",
     "INVALID CONFIG",
 }
 
@@ -201,6 +203,51 @@ def _draw_bottom_badge(
     )
 
 
+def _draw_direction_panel(
+    frame: np.ndarray,
+    guidance: OffscreenGuidance,
+    color_bgr: Tuple[int, int, int],
+) -> None:
+    """Draw a prominent fixed-UI direction panel without inventing geometry."""
+    width, height = frame.shape[1], frame.shape[0]
+    panel_width = min(196, max(150, width // 3))
+    panel_height = 70
+    right = width - 10
+    left = right - panel_width
+    bottom = height - 8
+    top = bottom - panel_height
+    cv2.rectangle(frame, (left, top), (right, bottom), (18, 18, 18), -1)
+    cv2.rectangle(frame, (left, top), (right, bottom), color_bgr, 2, cv2.LINE_AA)
+
+    arrow_start = (left + 34, bottom - 13)
+    horizontal = {
+        'LEFT': -25,
+        'STRAIGHT': 0,
+        'RIGHT': 25,
+    }.get(guidance.direction, 0)
+    arrow_end = (arrow_start[0] + horizontal, top + 13)
+    cv2.arrowedLine(
+        frame, arrow_start, arrow_end, color_bgr, 5, cv2.LINE_AA, tipLength=0.32
+    )
+    label = f"GO {guidance.direction}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.64
+    thickness = 2
+    (text_width, text_height), _ = cv2.getTextSize(label, font, scale, thickness)
+    text_x = max(left + 68, right - text_width - 10)
+    text_y = top + (panel_height + text_height) // 2 - 2
+    cv2.putText(
+        frame, label, (text_x, text_y), font, scale, color_bgr,
+        thickness, cv2.LINE_AA,
+    )
+
+
+def _draw_navigation_status(frame: np.ndarray, label: str) -> None:
+    if not label:
+        return
+    _draw_bottom_badge(frame, label, (180, 180, 180), align_right=True)
+
+
 def render_frame(
     image: np.ndarray,
     segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
@@ -219,9 +266,14 @@ def render_frame(
     reference_gap_px: float = 9.0,
     display_mode_label: str = "",
     waypoint_status: str = "",
+    navigation_status: str = "",
+    debug_overlay: bool = True,
+    path_alpha: float = 1.0,
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
+    if not math.isfinite(path_alpha) or not 0.0 < path_alpha <= 1.0:
+        raise ValueError("path_alpha must be finite and in (0, 1]")
     frame = image.copy()
     segment_list = list(segments)
     reference_list = list(reference_segments)
@@ -233,25 +285,37 @@ def render_frame(
             reference_thickness, cv2.LINE_AA,
         )
     if state == "ACTIVE":
+        route_layer = frame.copy()
         for start, end in segment_list:
-            cv2.line(frame, start, end, color_bgr, thickness, cv2.LINE_AA)
+            cv2.line(
+                route_layer, start, end, color_bgr, thickness, cv2.LINE_AA
+            )
         for start, end in direction_arrow_segments(segment_list):
             cv2.arrowedLine(
-                frame, start, end, color_bgr, thickness, cv2.LINE_AA, tipLength=0.4
+                route_layer, start, end, color_bgr, thickness, cv2.LINE_AA,
+                tipLength=0.4,
             )
+        if path_alpha < 1.0:
+            cv2.addWeighted(
+                route_layer, path_alpha, frame, 1.0 - path_alpha, 0.0, frame
+            )
+        else:
+            frame = route_layer
         if guidance is not None:
-            _draw_bottom_badge(
-                frame,
-                f"GO {guidance.direction}",
-                guidance_color_bgr,
-                align_right=True,
-            )
+            _draw_direction_panel(frame, guidance, guidance_color_bgr)
     elif state == "PATH OUT OF VIEW" and guidance is not None:
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
     if waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
         _draw_bottom_badge(frame, waypoint_status, (230, 230, 230))
+    if navigation_status and state in (
+        "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
+    ):
+        _draw_navigation_status(frame, navigation_status)
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
-    detail_lines = textwrap.wrap(detail, width=68)[:2] if detail else []
+    detail_lines = (
+        textwrap.wrap(detail, width=68)[:2]
+        if debug_overlay and detail else []
+    )
     box_bottom = 42 + 24 * len(detail_lines)
     cv2.rectangle(
         frame, (8, 8), (max(8, frame.shape[1] - 8), box_bottom), (20, 20, 20), -1

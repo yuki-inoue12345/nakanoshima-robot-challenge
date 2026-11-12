@@ -23,6 +23,7 @@ from .camera_model import CameraUndistorter
 from .diagnostics import DiagnosticReporter
 from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
 from .image_source import SimulationSource, make_image_source
+from .guidance_stability import GuidanceStabilityGate
 from .log_gui import LogGui
 from .localization_monitor import (
     LocalizationMonitor,
@@ -31,6 +32,7 @@ from .localization_monitor import (
 )
 from .offscreen_guidance import GuidanceSettings
 from .path_adapter import PathStore, path_message_to_array
+from .path_transition import PathTransitionGate
 from .projection import (
     DEFAULT_CAMERA_Y_M,
     CameraIntrinsics,
@@ -104,6 +106,13 @@ class ArPathViewerNode(Node):
             "offscreen_guidance_straight_angle_deg": 15.0,
             "offscreen_guidance_max_bearing_deg": 80.0,
             "offscreen_guidance_max_bearing_change_deg": 65.0,
+            "guidance_require_follower_state": True,
+            "guidance_direction_hold_sec": 0.35,
+            "path_change_hold_sec": 0.35,
+            "path_change_max_displacement_m": 0.60,
+            "path_change_max_heading_deg": 35.0,
+            "path_overlay_alpha": 0.82,
+            "debug_overlay_default": False,
             "guidance_line_b": 0,
             "guidance_line_g": 165,
             "guidance_line_r": 255,
@@ -217,6 +226,21 @@ class ArPathViewerNode(Node):
                 ),
             )
             self._guidance_settings.validate()
+            self._guidance_stability = GuidanceStabilityGate(
+                self._float("guidance_direction_hold_sec")
+            )
+            self._path_transition_gate = PathTransitionGate(
+                hold_sec=self._float("path_change_hold_sec"),
+                max_displacement_m=self._float(
+                    "path_change_max_displacement_m"
+                ),
+                max_heading_change_deg=self._float(
+                    "path_change_max_heading_deg"
+                ),
+            )
+            self._path_alpha = self._float("path_overlay_alpha")
+            if not 0.0 < self._path_alpha <= 1.0:
+                raise ValueError("path_overlay_alpha must be in (0, 1]")
         except ValueError as exc:
             self._config_error = str(exc)
             self._log_error(f"Invalid configuration: {exc}")
@@ -231,6 +255,9 @@ class ArPathViewerNode(Node):
             self._reference_gate = ReferencePathGate()
             self._waypoint_progress_gate = WaypointProgressGate()
             self._guidance_settings = GuidanceSettings(enabled=False)
+            self._guidance_stability = GuidanceStabilityGate(0.0)
+            self._path_transition_gate = PathTransitionGate(0.0)
+            self._path_alpha = 1.0
 
         try:
             self._image_source = make_image_source(
@@ -377,6 +404,10 @@ class ArPathViewerNode(Node):
         )
         self._thickness = self._int("line_thickness")
         self._display = self._bool("display")
+        self._debug_overlay = self._bool("debug_overlay_default")
+        self._guidance_require_follower = self._bool(
+            "guidance_require_follower_state"
+        )
         self._display_window = None
         if self._display:
             try:
@@ -447,6 +478,22 @@ class ArPathViewerNode(Node):
             f"enabled={self._waypoint_distance_enabled} "
             "label='PLAN LEFT' meaning=remaining_real_plan_polyline "
             "not_waypoint_distance=true"
+        )
+        self._log_info(
+            "navigation_ui_configuration "
+            f"debug_overlay={self._debug_overlay} toggle_key='D' "
+            f"guidance_require_follower={self._guidance_require_follower} "
+            f"direction_hold_sec={self._guidance_stability.hold_sec:.3f}"
+        )
+        self._log_info(
+            "path_transition_configuration "
+            f"hold_sec={self._path_transition_gate.hold_sec:.3f} "
+            "max_displacement_m="
+            f"{self._path_transition_gate.max_displacement_m:.3f} "
+            "max_heading_deg="
+            f"{self._path_transition_gate.max_heading_change_deg:.1f} "
+            f"path_overlay_alpha={self._path_alpha:.2f} "
+            "old_path_held=false"
         )
 
     def _str(self, name: str) -> str:
@@ -660,19 +707,28 @@ class ArPathViewerNode(Node):
         detail = ""
         guidance = None
         waypoint_status = ""
+        navigation_status = ""
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
             state = "CAMERA UNAVAILABLE"
             detail = "image source returned no frame"
-            frame = render_frame(image, [], state)
+            frame = render_frame(
+                image, [], state, debug_overlay=self._debug_overlay
+            )
         elif self._camera_error:
             state = "CAMERA UNAVAILABLE"
             detail = self._camera_error
-            frame = render_frame(image, [], state, detail=detail)
+            frame = render_frame(
+                image, [], state, detail=detail,
+                debug_overlay=self._debug_overlay,
+            )
         elif self._config_error:
             state = "INVALID CONFIG"
             detail = self._config_error
-            frame = render_frame(image, [], state, detail=detail)
+            frame = render_frame(
+                image, [], state, detail=detail,
+                debug_overlay=self._debug_overlay,
+            )
         else:
             source_shape = (
                 self._source_intrinsics.height,
@@ -741,8 +797,49 @@ class ArPathViewerNode(Node):
                         projection_stats = evaluation.stats
                         guidance = evaluation.guidance
                         progress = evaluation.progress
+                        transition = None
+                        transition_gate = getattr(
+                            self, "_path_transition_gate", None
+                        )
                         if (
-                            self._waypoint_distance_enabled
+                            transition_gate is not None
+                            and state in ("ACTIVE", "PATH OUT OF VIEW")
+                        ):
+                            transition = transition_gate.update(
+                                snapshot.generation,
+                                snapshot.points,
+                                self._ros_now_sec(),
+                            )
+                        hold_status = self._waypoint_progress_gate.navigation_hold_status(
+                            self._ros_now_sec()
+                        )
+                        if hold_status:
+                            if transition_gate is not None:
+                                transition_gate.clear()
+                            self._guidance_stability.clear()
+                            state = "NAVIGATION HOLD"
+                            segments = []
+                            guidance = None
+                            progress = None
+                            navigation_status = hold_status
+                            detail = (
+                                f"follower_hold={hold_status!r}; "
+                                "real_path_hidden=true"
+                            )
+                        elif transition is not None and not transition.visible:
+                            self._guidance_stability.clear()
+                            state = "REPLANNING"
+                            segments = []
+                            guidance = None
+                            progress = None
+                            navigation_status = transition.status
+                            detail = (
+                                f"{transition.detail}; old_path_held=false; "
+                                "real_path_hidden=true"
+                            )
+                        if (
+                            state in ("ACTIVE", "PATH OUT OF VIEW")
+                            and self._waypoint_distance_enabled
                             and progress is not None
                         ):
                             waypoint_status = (
@@ -756,6 +853,27 @@ class ArPathViewerNode(Node):
                                 )
                                 or ""
                             )
+                        if (
+                            state in ("ACTIVE", "PATH OUT OF VIEW")
+                            and guidance is not None
+                        ):
+                            authorized = (
+                                not self._guidance_require_follower
+                                or self._waypoint_progress_gate.authorizes_plan(
+                                    self._ros_now_sec(), snapshot.generation
+                                )
+                            )
+                            if not authorized:
+                                self._guidance_stability.clear()
+                                guidance = None
+                            else:
+                                stable = self._guidance_stability.update(
+                                    guidance, self._ros_now_sec()
+                                )
+                                guidance = stable.guidance
+                                navigation_status = stable.status
+                        else:
+                            self._guidance_stability.clear()
                         if projection_stats is not None:
                             self._diagnostics.projection_update(
                                 snapshot.frame_id,
@@ -782,7 +900,10 @@ class ArPathViewerNode(Node):
                                 f"source_frame={snapshot.frame_id!r}, "
                                 f"target_frame={self._base_frame!r}"
                             )
-                        elif projection_stats is not None:
+                        elif (
+                            state not in ("REPLANNING", "NAVIGATION HOLD")
+                            and projection_stats is not None
+                        ):
                             detail = (
                                 f"gen={snapshot.generation} frame={snapshot.frame_id} "
                                 f"{projection_stats.compact_detail()}"
@@ -791,8 +912,14 @@ class ArPathViewerNode(Node):
                         state = "INVALID CONFIG"
                         detail = str(exc)
             elif state == "NO PATH":
+                transition_gate = getattr(self, "_path_transition_gate", None)
+                if transition_gate is not None:
+                    transition_gate.clear()
                 detail = self._diagnostics.no_path_detail()
             elif state == "PATH STALE" and snapshot is not None:
+                transition_gate = getattr(self, "_path_transition_gate", None)
+                if transition_gate is not None:
+                    transition_gate.clear()
                 age = max(0.0, self._path_store.age())
                 detail = (
                     f"age={age:.3f}s timeout={self._path_store.timeout_sec:.3f}s "
@@ -903,6 +1030,9 @@ class ArPathViewerNode(Node):
                     self._calibration_profile_label,
                 ))),
                 waypoint_status=waypoint_status,
+                navigation_status=navigation_status,
+                debug_overlay=self._debug_overlay,
+                path_alpha=getattr(self, "_path_alpha", 1.0),
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:
@@ -923,6 +1053,12 @@ class ArPathViewerNode(Node):
                 )
                 for action in consume_actions():
                     self._handle_display_action(action)
+                if is_debug_toggle_key(key_code):
+                    self._debug_overlay = not self._debug_overlay
+                    mode = "DEBUG" if self._debug_overlay else "NORMAL"
+                    self._log_info(f"navigation UI mode changed to {mode}")
+                    if self._display_window is not None:
+                        self._display_window.set_status(f"UI {mode}", True)
                 if is_exit_key(key_code):
                     self._request_shutdown("keyboard q/Q/F10")
         log_gui = getattr(self, "_log_gui", None)
@@ -965,6 +1101,13 @@ def is_exit_key(key_code: int) -> bool:
         return False
     code = int(key_code) & 0xFFFFFFFF
     return code in {ord("q"), ord("Q"), 0x00790000, 0x0000FFC7, 0x01000039}
+
+
+def is_debug_toggle_key(key_code: int) -> bool:
+    """Use D/d for a backend-independent normal/debug overlay toggle."""
+    if key_code is None or key_code < 0:
+        return False
+    return (int(key_code) & 0xFFFFFFFF) in {ord('d'), ord('D')}
 
 
 def main(args=None) -> None:

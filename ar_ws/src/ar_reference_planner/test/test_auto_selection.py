@@ -16,6 +16,7 @@ from ar_reference_planner.runtime_selection import (
     resolve_follower_waypoint,
     runtime_transition,
     RuntimeSelection,
+    SelectionStatus,
 )
 from PIL import Image
 import pytest
@@ -241,6 +242,46 @@ def test_supervisor_queries_jazzy_parameter_services_api(tmp_path):
     assert requested == [['waypoint_file']]
     assert fake._parameter_identity == (route.sha256, len(route.waypoints))
     assert fake._parameter_future is not None
+
+
+def test_waiting_for_follower_state_recovers_after_verified_snapshot(tmp_path):
+    """The startup wait must not remain sticky after Follower discovery."""
+    state_path = tmp_path / '.launcher_state.yaml'
+    selection = _selection(
+        state_path, _map(tmp_path, 'map_a'), _route(tmp_path, 'route_a')
+    )
+    fake = SimpleNamespace(
+        _map_reader=SimpleNamespace(
+            read=lambda: SelectionStatus(
+                selection.map_selection, 'launcher_map_verified'
+            )
+        ),
+        _follower=None,
+        _follower_received_at=None,
+        _follower_timeout=2.5,
+        _waypoint_status=SelectionStatus(
+            selection.waypoint_selection, 'follower_waypoint_verified'
+        ),
+        _request_waypoint_parameter=lambda _now: None,
+        _guard_map_route_transition=lambda candidate: (
+            candidate, 'selection_verified'
+        ),
+    )
+
+    desired, reason = ReferencePlannerAutoSupervisor._desired_selection(
+        fake, now=10.0
+    )
+    assert desired is None
+    assert reason == 'waiting_for_follower_state'
+
+    fake._follower = _follower(selection.waypoint_selection.route)
+    fake._follower_received_at = 10.1
+    desired, reason = ReferencePlannerAutoSupervisor._desired_selection(
+        fake, now=10.2
+    )
+
+    assert desired == selection
+    assert reason == 'selection_verified'
 
 
 def test_map_switch_waits_for_new_follower_route_before_restart(tmp_path):

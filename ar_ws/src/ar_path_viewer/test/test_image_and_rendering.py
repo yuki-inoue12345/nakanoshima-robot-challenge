@@ -178,12 +178,76 @@ def test_active_route_keeps_green_line_and_adds_direction_and_distance_badges():
     assert not np.array_equal(frame[430:475, 430:], baseline[430:475, 430:])
 
 
+def test_normal_overlay_hides_technical_detail_but_debug_mode_keeps_it():
+    image = np.zeros((480, 640, 3), np.uint8)
+    detail = "gen=42 frame=map pts=110 len=2.80m seg=75 px=154"
+    normal = render_frame(
+        image, [], "PATH OUT OF VIEW", detail=detail, debug_overlay=False
+    )
+    debug = render_frame(
+        image, [], "PATH OUT OF VIEW", detail=detail, debug_overlay=True
+    )
+    assert np.array_equal(normal[43:86], image[43:86])
+    assert not np.array_equal(debug[43:86], image[43:86])
+
+
+def test_active_direction_panel_is_prominent_and_keeps_green_path():
+    image = np.zeros((480, 640, 3), np.uint8)
+    route = [((80, 330), (450, 250))]
+    frame = render_frame(
+        image,
+        route,
+        "ACTIVE",
+        guidance=OffscreenGuidance("LEFT", 32.0, 2.4, 2.0),
+        debug_overlay=False,
+    )
+    orange = (
+        (frame[390:, :, 2] > 180)
+        & (frame[390:, :, 1] > 80)
+        & (frame[390:, :, 0] < 80)
+    )
+    green = (
+        (frame[:, :, 1] > 180)
+        & (frame[:, :, 2] < 80)
+        & (frame[:, :, 0] < 80)
+    )
+    assert np.count_nonzero(orange) > 250
+    assert np.count_nonzero(green) > 100
+
+
 def test_waypoint_badge_is_suppressed_by_non_path_viewer_states():
     image = np.zeros((480, 640, 3), np.uint8)
     label = "PLAN LEFT: 82 cm"
     no_path = render_frame(image, [], "NO PATH", waypoint_status=label)
     baseline = render_frame(image, [], "NO PATH")
     assert np.array_equal(no_path, baseline)
+
+
+def test_green_path_alpha_keeps_camera_context_visible():
+    image = np.full((180, 320, 3), (60, 80, 100), np.uint8)
+    route = [((20, 120), (300, 120))]
+    opaque = render_frame(image, route, "ACTIVE", path_alpha=1.0)
+    translucent = render_frame(image, route, "ACTIVE", path_alpha=0.5)
+
+    assert opaque[120, 160, 1] > translucent[120, 160, 1]
+    assert translucent[120, 160, 0] > opaque[120, 160, 0]
+    assert np.array_equal(translucent[100, 160], image[100, 160])
+    with pytest.raises(ValueError):
+        render_frame(image, route, "ACTIVE", path_alpha=0.0)
+
+
+def test_replanning_and_navigation_hold_show_status_without_route():
+    image = np.zeros((480, 640, 3), np.uint8)
+    route = [((100, 350), (540, 240))]
+    for state, label in (
+        ("REPLANNING", "PATH CHANGE CHECK"),
+        ("NAVIGATION HOLD", "PERSON SEARCH"),
+    ):
+        frame = render_frame(
+            image, route, state, navigation_status=label, debug_overlay=False
+        )
+        assert np.array_equal(frame[292:304, 300:340], image[292:304, 300:340])
+        assert not np.array_equal(frame[430:475, 430:], image[430:475, 430:])
 
 
 def test_display_letterboxes_without_changing_source_frame():

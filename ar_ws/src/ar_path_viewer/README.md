@@ -304,9 +304,9 @@ ros2 run ar_path_viewer calibrate_camera compare \
 
 採用時もNUC固有YAML全体を置換しません。バックアップを作り、review overlayの`fx/fy/cx/cy`、歪み係数、undistort、確認済みの外部パラメータだけを手作業で反映し、C920デバイス、MP4出力、ログ、診断設定を維持します。歪み補正は初期値`false`であり、実測結果を採用した場合だけ有効にします。補正後も出力と録画は640×480です。
 
-## 進行方向と次Waypoint残距離
+## 進行方向とPlan残長
 
-橙色の進行方向表示は、実Pathの現在位置に最も近い点から1.5 m先までをたどって`GO STRAIGHT`、`GO LEFT`、`GO RIGHT`を判定します。緑線が見える`ACTIVE`時は画面右下の小さな方向バッジ、緑線を描画できる線分がない`PATH OUT OF VIEW`時は大きな固定UI矢印として表示します。いずれも床へ投影した架空線ではなく、受信した実`/plan`だけが根拠です。Pathを延長、移動、変形しません。
+橙色の進行方向表示は、実Pathの現在位置に最も近い点から1.5 m先までをたどって`GO STRAIGHT`、`GO LEFT`、`GO RIGHT`を判定します。緑線が見える`ACTIVE`時は画面右下の大きな方向パネル、緑線を描画できる線分がない`PATH OUT OF VIEW`時は大きな固定UI矢印として表示します。いずれも床へ投影した架空線ではなく、受信した実`/plan`だけが根拠です。Pathを延長、移動、変形しません。
 
 次の場合は誤案内防止のため矢印も出しません。
 
@@ -314,12 +314,21 @@ ros2 run ar_path_viewer calibrate_camera compare \
 - 終点まで0.6 m以内、残りPathが0.6 m未満
 - 実Pathがロボットから1.0 m以上離れて始まる
 - 進行方位が前方±80°を超える、1.5 m内で方位が65°以上急変する、または左右をまたいで曖昧
+- Followerがpause・待機・人物探索中、状態が古い、またはgoal世代変更後の新しい`/plan`をまだ受信していない
 
-正しく投影できる部分は従来どおり緑線を維持し、その形状と線上矢印を優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*` ROS parametersで調整できます。
+正しく投影できる部分は従来どおり緑線を維持し、その形状と線上矢印を優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。LEFT/RIGHT/STRAIGHTが変わった直後は旧矢印を即座に消し、既定0.35秒にわたり同じ最新判断が続くまで`DIRECTION CHECK`として案内を保留します。古い経路を補間したり、見かけだけ滑らかにつなぐ処理ではありません。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*`、`guidance_direction_hold_sec` ROS parametersで調整できます。
+
+大きな再計画では、旧Pathを保持したり新旧を補間せず、新しい実`/plan`を既定0.35秒だけ非表示にして`REPLANNING` / `PATH CHANGE CHECK`を表示します。通常の走行進捗と、既にPathに含まれていた曲がり角への進入はmap座標上で旧Pathの対応位置へ合わせて比較するため、再計画とは扱いません。既定閾値は先頭2 m内の形状差0.60 mまたは方向差35度で、`path_change_*`パラメータから変更できます。
+
+Followerがpause、人物探索、task wait、holding stopを明示している間は、古い緑線、方向案内、`PLAN LEFT`を消し、`NAVIGATION HOLD`と実際の状態を表示します。Follower状態がない通常Viewerでは従来どおり`/plan`だけで動作します。緑線は`path_overlay_alpha`（既定0.82）で半透明にし、人物や周辺映像を完全には覆いません。これは深度や人物マスクに基づく遮蔽ではなく、線の前後関係を保証する機能ではありません。
 
 `waypoint_distance_enabled: true`では、Followerの読み取り専用`/waypoint_follower/reference_state`を安全状態の確認に使い、画面左下に`PLAN LEFT: 2.4 m`を表示します。距離は直線距離でも次Waypointまでの距離でもなく、ロボットに最も近いPath位置からPath終点までの実`/plan`ポリライン残長です。1 m未満はcm表示です。`to_pose`と`through_poses`のどちらでも意味は「現在受信しているPlanの残長」に限定します。
 
 Followerのpause・待機・人物探索、状態期限切れ、AMCL/TF不良、Path開始位置がロボットから離れすぎている場合は表示しません。route/index/goal generationが変わると直ちに旧距離を消し、その変更後に受信した新しい`/plan`まで再表示を待ちます。Waypoint座標やWaypointまでの距離を推測しないため、現インターフェースでは`NEXT WP`という表記を使用しません。
+
+`/navigate_to_pose/_action/feedback`には`distance_remaining`がありますが、現行の読み取り専用`WaypointFollowerState`はNav2 Action goal UUIDを公開していません。そのためViewerだけでは、同じROS graph上のfeedbackが現在のFollower goalと厳密に一致することを証明できません。誤ったWaypoint距離を表示しないため、goal UUIDを安全に照合できるインターフェースが導入されるまでは`PLAN LEFT`を維持します。
+
+通常画面はカメラ映像、緑実線、水色破線、方向、`PLAN LEFT`、必須状態だけを表示し、点数・TF・投影統計などの詳細を上部へ出しません。`D`キーでデバッグ表示を切り替えられます。`Q/F10`終了、`F11`全画面、ログ表示・コピーは従来どおりです。通常/デバッグのどちらも、GUI操作バーを除いた描画結果がMP4へ記録されます。
 
 ## 長い参考経路の分離設計
 

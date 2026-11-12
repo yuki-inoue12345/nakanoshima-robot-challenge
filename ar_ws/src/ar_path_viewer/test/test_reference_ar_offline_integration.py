@@ -16,6 +16,7 @@ from nav_msgs.msg import Path
 from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollowerState
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
+from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.image_source import SimulationSource
 from ar_path_viewer.localization_monitor import LocalizationMonitor, LocalizationThresholds
 from ar_path_viewer.offscreen_guidance import GuidanceSettings
@@ -199,6 +200,9 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._calibration_profile_label = ""
     fake._guidance_settings = GuidanceSettings()
     fake._guidance_color = (0, 165, 255)
+    fake._guidance_stability = GuidanceStabilityGate(0.0)
+    fake._guidance_require_follower = True
+    fake._debug_overlay = False
     fake._path_store = PathStore(timeout_sec=6.5, clock=clock)
     fake._image_source = SimulationSource(640, 480)
     fake._camera_error = ""

@@ -64,6 +64,19 @@ ar_path_viewer:
     offscreen_guidance_straight_angle_deg: 15.0
     offscreen_guidance_max_bearing_deg: 80.0
     offscreen_guidance_max_bearing_change_deg: 65.0
+    # Direction is shown only for a fresh, actively navigating Follower goal.
+    # A changed direction is hidden briefly; the previous arrow is never retained.
+    guidance_require_follower_state: true
+    guidance_direction_hold_sec: 0.35
+    # Hide a newly, visibly different /plan briefly instead of holding the old
+    # line or showing a transient replan as a settled driving intention.
+    path_change_hold_sec: 0.35
+    path_change_max_displacement_m: 0.60
+    path_change_max_heading_deg: 35.0
+    # Keep camera context visible; this is not depth-based person occlusion.
+    path_overlay_alpha: 0.82
+    # D toggles full diagnostics. Normal mode keeps the camera view unobstructed.
+    debug_overlay_default: false
     guidance_line_b: 0
     guidance_line_g: 165
     guidance_line_r: 255

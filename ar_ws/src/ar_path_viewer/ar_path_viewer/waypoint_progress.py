@@ -8,6 +8,18 @@ import re
 _ROUTE_HASH = re.compile(r'^[0-9a-f]{64}$')
 _SCHEMA_VERSION = 1
 _NAVIGATING_ACTIVITY = 1
+_ACTIVITY_STATUS = {
+    0: 'WAITING FOR NAV',
+    2: 'SWITCHING GOAL',
+    3: 'TASK WAIT',
+    4: 'PAUSED',
+    5: 'PERSON SEARCH',
+    6: 'PERSON SEARCH',
+    7: 'PERSON SEARCH FAULT',
+    8: 'STOPPED',
+    9: 'ROUTE COMPLETE',
+    10: 'STOPPING',
+}
 
 
 def _stamp_sec(stamp) -> float:
@@ -25,6 +37,12 @@ class WaypointGoalView:
     minimum_path_generation: int
 
 
+@dataclass(frozen=True)
+class FollowerActivityView:
+    activity: int
+    stamp_sec: float
+
+
 class WaypointProgressGate:
     """Authorize a plan-remaining label without changing Follower control.
 
@@ -39,6 +57,7 @@ class WaypointProgressGate:
         self.timeout_sec = float(timeout_sec)
         self.expected_frame = str(expected_frame)
         self._view: WaypointGoalView | None = None
+        self._activity: FollowerActivityView | None = None
         self.reason = 'waiting_for_follower_state'
 
     @staticmethod
@@ -51,8 +70,10 @@ class WaypointProgressGate:
             int(message.goal_generation),
         )
 
-    def clear(self, reason: str) -> None:
+    def clear(self, reason: str, *, clear_activity: bool = True) -> None:
         self._view = None
+        if clear_activity:
+            self._activity = None
         self.reason = str(reason)
 
     def update(self, message, now_ros_sec: float, path_generation: int) -> bool:
@@ -77,13 +98,17 @@ class WaypointProgressGate:
                 raise ValueError('follower_future_timestamp')
             if age > self.timeout_sec:
                 raise ValueError(f'follower_state_stale age={age:.3f}s')
-            if (
-                int(message.activity) != _NAVIGATING_ACTIVITY
-                or not bool(message.reference_allowed)
-            ):
-                raise ValueError(f'follower_not_navigating activity={message.activity}')
+            activity = int(message.activity)
+            if activity not in range(0, 11):
+                raise ValueError(f'invalid_follower_activity activity={activity}')
         except (AttributeError, TypeError, ValueError) as exc:
             self.clear(str(exc))
+            return False
+
+        if activity != _NAVIGATING_ACTIVITY or not bool(message.reference_allowed):
+            self._view = None
+            self._activity = FollowerActivityView(activity, stamp)
+            self.reason = f'follower_not_navigating activity={activity}'
             return False
 
         identity = (route_hash, index, number, mode, goal_generation)
@@ -108,12 +133,24 @@ class WaypointProgressGate:
             stamp,
             minimum_generation,
         )
+        self._activity = None
         self.reason = (
             'waiting_for_plan_after_goal_change'
             if identity != previous_identity
             else 'valid'
         )
         return True
+
+    def navigation_hold_status(self, now_ros_sec: float) -> str | None:
+        """Return a truthful UI label for a fresh explicit Follower hold."""
+        activity = self._activity
+        if activity is None:
+            return None
+        age = float(now_ros_sec) - activity.stamp_sec
+        if age < -0.5 or age > self.timeout_sec:
+            self.clear(f'follower_state_stale age={age:.3f}s')
+            return None
+        return _ACTIVITY_STATUS.get(activity.activity, 'STOPPED')
 
     def label(
         self,
@@ -149,3 +186,18 @@ class WaypointProgressGate:
         else:
             distance = f'{remaining_path_m:.1f} m'
         return f'PLAN LEFT: {distance}'
+
+    def authorizes_plan(self, now_ros_sec: float, path_generation: int) -> bool:
+        """Confirm that guidance belongs to a fresh, navigating Follower goal."""
+        view = self._view
+        if view is None:
+            return False
+        age = float(now_ros_sec) - view.stamp_sec
+        if age < -0.5 or age > self.timeout_sec:
+            self.clear(f'follower_state_stale age={age:.3f}s')
+            return False
+        if int(path_generation) < view.minimum_path_generation:
+            self.reason = 'waiting_for_plan_after_goal_change'
+            return False
+        self.reason = 'valid'
+        return True

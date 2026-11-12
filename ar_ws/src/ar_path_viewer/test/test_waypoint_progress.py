@@ -84,6 +84,8 @@ def test_pause_stale_state_and_distant_path_fail_closed():
         follower_state(activity=4, allowed=False), 100.0, path_generation=1
     )
     assert label(gate, path_generation=2) is None
+    assert gate.navigation_hold_status(100.1) == "PAUSED"
+    assert gate.navigation_hold_status(103.0) is None
 
     gate.update(follower_state(stamp=100.0), 100.0, path_generation=2)
     assert label(gate, now=103.0, path_generation=3) is None
@@ -94,3 +96,29 @@ def test_pause_stale_state_and_distant_path_fail_closed():
         gate, now=104.1, path_generation=4, anchor=1.01
     ) is None
     assert gate.reason == "path_progress_not_reliable"
+
+
+def test_guidance_authorization_uses_same_goal_and_freshness_gate():
+    gate = WaypointProgressGate()
+    gate.update(follower_state(), 100.0, path_generation=7)
+    assert not gate.authorizes_plan(100.1, 7)
+    assert gate.authorizes_plan(100.1, 8)
+    assert not gate.authorizes_plan(103.0, 8)
+
+
+def test_person_search_and_resume_expose_truthful_hold_status():
+    gate = WaypointProgressGate()
+    assert not gate.update(
+        follower_state(activity=6, allowed=False), 100.0, path_generation=8
+    )
+    assert gate.navigation_hold_status(100.1) == "PERSON SEARCH"
+    assert not gate.authorizes_plan(100.1, 9)
+
+    assert gate.update(
+        follower_state(activity=1, allowed=True, stamp=100.2),
+        100.2,
+        path_generation=9,
+    )
+    assert gate.navigation_hold_status(100.3) is None
+    assert not gate.authorizes_plan(100.3, 9)
+    assert gate.authorizes_plan(100.3, 10)
