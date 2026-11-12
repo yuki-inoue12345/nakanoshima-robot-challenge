@@ -326,6 +326,13 @@ Followerがpause、人物探索、task wait、holding stopを明示している�
 
 Followerのpause・待機・人物探索、状態期限切れ、AMCL/TF不良、Path開始位置がロボットから離れすぎている場合は表示しません。route/index/goal generationが変わると直ちに旧距離を消し、その変更後に受信した新しい`/plan`まで再表示を待ちます。Waypoint座標やWaypointまでの距離を推測しないため、現インターフェースでは`NEXT WP`という表記を使用しません。
 
+Launcher2の旧Followerを使う場合、専用Launchの読み取り専用compatibility bridgeが
+Followerパラメータ、Nav2 goal UUID、goal変更後の`/plan`終点を選択ルートへ一意に
+照合できたときだけ同じ状態契約を供給します。照合後の緑線・橙色案内・
+`PLAN LEFT`の意味は新Follower時と同一です。pause/person searchの種別は旧実装から
+読めないため`STOPPED`までしか表示せず、終点が曖昧、route外、通信断の場合は方向・
+距離・水色線をすべて非表示にします。単にFollowerゲートを解除する動作ではありません。
+
 `/navigate_to_pose/_action/feedback`には`distance_remaining`がありますが、現行の読み取り専用`WaypointFollowerState`はNav2 Action goal UUIDを公開していません。そのためViewerだけでは、同じROS graph上のfeedbackが現在のFollower goalと厳密に一致することを証明できません。誤ったWaypoint距離を表示しないため、goal UUIDを安全に照合できるインターフェースが導入されるまでは`PLAN LEFT`を維持します。
 
 通常画面はカメラ映像、緑実線、水色破線、方向、`PLAN LEFT`、必須状態だけを表示し、点数・TF・投影統計などの詳細を上部へ出しません。`D`キーでデバッグ表示を切り替えられます。`Q/F10`終了、`F11`全画面、ログ表示・コピーは従来どおりです。通常/デバッグのどちらも、GUI操作バーを除いた描画結果がMP4へ記録されます。

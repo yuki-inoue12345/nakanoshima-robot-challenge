@@ -39,6 +39,17 @@ def generate_launch_description():
     default_viewer_config = (
         f'{viewer_share}/config/ar_path_viewer_c920.yaml'
     )
+    legacy_bridge = Node(
+        package='ar_reference_planner',
+        executable='legacy_follower_reference_bridge',
+        name='legacy_follower_reference_bridge',
+        output='screen',
+        parameters=[{
+            'follower_node_name': LaunchConfiguration('follower_node_name'),
+            'output_topic': '/waypoint_follower/reference_state',
+            'plan_topic': '/plan',
+        }],
+    )
     supervisor = Node(
         package='ar_reference_planner',
         executable='reference_planner_auto_supervisor',
@@ -79,6 +90,7 @@ def generate_launch_description():
             'viewer_config_file', default_value=default_viewer_config),
         DeclareLaunchArgument(
             'viewer_calibration_overlay_file', default_value=''),
+        legacy_bridge,
         supervisor,
         OpaqueFunction(function=_launch_viewer),
     ])

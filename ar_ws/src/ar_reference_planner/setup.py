@@ -31,6 +31,8 @@ setup(
         'console_scripts': [
             'reference_planner_auto_supervisor = '
             'ar_reference_planner.auto_supervisor:main',
+            'legacy_follower_reference_bridge = '
+            'ar_reference_planner.legacy_follower_bridge:main',
             'reference_path_request = ar_reference_planner.request_node:main',
             'mock_follower_state = ar_reference_planner.mock_follower_state:main',
             'synthetic_map_publisher = ar_reference_planner.synthetic_map:main',

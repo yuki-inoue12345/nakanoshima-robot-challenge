@@ -170,6 +170,35 @@ the command can run first, then Launcher2 can select/start Nav2 and later start
 the Follower. To use an already-running Viewer, add `start_viewer:=false`.
 `ROS_DOMAIN_ID` and `ROBOTBASE_TF_PREFIX` must already match Launcher2.
 
+### Launcher2旧Follower互換
+
+`launcher2_reference_ar.launch.py`は、走行制御へ接続しない
+`legacy_follower_reference_bridge`も起動します。実行中Followerに
+`reference_state_topic`パラメータが存在する新実装では、このbridgeはpublisherを
+作らず、Follower本来の厳密な状態をそのまま使用します。
+
+旧実装では、次の全条件を満たしたときだけ既存の
+`/waypoint_follower/reference_state`型へ読み取り専用状態を出します。
+
+- Followerの絶対`waypoint_file`と`navigation_mode`をROSパラメータから取得できる
+- Nav2 Action statusにactiveなgoal UUIDが1つだけ存在する
+- goal変更後に届いた`/plan`終点が、選択ルートのWaypointへ0.40 m以内で一意に対応する
+- 2番目のWaypoint候補との距離差が0.20 m以上ある
+- `through_poses`では同じgoal UUIDのfeedbackから残pose数を確認できる
+
+互換状態の`goal_generation`はNav2 goal UUIDの変更ごとに更新します。参考経路の
+安全終端は、照合済みの次indexから最初の`stop`、`wait_time`、`person_area`までに
+制限します。bridgeはAction client、Navigation goal、`cmd_vel` publisherを
+持ちません。
+
+statusがinactiveになった時点で`HOLDING_STOP`を出して緑線由来の方向・
+`PLAN LEFT`・水色線を消します。status/plan/feedbackが古い、終点が曖昧、
+ルート外、複数goalがactiveの場合もfail closedです。旧Followerはpauseと人物探索を
+区別して公開しないため、画面表示は詳細理由ではなく`STOPPED`になります。また、
+Nav2 goal UUIDの発行元そのものはAction statusだけでは証明できないため、終点が
+選択ルートの一意なWaypointと一致する条件を追加しています。この条件を満たさない
+走行では互換表示を推測で有効にしません。
+
 次回走行では起動ログの`reference_path_configuration enabled=True`、
 supervisorのmap/waypoint選択、`reference_path`の`valid=true`、Viewerの
 `reference_projection ... reason=visible`を順に保存します。水色線が出ない場合は
@@ -177,6 +206,27 @@ supervisorのmap/waypoint選択、`reference_path`の`valid=true`、Viewerの
 AMCL/TF、画角外をこの順で切り分けます。緑線の`REPLANNING`または
 `NAVIGATION HOLD`は実走行Pathの表示保留であり、水色Pathを緑線へ代用する状態では
 ありません。
+
+旧Followerで正常に互換状態へ移行したことは、次のログで確認します。
+
+- `legacy_follower_compatibility reason=legacy_follower_verified ...`
+- `legacy_follower_compatibility reason=legacy_progress_verified`
+- `reference_planner_auto_started map=... waypoint_file=...`
+
+実機ではLauncher2/Nav2/Followerを従来手順で起動し、別ターミナルから次を実行します。
+
+```bash
+cd /home/koko-chan-nuc/inoueyuki_ws/nakanoshima-robot-challenge
+source /opt/ros/jazzy/setup.bash
+source robot_ws/install/setup.bash
+source ar_ws/install/setup.bash
+export ROS_DOMAIN_ID=54
+export ROBOTBASE_TF_PREFIX=robot
+export ROBOTBASE_ID=koko
+export ROBOTBASE_LAUNCHER_ID=koko_launcher2
+ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
+  viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml
+```
 
 ## Manual production-shaped launch (diagnostics only)
 

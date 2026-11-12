@@ -1,0 +1,437 @@
+"""Verify fail-closed interoperability with the Launcher2 legacy follower."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from action_msgs.msg import GoalStatus, GoalStatusArray
+from ar_reference_planner.follower_state import (
+    FollowerSnapshot,
+    validate_snapshot,
+)
+from ar_reference_planner.legacy_compatibility import (
+    conservative_safe_end_index,
+    resolve_legacy_progress,
+    unique_waypoint_index,
+)
+from ar_reference_planner.legacy_follower_bridge import LegacyFollowerBridge
+from ar_reference_planner.route import load_route
+from builtin_interfaces.msg import Time
+import pytest
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from robotbase_waypoint_interfaces.msg import WaypointFollowerState
+import yaml
+
+
+def _route(tmp_path: Path, points=None):
+    if points is None:
+        points = [
+            (1, 1.0, 0.0, {}),
+            (2, 3.0, 0.0, {}),
+            (3, 6.0, 1.0, {'person_area': True}),
+            (4, 9.0, 1.0, {}),
+        ]
+    path = tmp_path / 'route.yaml'
+    path.write_text(yaml.safe_dump({'waypoints': [
+        {
+            'number': number,
+            'x': x,
+            'y': y,
+            'angle_radians': 0.0,
+            **flags,
+        }
+        for number, x, y, flags in points
+    ]}), encoding='utf-8')
+    return load_route(str(path))
+
+
+def test_to_pose_plan_endpoint_resolves_only_one_exact_route_goal(tmp_path):
+    route = _route(tmp_path)
+
+    progress = resolve_legacy_progress(
+        route, 'to_pose', 3.04, -0.02, tolerance_m=0.40,
+        separation_m=0.20,
+    )
+
+    assert progress.next_index == 1
+    assert progress.endpoint_index == 1
+    # The display-only reference may look ahead, but never beyond the first
+    # explicit wait/person/stop boundary in the verified route.
+    assert progress.safe_end_index == 2
+
+
+def test_through_poses_requires_bound_remaining_count(tmp_path):
+    route = _route(tmp_path)
+
+    with pytest.raises(ValueError, match='feedback_required'):
+        resolve_legacy_progress(route, 'through_poses', 6.0, 1.0)
+
+    progress = resolve_legacy_progress(
+        route, 'through_poses', 6.0, 1.0, poses_remaining=2
+    )
+    assert progress.next_index == 1
+    assert progress.endpoint_index == 2
+    assert progress.safe_end_index == 2
+
+
+def test_ambiguous_or_off_route_plan_endpoint_is_rejected(tmp_path):
+    route = _route(tmp_path, [
+        (1, 1.0, 0.0, {}),
+        (2, 1.1, 0.0, {}),
+        (3, 4.0, 0.0, {}),
+    ])
+
+    with pytest.raises(ValueError, match='ambiguous'):
+        unique_waypoint_index(
+            route, 1.05, 0.0, tolerance_m=0.40, separation_m=0.20
+        )
+    with pytest.raises(ValueError, match='not_on_route'):
+        unique_waypoint_index(
+            route, 20.0, 20.0, tolerance_m=0.40, separation_m=0.20
+        )
+
+
+def test_safe_end_never_crosses_stop_wait_or_person_boundary(tmp_path):
+    route = _route(tmp_path)
+
+    assert conservative_safe_end_index(route, 0) == 2
+    assert conservative_safe_end_index(route, 2) == 2
+    assert conservative_safe_end_index(route, 3) == 3
+
+
+def test_action_status_must_be_fresh_unique_and_single_mode():
+    values = {
+        'action_status_timeout_sec': 2.5,
+    }
+
+    class Fake:
+        _navigation_mode = 'to_pose'
+        _active_goals = {
+            'to_pose': ('01' * 16,),
+            'through_poses': (),
+        }
+        _status_received_at = {'to_pose': 10.0, 'through_poses': None}
+
+        @staticmethod
+        def get_parameter(name):
+            return type('Parameter', (), {'value': values[name]})()
+
+    fake = Fake()
+    goal, reason = LegacyFollowerBridge._active_goal(fake, 11.0)
+    assert goal == '01' * 16
+    assert reason == 'legacy_nav2_goal_active'
+
+    fake._active_goals['through_poses'] = ('02' * 16,)
+    assert LegacyFollowerBridge._active_goal(fake, 11.0) == (
+        None, 'legacy_nav2_action_mode_ambiguous'
+    )
+    fake._active_goals['through_poses'] = ()
+    assert LegacyFollowerBridge._active_goal(fake, 13.0) == (
+        None, 'legacy_action_status_stale'
+    )
+
+
+def test_old_plan_is_rejected_after_goal_generation_change(tmp_path):
+    route = _route(tmp_path)
+    values = {
+        'plan_timeout_sec': 6.5,
+        'action_status_timeout_sec': 2.5,
+        'endpoint_tolerance_m': 0.40,
+        'endpoint_separation_m': 0.20,
+    }
+
+    class Fake:
+        _goal_uuid = '01' * 16
+        _plan_endpoint = (3.0, 0.0, 7)
+        _minimum_plan_sequence = 8
+        _plan_received_at = 10.0
+        _navigation_mode = 'to_pose'
+        _through_feedback = None
+        _route = route
+
+        @staticmethod
+        def _active_goal(_now):
+            return '01' * 16, 'legacy_nav2_goal_active'
+
+        @staticmethod
+        def get_parameter(name):
+            return type('Parameter', (), {'value': values[name]})()
+
+    fake = Fake()
+    progress, reason = LegacyFollowerBridge._resolve_progress(fake, 10.5)
+    assert progress is None
+    assert reason == 'waiting_for_plan_after_nav2_goal_change'
+
+    fake._plan_endpoint = (3.0, 0.0, 8)
+    progress, reason = LegacyFollowerBridge._resolve_progress(fake, 10.5)
+    assert progress.next_index == 1
+    assert reason == 'legacy_progress_verified'
+
+
+def test_goal_change_immediately_invalidates_previous_verified_progress():
+    status = GoalStatus()
+    status.status = GoalStatus.STATUS_EXECUTING
+    status.goal_info.goal_id.uuid = [2] * 16
+    message = GoalStatusArray(status_list=[status])
+    invalidations = []
+    reasons = []
+    fake = SimpleNamespace(
+        _navigation_mode='to_pose',
+        _active_goals={'to_pose': (), 'through_poses': ()},
+        _status_received_at={'to_pose': None, 'through_poses': None},
+        _goal_uuid='01' * 16,
+        _goal_generation=4,
+        _plan_endpoint=(3.0, 0.0, 7),
+        _plan_received_at=10.0,
+        _through_feedback=None,
+        _last_progress='verified-old-progress',
+        _minimum_plan_sequence=7,
+        _plan_sequence=7,
+        _publish_state=lambda progress, activity, allowed: invalidations.append(
+            (progress, activity, allowed)
+        ),
+        _log_reason=reasons.append,
+    )
+
+    LegacyFollowerBridge._on_status(fake, 'to_pose', message)
+
+    assert fake._goal_generation == 5
+    assert fake._last_progress is None
+    assert invalidations == [(
+        'verified-old-progress',
+        WaypointFollowerState.ACTIVITY_TRANSITIONING,
+        False,
+    )]
+    assert reasons == ['waiting_for_plan_after_nav2_goal_change']
+
+
+def test_verified_legacy_state_is_accepted_by_strict_planner_contract(tmp_path):
+    route = _route(tmp_path)
+    progress = resolve_legacy_progress(route, 'to_pose', 3.0, 0.0)
+    published = []
+
+    class ClockValue:
+        @staticmethod
+        def to_msg():
+            return Time(sec=20, nanosec=0)
+
+    fake = SimpleNamespace(
+        _publisher=SimpleNamespace(publish=published.append),
+        _route=route,
+        _map_frame='map',
+        _navigation_mode='to_pose',
+        _goal_generation=7,
+        get_clock=lambda: SimpleNamespace(now=lambda: ClockValue()),
+    )
+    LegacyFollowerBridge._publish_state(
+        fake,
+        progress,
+        WaypointFollowerState.ACTIVITY_NAVIGATING,
+        True,
+    )
+
+    snapshot = FollowerSnapshot.from_message(published[-1])
+    assert validate_snapshot(
+        snapshot, route, 'map', 20_500_000_000, 2.5
+    ) == ''
+    assert snapshot.next_index == 1
+    assert snapshot.goal_generation == 7
+    assert snapshot.safe_end_index == 2
+
+
+def test_modern_follower_parameter_disables_compatibility_publisher():
+    values = [
+        ParameterValue(type=ParameterType.PARAMETER_STRING),
+        ParameterValue(type=ParameterType.PARAMETER_STRING),
+        ParameterValue(type=ParameterType.PARAMETER_STRING),
+        ParameterValue(type=ParameterType.PARAMETER_STRING),
+    ]
+
+    class Future:
+        @staticmethod
+        def result():
+            return SimpleNamespace(values=values)
+
+    future = Future()
+    removed = []
+    reasons = []
+    fake = SimpleNamespace(
+        _parameter_future=future,
+        _follower_parameters_available=False,
+        _legacy_verified=True,
+        _modern_follower=False,
+        _remove_publisher=lambda: removed.append(True),
+        _log_reason=reasons.append,
+    )
+
+    LegacyFollowerBridge._on_parameters(fake, future)
+
+    assert fake._modern_follower is True
+    assert fake._legacy_verified is False
+    assert fake._follower_parameters_available is True
+    assert removed == [True]
+    assert reasons == ['modern_follower_native_state']
+
+
+def test_legacy_follower_parameters_load_exact_route_without_manual_selection(
+    tmp_path,
+):
+    route = _route(tmp_path)
+    values = [
+        ParameterValue(
+            type=ParameterType.PARAMETER_STRING,
+            string_value=str(route.path),
+        ),
+        ParameterValue(
+            type=ParameterType.PARAMETER_STRING,
+            string_value='to_pose',
+        ),
+        ParameterValue(
+            type=ParameterType.PARAMETER_STRING,
+            string_value='map',
+        ),
+        ParameterValue(type=ParameterType.PARAMETER_NOT_SET),
+    ]
+
+    class Future:
+        @staticmethod
+        def result():
+            return SimpleNamespace(values=values)
+
+    future = Future()
+    events = []
+    fake = SimpleNamespace(
+        _parameter_future=future,
+        _follower_parameters_available=False,
+        _legacy_verified=False,
+        _modern_follower=False,
+        _route=None,
+        _navigation_mode=None,
+        _map_frame='map',
+        _ensure_publisher=lambda: events.append('publisher'),
+        _reset_goal_binding=lambda reason: events.append(('reset', reason)),
+        _log_reason=lambda reason: events.append(('reason', reason)),
+    )
+
+    LegacyFollowerBridge._on_parameters(fake, future)
+
+    assert fake._legacy_verified is True
+    assert fake._modern_follower is False
+    assert fake._follower_parameters_available is True
+    assert fake._route.sha256 == route.sha256
+    assert fake._navigation_mode == 'to_pose'
+    assert events[0] == 'publisher'
+    assert events[1] == ('reset', 'legacy_follower_configuration_changed')
+    assert events[2][0] == 'reason'
+    assert events[2][1].startswith('legacy_follower_verified route=')
+
+
+def test_parameter_service_loss_republishes_safe_hold():
+    progress = SimpleNamespace(next_index=1, safe_end_index=2)
+    published = []
+    fake = SimpleNamespace(
+        _legacy_verified=True,
+        _modern_follower=False,
+        _follower_parameters_available=False,
+        _last_progress=progress,
+        _query_parameters=lambda now: None,
+        _publish_state=lambda item, activity, allowed: published.append(
+            (item, activity, allowed)
+        ),
+    )
+
+    LegacyFollowerBridge._tick(fake)
+
+    assert published == [(
+        progress,
+        WaypointFollowerState.ACTIVITY_HOLDING_STOP,
+        False,
+    )]
+
+
+def test_disappearing_parameter_service_marks_transport_unavailable():
+    reasons = []
+    fake = SimpleNamespace(
+        _parameter_future=None,
+        _next_parameter_query=0.0,
+        _parameter_client=SimpleNamespace(
+            services_are_ready=lambda: False,
+        ),
+        _follower_parameters_available=True,
+        get_parameter=lambda name: SimpleNamespace(value=2.0),
+        _log_reason=reasons.append,
+    )
+
+    LegacyFollowerBridge._query_parameters(fake, 10.0)
+
+    assert fake._next_parameter_query == 12.0
+    assert fake._follower_parameters_available is False
+    assert reasons == ['follower_parameter_service_unavailable']
+
+
+def test_parameter_service_recovery_restores_verified_navigation():
+    progress = SimpleNamespace(next_index=1, safe_end_index=2)
+    published = []
+    reasons = []
+    fake = SimpleNamespace(
+        _legacy_verified=True,
+        _modern_follower=False,
+        _follower_parameters_available=True,
+        _last_progress=progress,
+        _query_parameters=lambda now: None,
+        _resolve_progress=lambda now: (progress, 'legacy_progress_verified'),
+        _publish_state=lambda item, activity, allowed: published.append(
+            (item, activity, allowed)
+        ),
+        _log_reason=reasons.append,
+    )
+
+    LegacyFollowerBridge._tick(fake)
+
+    assert published == [(
+        progress,
+        WaypointFollowerState.ACTIVITY_NAVIGATING,
+        True,
+    )]
+    assert reasons == ['legacy_progress_verified']
+
+
+def test_parameter_query_failure_preserves_route_for_safe_hold():
+    class Future:
+        @staticmethod
+        def result():
+            raise RuntimeError('service disconnected')
+
+    future = Future()
+    reasons = []
+    fake = SimpleNamespace(
+        _parameter_future=future,
+        _follower_parameters_available=True,
+        _legacy_verified=True,
+        _log_reason=reasons.append,
+    )
+
+    LegacyFollowerBridge._on_parameters(fake, future)
+
+    assert fake._follower_parameters_available is False
+    assert fake._legacy_verified is True
+    assert reasons == [
+        'follower_parameter_query_failed service disconnected'
+    ]
+
+
+def test_dedicated_launch_starts_bridge_without_control_interfaces():
+    package = Path(__file__).parents[1]
+    launch = (
+        package / 'launch' / 'launcher2_reference_ar.launch.py'
+    ).read_text(encoding='utf-8')
+    bridge = (
+        package / 'ar_reference_planner' / 'legacy_follower_bridge.py'
+    ).read_text(encoding='utf-8')
+
+    assert "executable='legacy_follower_reference_bridge'" in launch
+    assert "'plan_topic': '/plan'" in launch
+    assert 'ActionClient' not in bridge
+    assert 'cmd_vel' not in bridge
+    assert 'send_goal' not in bridge
+    assert "'reference_state_topic'" in bridge
+    assert 'modern_follower_native_state' in bridge
