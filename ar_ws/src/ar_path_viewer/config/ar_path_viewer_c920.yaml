@@ -40,6 +40,9 @@ ar_path_viewer:
     perception_camera_sync_clock_tolerance_sec: 0.02
     perception_camera_sync_future_tolerance_sec: 0.02
     perception_camera_sync_exact_tf_tolerance_sec: 0.005
+    # Review-only frame hold, allowing exact image-time TF to arrive.
+    perception_camera_frame_delay_sec: 0.12
+    perception_camera_frame_max_age_sec: 0.30
     perception_costmap_alpha: 0.42
     perception_costmap_radius_px: 2
     perception_minimap_enabled: false

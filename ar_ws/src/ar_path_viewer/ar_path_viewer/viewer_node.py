@@ -61,6 +61,7 @@ from .offscreen_guidance import GuidanceSettings
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
 from .paced_video_writer import PacedVideoWriter
+from .perception_frame_delay import PerceptionFrameDelay
 from .projection import (
     DEFAULT_CAMERA_Y_M,
     CameraIntrinsics,
@@ -121,6 +122,9 @@ class ArPathViewerNode(Node):
             "perception_camera_sync_clock_tolerance_sec": 0.02,
             "perception_camera_sync_future_tolerance_sec": 0.02,
             "perception_camera_sync_exact_tf_tolerance_sec": 0.005,
+            # Review-only: let the image-time TF arrive without blocking ROS.
+            "perception_camera_frame_delay_sec": 0.12,
+            "perception_camera_frame_max_age_sec": 0.30,
             "perception_costmap_alpha": 0.42,
             "perception_costmap_radius_px": 2,
             "perception_minimap_enabled": False,
@@ -524,6 +528,16 @@ class ArPathViewerNode(Node):
             self._costmap_settings
         )
         self._last_image_frame_timing = None
+        self._perception_frame_delay = None
+        # Delay is deliberately unavailable for the default OpenCV and
+        # production profiles. It is only used by opt-in timestamped Costmap.
+        if (self._perception_costmap_enabled and
+                self._str("image_input_type").strip().lower() ==
+                "camera_timestamped"):
+            self._perception_frame_delay = PerceptionFrameDelay(
+                delay_sec=self._float("perception_camera_frame_delay_sec"),
+                max_age_sec=self._float("perception_camera_frame_max_age_sec"),
+            )
         self._path_updated_until = 0.0
 
         try:
@@ -779,6 +793,14 @@ class ArPathViewerNode(Node):
             f"path_overlay_alpha={self._path_alpha:.2f} "
             "old_path_held=false"
         )
+        if self._perception_frame_delay is not None:
+            self._log_info(
+                "perception_frame_delay_configuration "
+                f"enabled=true delay_sec="
+                f"{self._perception_frame_delay.delay_sec:.3f} "
+                f"max_age_sec={self._perception_frame_delay.max_age_sec:.3f} "
+                "read_only=true"
+            )
         self._log_info(
             "perception_costmap_configuration "
             f"enabled={self._perception_costmap_enabled} "
@@ -1198,6 +1220,20 @@ class ArPathViewerNode(Node):
             ),
         )
         self._last_image_frame_timing = image_timing
+        waiting_for_delayed_frame = False
+        frame_delay = getattr(self, "_perception_frame_delay", None)
+        if frame_delay is not None:
+            if image is None or not image_timing.usable:
+                # Invalid source/clock state never revives queued images.
+                frame_delay.clear()
+            else:
+                frame_delay.add(image, image_timing)
+                deferred = frame_delay.take(time.monotonic())
+                if deferred is not None:
+                    image, image_timing = deferred.image, deferred.timing
+                else:
+                    waiting_for_delayed_frame = True
+                    image = None
         state = "NO PATH"
         detail = ""
         guidance = None
@@ -1205,8 +1241,14 @@ class ArPathViewerNode(Node):
         navigation_status = ""
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
-            state = "CAMERA UNAVAILABLE"
-            detail = "image source returned no frame"
+            state = (
+                "FRAME SYNC WAIT" if waiting_for_delayed_frame
+                else "CAMERA UNAVAILABLE"
+            )
+            detail = (
+                "buffering fresh frame for image-time TF"
+                if waiting_for_delayed_frame else "image source returned no frame"
+            )
             frame = render_frame(
                 image, [], state, debug_overlay=self._debug_overlay
             )
