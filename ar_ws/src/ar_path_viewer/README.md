@@ -377,15 +377,17 @@ Local Costmapはmessageの`header.stamp`に対するTFだけで変換します�
 期限切れ、frame変更、古い順序のmessageは棄却し、最新TFへの置換や時刻の偽装は
 行いません。直前のexact-time結果は通常のCostmap鮮度条件を満たす間だけ維持します。
 
-Costmap時刻のbase座標を後続の画像へ流用しません。各画像は`VideoCapture.read()`直前・
-直後のROS時刻とmonotonic時刻を記録し、C920ライブではread完了時のhost ROS時刻を
-撮影時刻の推定値として使います。これは露光時刻ではないため、既定ではCostmap年齢
-0.40秒、read所要時間0.12秒、Costmap時刻から画像時刻までの並進0.20 m・旋回15度を
-上限とします。両時刻のexact TFでCostmapの元frameから画像時刻のbaseへ再変換し、
-TF欠落、clock逆行、時刻差・移動量超過、base frameだけで固定座標へ戻せない入力では、
-実写マーカー、ミニマップ、説明、注意表示をまとめてfail closedで消します。`video`や
-`image`入力はROS時刻との対応がないため、Costmap ARの時刻としては採用しません。
-MP4とMCAPを同期再生するには別途明示的な時刻対応が必要です。
+Costmap時刻のbase座標を後続の画像へ流用しません。通常のOpenCV `camera`入力には
+信頼できる撮影時刻がないため認識ARを許可せず、明示的な`camera_timestamped`入力だけが
+同一V4L2 bufferのmonotonic SOE時刻をhostのROS/monotonic時計対でROS時刻へ変換します。
+画像は0.120秒遅延し、最大0.300秒だけ同一画像・同一撮影時刻のままexact TFを非同期に
+再試行します。TF待機中は`FRAME SYNC WAIT`として認識・経路表示を抑止し、期限切れ時は
+破棄します。遅延画像には、その画像より新しくない履歴Costmapだけを選びます。
+Costmap年齢0.40秒、Costmap時刻から画像時刻までの並進0.20 m・旋回15度を上限とし、
+緑・水色Pathも遅延画像時刻のTFで投影します。TF欠落、clock逆行、時刻差・移動量超過、
+画像より新しいPathしかない場合はfail closedで非表示にします。`video`や`image`入力は
+ROS時刻との対応がないため、Costmap ARの時刻としては採用しません。MP4とMCAPを同期
+再生するには別途明示的な時刻対応が必要です。
 
 レビュー用overlayでは次も個別に有効になります。
 

@@ -389,6 +389,44 @@ def test_store_ignores_out_of_order_without_discarding_newer_snapshot():
     assert store.reason.startswith("out_of_order_local_costmap_ignored")
 
 
+def test_store_selects_costmap_not_newer_than_delayed_image():
+    now = [20.0]
+    store = CostmapStore(CostmapOverlaySettings(), clock=lambda: now[0])
+    assert store.update(_grid((100, 0, 0, 0), stamp=20.0), 20.0)
+    now[0] = 20.2
+    assert store.update(_grid((0, 100, 0, 0), stamp=20.2), 20.2)
+
+    state, selected, reason = store.state_for_image(20.1, 20.2)
+
+    assert state == "ACTIVE"
+    assert selected.stamp_sec == pytest.approx(20.0)
+    assert reason == "costmap_history_matched_image"
+
+
+def test_store_never_pairs_future_costmap_with_old_image():
+    store = CostmapStore(CostmapOverlaySettings(), clock=lambda: 20.2)
+    assert store.update(_grid((100, 0, 0, 0), stamp=20.2), 20.2)
+
+    state, selected, reason = store.state_for_image(20.0, 20.2)
+
+    assert state == "WAITING_IMAGE_TIME"
+    assert selected is None
+    assert "newer_than_image" in reason
+
+
+def test_store_uses_new_costmap_once_image_time_reaches_its_stamp():
+    now = [20.0]
+    store = CostmapStore(CostmapOverlaySettings(), clock=lambda: now[0])
+    assert store.update(_grid((100, 0, 0, 0), stamp=20.0), 20.0)
+    now[0] = 20.2
+    assert store.update(_grid((0, 100, 0, 0), stamp=20.2), 20.2)
+
+    state, selected, reason = store.state_for_image(20.25, 20.25)
+
+    assert state == "ACTIVE"
+    assert selected.stamp_sec == pytest.approx(20.2)
+    assert reason == "costmap_history_matched_image"
+
 
 def _costmap_pipeline_for_frame_order():
     """Use the same store-then-queue order as the Viewer callback."""

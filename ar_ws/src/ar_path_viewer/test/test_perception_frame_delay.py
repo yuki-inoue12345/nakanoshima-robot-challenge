@@ -23,6 +23,55 @@ def test_tf_arrival_margin_keeps_original_timestamp_and_image():
     assert queue.take(100.15) is None
 
 
+def test_peek_retries_same_frame_without_changing_capture_timestamp():
+    queue = PerceptionFrameDelay(delay_sec=0.12, max_age_sec=0.30)
+    timing = _timing(100.0)
+    queue.add('frame0', timing)
+
+    first = queue.peek(100.12)
+    second = queue.peek(100.16)
+
+    assert first is second
+    assert second.timing is timing
+    assert queue.pending_count == 1
+    assert queue.consume(second)
+    assert queue.pending_count == 0
+
+
+def test_20fps_frames_wait_for_30hz_tf_without_timestamp_replacement():
+    """Model TF arriving 28 ms after each image timestamp."""
+    queue = PerceptionFrameDelay(delay_sec=0.12, max_age_sec=0.30)
+    released = []
+    latest_tf_stamp = 0.0
+    now = 100.0
+    for index in range(20):
+        capture = 100.0 + index * 0.05
+        queue.add(index, _timing(capture))
+        now = capture + 0.12
+        # 30 Hz TF has advanced past the original exposure by the time the
+        # delayed frame becomes eligible.
+        latest_tf_stamp = max(latest_tf_stamp, now - 0.028)
+        item = queue.peek(now)
+        if item is not None and latest_tf_stamp >= item.timing.stamp_sec:
+            released.append((item.image, item.timing.stamp_sec))
+            queue.consume(item)
+
+    assert released
+    assert all(stamp == _timing(100.0 + index * 0.05).stamp_sec
+               for index, stamp in released)
+    assert all(released[i][1] < released[i + 1][1]
+               for i in range(len(released) - 1))
+
+
+def test_retry_still_expires_when_tf_never_arrives():
+    queue = PerceptionFrameDelay(delay_sec=0.12, max_age_sec=0.30)
+    queue.add('frame0', _timing(100.0))
+    assert queue.peek(100.12).image == 'frame0'
+    assert queue.peek(100.31) is None
+    assert queue.pending_count == 0
+    assert queue.discarded == 1
+
+
 def test_multiple_frames_released_in_capture_order():
     q = PerceptionFrameDelay(0.10, 0.30)
     q.add('a', _timing(100.0))

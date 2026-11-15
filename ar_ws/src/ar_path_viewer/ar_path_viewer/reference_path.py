@@ -206,7 +206,12 @@ class ReferencePathGate:
             self.clear(str(exc))
             return False
 
-        self.path_store.replace(points, frame)
+        self.path_store.replace(
+            points,
+            frame,
+            header_stamp_sec=path_stamp,
+            received_ros_sec=float(now_ros_sec),
+        )
         self._metadata = ReferenceMetadata(
             identity,
             planner_generation,

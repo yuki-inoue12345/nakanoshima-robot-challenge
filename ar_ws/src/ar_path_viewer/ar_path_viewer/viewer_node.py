@@ -11,7 +11,7 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Path as PathMessage
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -27,6 +27,7 @@ from .costmap_overlay import (
     CostmapOverlaySettings,
     CostmapStore,
     CostmapTransformQueue,
+    SynchronizedCostmap,
     align_costmap_to_image_time,
     estimate_image_frame_timing,
     project_costmap_points,
@@ -1221,18 +1222,27 @@ class ArPathViewerNode(Node):
         )
         self._last_image_frame_timing = image_timing
         waiting_for_delayed_frame = False
+        delayed_frame = None
+        retry_delayed_frame = False
         frame_delay = getattr(self, "_perception_frame_delay", None)
         if frame_delay is not None:
-            if image is None or not image_timing.usable:
-                # Invalid source/clock state never revives queued images.
+            if image is not None and not image_timing.usable:
+                # An invalid acquired timestamp starts a new unsafe epoch.
                 frame_delay.clear()
-            else:
+            elif image is not None:
                 frame_delay.add(image, image_timing)
-                deferred = frame_delay.take(time.monotonic())
-                if deferred is not None:
-                    image, image_timing = deferred.image, deferred.timing
-                else:
+            delayed_frame = frame_delay.peek(time.monotonic())
+            if delayed_frame is not None:
+                image = delayed_frame.image
+                image_timing = delayed_frame.timing
+            else:
+                if frame_delay.pending_count > 0:
                     waiting_for_delayed_frame = True
+                elif image is not None:
+                    # The frame was rejected above; never render it with a
+                    # fabricated timestamp.
+                    waiting_for_delayed_frame = True
+                if waiting_for_delayed_frame:
                     image = None
         state = "NO PATH"
         detail = ""
@@ -1317,9 +1327,16 @@ class ArPathViewerNode(Node):
             costmap_explanation_reason = "disabled_by_configuration"
             path_points_base = None
             if costmap_enabled:
-                costmap_state, costmap_snapshot, costmap_reason = (
-                    self._costmap_store.state(self._ros_now_sec())
-                )
+                if delayed_frame is not None:
+                    costmap_state, costmap_snapshot, costmap_reason = (
+                        self._costmap_store.state_for_image(
+                            image_timing.stamp_sec, self._ros_now_sec()
+                        )
+                    )
+                else:
+                    costmap_state, costmap_snapshot, costmap_reason = (
+                        self._costmap_store.state(self._ros_now_sec())
+                    )
 
             localization = None
             tf_available = False
@@ -1341,7 +1358,21 @@ class ArPathViewerNode(Node):
                 )
 
             if state == "ACTIVE" and snapshot is not None:
-                if not localization.stable:
+                if (
+                    delayed_frame is not None
+                    and snapshot.received_ros_sec is not None
+                    and snapshot.received_ros_sec > image_timing.stamp_sec
+                ):
+                    state = "FRAME SYNC WAIT"
+                    detail = (
+                        "real_path_newer_than_image offset="
+                        f"{snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s"
+                    )
+                    snapshot = None
+                    segments = []
+                    guidance = None
+                    progress = None
+                elif not localization.stable:
                     state = localization.state
                     detail = localization.detail
                 elif not tf_available:
@@ -1351,7 +1382,17 @@ class ArPathViewerNode(Node):
                     try:
                         evaluation = evaluate_path_state(
                             snapshot.points, snapshot.frame_id, self._base_frame,
-                            self._points_in_base, self._mount, self._intrinsics, self._near,
+                            (
+                                self._points_in_base
+                                if delayed_frame is None
+                                else lambda points, frame_id: (
+                                    ArPathViewerNode._points_in_base_at(
+                                        self, points, frame_id,
+                                        image_timing.stamp_sec,
+                                    )
+                                )
+                            ),
+                            self._mount, self._intrinsics, self._near,
                             display_geometry=self._path_display_geometry,
                             guidance_settings=self._guidance_settings,
                             on_tf_error=lambda exc: self._diagnostics.tf_failure(
@@ -1359,6 +1400,11 @@ class ArPathViewerNode(Node):
                             ),
                         )
                         state = evaluation.state
+                        if (
+                            delayed_frame is not None
+                            and evaluation.state == "TF UNAVAILABLE"
+                        ):
+                            retry_delayed_frame = True
                         segments = evaluation.segments
                         projection_stats = evaluation.stats
                         guidance = evaluation.guidance
@@ -1499,7 +1545,17 @@ class ArPathViewerNode(Node):
                 )
 
             if reference_state == "ACTIVE" and reference_snapshot is not None:
-                if localization is None or not localization.stable:
+                if (
+                    delayed_frame is not None
+                    and reference_snapshot.received_ros_sec is not None
+                    and reference_snapshot.received_ros_sec
+                    > image_timing.stamp_sec
+                ):
+                    reference_reason = (
+                        "reference_path_newer_than_image offset="
+                        f"{reference_snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s"
+                    )
+                elif localization is None or not localization.stable:
                     reference_reason = (
                         "localization_not_stable"
                         if localization is None
@@ -1513,7 +1569,16 @@ class ArPathViewerNode(Node):
                             reference_snapshot.points,
                             reference_snapshot.frame_id,
                             self._base_frame,
-                            self._points_in_base,
+                            (
+                                self._points_in_base
+                                if delayed_frame is None
+                                else lambda points, frame_id: (
+                                    ArPathViewerNode._points_in_base_at(
+                                        self, points, frame_id,
+                                        image_timing.stamp_sec,
+                                    )
+                                )
+                            ),
                             self._mount,
                             self._intrinsics,
                             self._near,
@@ -1528,6 +1593,11 @@ class ArPathViewerNode(Node):
                         reference_reason = f"invalid_projection {exc}"
                     else:
                         reference_segments = reference_evaluation.segments
+                        if (
+                            delayed_frame is not None
+                            and reference_evaluation.state == "TF UNAVAILABLE"
+                        ):
+                            retry_delayed_frame = True
                         reference_stats = reference_evaluation.stats
                         if reference_evaluation.state == "ACTIVE":
                             reference_reason = "visible"
@@ -1565,11 +1635,38 @@ class ArPathViewerNode(Node):
                     costmap_reason = f"localization_tf_unavailable {tf_detail}"
                     alert_gate.clear()
                 else:
-                    sync_state, synchronized, sync_reason = (
-                        self._costmap_transform_queue.resolve(
-                            self._ros_now_sec(), self._costmap_arrays_in_base
+                    if delayed_frame is not None:
+                        try:
+                            drawing, analysis = self._costmap_arrays_in_base(
+                                costmap_snapshot
+                            )
+                        except Exception as exc:
+                            sync_state = "WAITING_TF"
+                            synchronized = None
+                            sync_reason = (
+                                "waiting_for_costmap_exact_tf "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            retry_delayed_frame = True
+                        else:
+                            sync_state = "ACTIVE"
+                            synchronized = SynchronizedCostmap(
+                                snapshot=costmap_snapshot,
+                                points_in_base=np.asarray(
+                                    drawing, dtype=np.float64
+                                ),
+                                analysis_points_in_base=np.asarray(
+                                    analysis, dtype=np.float64
+                                ),
+                                synchronized_at=time.monotonic(),
+                            )
+                            sync_reason = "history_exact_tf_ready"
+                    else:
+                        sync_state, synchronized, sync_reason = (
+                            self._costmap_transform_queue.resolve(
+                                self._ros_now_sec(), self._costmap_arrays_in_base
+                            )
                         )
-                    )
                     self._diagnostics.costmap_sync(
                         sync_state,
                         self._costmap_transform_queue.pending_count,
@@ -1598,6 +1695,10 @@ class ArPathViewerNode(Node):
                             )
                             costmap_analysis_points_base = None
                             alert_gate.clear()
+                            if not isinstance(exc, ValueError):
+                                retry_delayed_frame = (
+                                    delayed_frame is not None
+                                )
                         else:
                             points_in_base = camera_sync.points_in_base
                             costmap_analysis_points_base = (
@@ -1682,7 +1783,8 @@ class ArPathViewerNode(Node):
                     costmap_reason,
                 )
             elif costmap_enabled:
-                self._costmap_transform_queue.clear(costmap_reason)
+                if delayed_frame is None:
+                    self._costmap_transform_queue.clear(costmap_reason)
                 alert_gate.clear()
 
             explanation_enabled = bool(
@@ -1846,6 +1948,23 @@ class ArPathViewerNode(Node):
                     f"{detail}; {explanation_summary}"
                     if detail else explanation_summary
                 )
+            if retry_delayed_frame:
+                # Keep this exact image/timestamp pair in the bounded delay
+                # queue.  Do not draw paths or perception data using a newer
+                # pose while waiting for the requested TF sample.
+                state = "FRAME SYNC WAIT"
+                detail = f"waiting_for_exact_image_time_tf; {costmap_reason}"
+                segments = []
+                reference_segments = []
+                guidance = None
+                waypoint_status = ""
+                navigation_status = ""
+                costmap_projection = None
+                costmap_explanation = None
+                costmap_minimap = None
+                costmap_alert = None
+            elif delayed_frame is not None:
+                frame_delay.consume(delayed_frame)
             frame = render_frame(
                 image,
                 segments,
@@ -2008,8 +2127,14 @@ def perception_toggle_key(key_code: int):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = ArPathViewerNode()
+    # Camera acquisition and OpenCV rendering run in the timer callback.  A
+    # second executor worker lets TransformListener's reentrant callback group
+    # continue ingesting 30 Hz TF while that timer is busy.  Other Viewer
+    # subscriptions remain in the node's mutually-exclusive default group.
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         if rclpy.ok(context=node.context):
             node._log_info("AR Path Viewer shutdown requested: Ctrl+C")
@@ -2023,6 +2148,10 @@ def main(args=None) -> None:
         )
         raise
     finally:
+        try:
+            executor.shutdown(timeout_sec=1.0)
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass
         try:
             node.destroy_node()
         except (KeyboardInterrupt, ExternalShutdownException):

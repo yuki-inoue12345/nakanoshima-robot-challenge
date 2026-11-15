@@ -726,11 +726,16 @@ class CostmapStore:
         self.settings = settings
         self.clock = clock
         self.snapshot = None
+        self._history: list[CostmapSnapshot] = []
         self.reason = "waiting_for_local_costmap"
         self.receive_count = 0
         self._newest_accepted_stamp = -math.inf
         self._active_frame: str | None = None
         self._retired_frames: set[str] = set()
+
+    @property
+    def history_count(self) -> int:
+        return len(self._history)
 
     def update(self, message, ros_now_sec: float) -> bool:
         self.receive_count += 1
@@ -743,6 +748,7 @@ class CostmapStore:
             )
         except (AttributeError, TypeError, ValueError) as error:
             self.snapshot = None
+            self._history.clear()
             self.reason = f"invalid_local_costmap {error}"
             return False
         if snapshot.stamp_sec <= self._newest_accepted_stamp:
@@ -766,11 +772,60 @@ class CostmapStore:
         ):
             self._retired_frames.add(self._active_frame)
             self.snapshot = None
+            self._history.clear()
         self._newest_accepted_stamp = snapshot.stamp_sec
         self._active_frame = snapshot.frame_id
         self.snapshot = snapshot
+        self._history.append(snapshot)
+        minimum_stamp = snapshot.stamp_sec - self.settings.stamp_max_age_sec
+        self._history = [
+            item for item in self._history
+            if item.frame_id == snapshot.frame_id
+            and item.stamp_sec >= minimum_stamp
+        ][-16:]
         self.reason = "local_costmap_ready"
         return True
+
+    def state_for_image(self, image_stamp_sec: float, ros_now_sec: float):
+        """Return the newest Costmap whose stamp does not follow the image."""
+        image_stamp = float(image_stamp_sec)
+        if not math.isfinite(image_stamp) or image_stamp <= 0.0:
+            return "UNAVAILABLE", None, "image_timestamp_invalid"
+        if not self._history:
+            return "UNAVAILABLE", None, self.reason
+        frame_id = self._history[-1].frame_id
+        candidates = [
+            item for item in self._history
+            if item.frame_id == frame_id and item.stamp_sec <= image_stamp
+        ]
+        if not candidates:
+            offset = self._history[0].stamp_sec - image_stamp
+            return (
+                "WAITING_IMAGE_TIME", None,
+                f"costmap_history_newer_than_image offset={offset:.3f}s",
+            )
+        snapshot = candidates[-1]
+        image_age = image_stamp - snapshot.stamp_sec
+        if image_age > self.settings.stamp_max_age_sec:
+            return (
+                "STALE", None,
+                f"costmap_history_stale_for_image age={image_age:.3f}s "
+                f"limit={self.settings.stamp_max_age_sec:.3f}s",
+            )
+        receipt_age = max(0.0, self.clock() - snapshot.received_at)
+        if receipt_age > self.settings.timeout_sec:
+            return (
+                "STALE", None,
+                f"costmap_history_receive_stale age={receipt_age:.3f}s "
+                f"limit={self.settings.timeout_sec:.3f}s",
+            )
+        now_age = float(ros_now_sec) - snapshot.stamp_sec
+        if now_age < -self.settings.future_tolerance_sec:
+            return (
+                "UNAVAILABLE", None,
+                f"costmap_history_future offset={-now_age:.3f}s",
+            )
+        return "ACTIVE", snapshot, "costmap_history_matched_image"
 
     def state(self, ros_now_sec: float):
         snapshot = self.snapshot
@@ -779,6 +834,7 @@ class CostmapStore:
         receipt_age = max(0.0, self.clock() - snapshot.received_at)
         if receipt_age > self.settings.timeout_sec:
             self.snapshot = None
+            self._history.clear()
             self.reason = (
                 f"local_costmap_receive_stale age={receipt_age:.3f}s "
                 f"limit={self.settings.timeout_sec:.3f}s"
@@ -787,6 +843,7 @@ class CostmapStore:
         stamp_age = float(ros_now_sec) - snapshot.stamp_sec
         if stamp_age > self.settings.stamp_max_age_sec:
             self.snapshot = None
+            self._history.clear()
             self.reason = (
                 f"local_costmap_stamp_stale age={stamp_age:.3f}s "
                 f"limit={self.settings.stamp_max_age_sec:.3f}s"
@@ -794,6 +851,7 @@ class CostmapStore:
             return "STALE", None, self.reason
         if stamp_age < -self.settings.future_tolerance_sec:
             self.snapshot = None
+            self._history.clear()
             self.reason = (
                 f"local_costmap_stamp_future offset={-stamp_age:.3f}s"
             )
@@ -802,6 +860,7 @@ class CostmapStore:
 
     def clear(self, reason: str) -> None:
         self.snapshot = None
+        self._history.clear()
         self.reason = str(reason)
 
 

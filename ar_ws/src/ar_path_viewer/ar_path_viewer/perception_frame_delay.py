@@ -38,6 +38,10 @@ class PerceptionFrameDelay:
     def clear(self):
         self._pending.clear()
 
+    @property
+    def pending_count(self):
+        return len(self._pending)
+
     def add(self, image, timing):
         if image is None or not getattr(timing, 'usable', False):
             self.clear()
@@ -55,7 +59,13 @@ class PerceptionFrameDelay:
             self._pending.popleft()
             self.discarded += 1
 
-    def take(self, now_monotonic):
+    def peek(self, now_monotonic):
+        """Return the oldest eligible frame without consuming it.
+
+        The Viewer keeps this exact image/timestamp pair while an exact-time
+        TF is still arriving.  Expiration remains finite and is evaluated on
+        every call.
+        """
         if not math.isfinite(now_monotonic):
             self.clear()
             return None
@@ -70,6 +80,20 @@ class PerceptionFrameDelay:
                 self.discarded += 1
                 continue
             if age >= self.delay_sec:
-                return self._pending.popleft()
+                return item
             break
         return None
+
+    def consume(self, item):
+        """Remove exactly the frame returned by ``peek``."""
+        if not self._pending or self._pending[0] is not item:
+            return False
+        self._pending.popleft()
+        return True
+
+    def take(self, now_monotonic):
+        """Compatibility helper for callers that do not require TF retry."""
+        item = self.peek(now_monotonic)
+        if item is not None:
+            self.consume(item)
+        return item

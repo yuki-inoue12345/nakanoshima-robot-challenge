@@ -32,17 +32,29 @@ An interpolated tf2 lookup is permitted only when its returned stamp matches
 the *requested* time within 5 ms. This does not authorize a lookup of the
 latest available TF in place of the requested timestamp.
 
-This C920 OpenCV capture path has **no hardware exposure timestamp**. The
-ROS clock sampled immediately after `VideoCapture.read()` is merely a host
-receipt-time estimate. A camera-driver frame queue can still contain a
-previously exposed frame despite a fast `read()`. The 120 ms read-time,
-400 ms Costmap age, 200 mm displacement, and 15-degree 3-D orientation gates
-reduce, but **do not eliminate**, that uncertainty. A truly guaranteed
-per-frame temporal overlay requires a validated capture timestamp / buffer
-freshness contract. The NUC stationary and motion acceptance tests remain
-mandatory; a passing pure-Python geometry test is not evidence of correct
-hardware exposure-time alignment. Historical/replayed MP4 sources without a
-trusted timestamp must not silently be treated as live camera frames.
+The normal OpenCV source has no trusted acquisition timestamp and never
+authorizes this overlay.  The opt-in V4L2 source associates one dequeued MJPEG
+buffer with its kernel monotonic SOE timestamp and converts that timestamp to
+ROS time using the host ROS/monotonic pair sampled after acquisition.  The
+timestamp is still a kernel/driver observation rather than independently
+measured C920 exposure time, so NUC stationary and motion acceptance tests
+remain mandatory.
+
+The V4L2 review pipeline holds an image for 120 ms, and for at most 300 ms,
+without changing its image or timestamp.  An exact image-time TF that has not
+arrived causes `FRAME SYNC WAIT`; the same frame is retried nonblockingly and
+is discarded at the finite deadline.  A two-thread executor lets tf2's
+reentrant subscriptions receive 30 Hz TF while camera/rendering remains in
+the Viewer's mutually-exclusive callback group.  This replaces the former
+one-shot behavior, which consumed the delayed image on its first failed TF
+lookup and immediately tried a newer image.
+
+The Viewer retains a bounded Costmap history and selects the newest Costmap
+whose header stamp is not newer than the held image.  It never pairs a future
+Costmap with an older image.  Green and cyan Paths are also transformed at the
+held image timestamp; a Path received after that image is hidden rather than
+drawn with a future route generation.  Historical/replayed MP4 sources without
+a trusted timestamp must not silently be treated as live camera frames.
 
 Failures suppress Costmap-derived image overlays, minimap, and cost-based
 explanations/alerts. They do not alter the real Nav2 Path or navigation.
