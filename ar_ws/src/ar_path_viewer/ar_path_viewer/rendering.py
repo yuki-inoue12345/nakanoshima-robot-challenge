@@ -145,31 +145,10 @@ def _draw_offscreen_guidance(
     guidance: OffscreenGuidance,
     color_bgr: Tuple[int, int, int],
 ) -> None:
-    start, end = offscreen_arrow_geometry(
-        frame.shape[1], frame.shape[0], guidance
-    )
-    cv2.arrowedLine(frame, start, end, (20, 20, 20), 10, cv2.LINE_AA, tipLength=0.32)
-    cv2.arrowedLine(frame, start, end, color_bgr, 6, cv2.LINE_AA, tipLength=0.32)
-    label = f"GO {guidance.direction}"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.58
-    thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(
-        label, font, scale, thickness
-    )
-    label_x = max(6, (frame.shape[1] - text_width) // 2)
-    label_y = max(text_height + 6, end[1] - 12)
-    cv2.rectangle(
-        frame,
-        (label_x - 5, label_y - text_height - 5),
-        (min(frame.shape[1] - 1, label_x + text_width + 5), label_y + baseline + 4),
-        (20, 20, 20),
-        -1,
-    )
-    cv2.putText(
-        frame, label, (label_x, label_y), font, scale, color_bgr,
-        thickness, cv2.LINE_AA,
-    )
+    # Use the same immediately recognisable navigation card whether the real
+    # Path is visible or outside the camera view.  The state banner still says
+    # PATH OUT OF VIEW; the card never pretends to be projected geometry.
+    _draw_direction_panel(frame, guidance, color_bgr)
 
 
 def _draw_bottom_badge(
@@ -208,33 +187,57 @@ def _draw_direction_panel(
     guidance: OffscreenGuidance,
     color_bgr: Tuple[int, int, int],
 ) -> None:
-    """Draw a prominent fixed-UI direction panel without inventing geometry."""
+    """Draw a prominent turn-shaped cue without inventing route geometry."""
     width, height = frame.shape[1], frame.shape[0]
-    panel_width = min(196, max(150, width // 3))
-    panel_height = 70
+    panel_width = min(228, max(188, int(round(width * 0.36))))
+    panel_height = 74
     right = width - 10
     left = right - panel_width
-    bottom = height - 8
-    top = bottom - panel_height
+    # Projected floor routes occupy the lower half of the C920 image.  Keeping
+    # the fixed UI card below the state banner but above the floor preserves
+    # both the green real Path and cyan reference Path.
+    top = min(max(50, int(round(height * 0.11))), height - panel_height - 8)
+    bottom = top + panel_height
     cv2.rectangle(frame, (left, top), (right, bottom), (18, 18, 18), -1)
     cv2.rectangle(frame, (left, top), (right, bottom), color_bgr, 2, cv2.LINE_AA)
 
-    arrow_start = (left + 34, bottom - 13)
-    horizontal = {
-        'LEFT': -25,
-        'STRAIGHT': 0,
-        'RIGHT': 25,
-    }.get(guidance.direction, 0)
-    arrow_end = (arrow_start[0] + horizontal, top + 13)
-    cv2.arrowedLine(
-        frame, arrow_start, arrow_end, color_bgr, 5, cv2.LINE_AA, tipLength=0.32
-    )
-    label = f"GO {guidance.direction}"
+    icon_left = left + 12
+    icon_right = left + 72
+    icon_center = (icon_left + icon_right) // 2
+    arrow_bottom = bottom - 12
+    arrow_turn_y = top + 26
+    arrow_top = top + 11
+    if guidance.direction == 'LEFT':
+        cv2.line(
+            frame, (icon_center, arrow_bottom), (icon_center, arrow_turn_y),
+            color_bgr, 6, cv2.LINE_AA,
+        )
+        cv2.arrowedLine(
+            frame, (icon_center, arrow_turn_y), (icon_left, arrow_turn_y),
+            color_bgr, 6, cv2.LINE_AA, tipLength=0.42,
+        )
+        label = 'TURN LEFT'
+    elif guidance.direction == 'RIGHT':
+        cv2.line(
+            frame, (icon_center, arrow_bottom), (icon_center, arrow_turn_y),
+            color_bgr, 6, cv2.LINE_AA,
+        )
+        cv2.arrowedLine(
+            frame, (icon_center, arrow_turn_y), (icon_right, arrow_turn_y),
+            color_bgr, 6, cv2.LINE_AA, tipLength=0.42,
+        )
+        label = 'TURN RIGHT'
+    else:
+        cv2.arrowedLine(
+            frame, (icon_center, arrow_bottom), (icon_center, arrow_top),
+            color_bgr, 6, cv2.LINE_AA, tipLength=0.30,
+        )
+        label = 'GO STRAIGHT'
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.64
+    scale = 0.62
     thickness = 2
     (text_width, text_height), _ = cv2.getTextSize(label, font, scale, thickness)
-    text_x = max(left + 68, right - text_width - 10)
+    text_x = max(left + 82, right - text_width - 10)
     text_y = top + (panel_height + text_height) // 2 - 2
     cv2.putText(
         frame, label, (text_x, text_y), font, scale, color_bgr,
@@ -277,9 +280,17 @@ def render_frame(
     frame = image.copy()
     segment_list = list(segments)
     reference_list = list(reference_segments)
-    for start, end in dashed_line_segments(
+    reference_dashes = dashed_line_segments(
         reference_list, reference_dash_px, reference_gap_px
-    ):
+    )
+    # A dark halo makes cyan dashes readable against white walls without
+    # changing their position, length, or distinction from the green Path.
+    for start, end in reference_dashes:
+        cv2.line(
+            frame, start, end, (18, 18, 18),
+            reference_thickness + 3, cv2.LINE_AA,
+        )
+    for start, end in reference_dashes:
         cv2.line(
             frame, start, end, reference_color_bgr,
             reference_thickness, cv2.LINE_AA,

@@ -122,3 +122,11 @@ def test_person_search_and_resume_expose_truthful_hold_status():
     assert gate.navigation_hold_status(100.3) is None
     assert not gate.authorizes_plan(100.3, 9)
     assert gate.authorizes_plan(100.3, 10)
+
+
+def test_transition_uses_plain_language_without_claiming_motion():
+    gate = WaypointProgressGate()
+    assert not gate.update(
+        follower_state(activity=2, allowed=False), 100.0, path_generation=8
+    )
+    assert gate.navigation_hold_status(100.1) == 'UPDATING ROUTE'

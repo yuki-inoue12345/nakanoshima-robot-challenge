@@ -292,6 +292,20 @@ def _cyan_pixels(frame) -> int:
     )
 
 
+def _largest_cyan_component(frame) -> int:
+    """Distinguish a retained route from isolated lossy-codec color noise."""
+    image = frame[90:]
+    mask = (
+        (image[:, :, 0] > 150)
+        & (image[:, :, 1] > 150)
+        & (image[:, :, 2] < 120)
+    ).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return 0
+    return int(stats[1:, cv2.CC_STAT_AREA].max())
+
+
 def _green_pixels(frame) -> int:
     image = frame[90:]
     return int(
@@ -507,10 +521,13 @@ def test_recorded_mp4_contains_cyan_dashes_and_removes_them_when_invalid(tmp_pat
     cyan_counts = [_cyan_pixels(frame) for frame in decoded]
     green_counts = [_green_pixels(frame) for frame in decoded]
     assert min(cyan_counts[:4]) > 50
-    # mp4v is lossy and can create an isolated color-classification pixel at
-    # a sharp green/background edge.  Reject any route-sized cyan residue while
-    # allowing that bounded codec artifact.
-    assert max(cyan_counts[4:8]) <= 2
+    assert min(_largest_cyan_component(frame) for frame in decoded[:4]) > 50
+    # mp4v is lossy and creates a few isolated color-classification pixels at
+    # sharp green/dark-halo/background edges.  Reject any connected route-sized
+    # cyan residue while allowing a small, bounded codec artifact.
+    assert max(cyan_counts[4:8]) <= 20
+    assert max(_largest_cyan_component(frame) for frame in decoded[4:8]) <= 8
     assert min(cyan_counts[8:]) > 50
+    assert min(_largest_cyan_component(frame) for frame in decoded[8:]) > 50
     # The real /plan remains recorded throughout reference invalidation.
     assert min(green_counts) > 50

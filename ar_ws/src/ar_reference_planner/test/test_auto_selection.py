@@ -462,6 +462,11 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     assert 'flock -n' in runner
     assert 'ros2 node list' in runner
     assert 'fuser' in runner
+    source_start = runner.index('set +u')
+    source_end = runner.index('set -u', source_start)
+    assert source_start < runner.index('source /opt/ros/jazzy/setup.bash') < source_end
+    assert 'AMENT_TRACE_SETUP_FILES' not in runner
+    assert 'AMENT_PYTHON_EXECUTABLE' not in runner
     assert 'cmd_vel' not in runner
     assert 'NavigateToPose' not in runner
     assert 'send_goal' not in runner

@@ -27,12 +27,17 @@ if [[ ! -r "${viewer_config}" ]]; then
     exit 2
 fi
 
+# ROS 2 setup scripts legitimately inspect optional variables.  Temporarily
+# disable nounset while sourcing them, then restore the runner's strict mode.
+# This preserves set -e/pipefail and avoids AMENT_* "unbound variable" errors.
+set +u
 # shellcheck disable=SC1091
 source /opt/ros/jazzy/setup.bash
 # shellcheck disable=SC1091
 source "${repository}/robot_ws/install/setup.bash"
 # shellcheck disable=SC1091
 source "${repository}/ar_ws/install/setup.bash"
+set -u
 
 mkdir -p "${output_dir}"
 if ! command -v flock >/dev/null 2>&1; then

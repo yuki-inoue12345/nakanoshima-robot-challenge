@@ -105,8 +105,14 @@ def test_reference_path_is_cyan_dashed_and_green_plan_remains_on_top():
         & (frame[145:156, :, 2] < 100)
     )
     assert np.count_nonzero(cyan) > 50
-    # Gaps remain black; the reference route is not accidentally solid.
-    assert np.count_nonzero(np.all(frame[150, 20:301] == 0, axis=1)) > 20
+    # Cyan gaps remain visible even though the dark readability halo may span
+    # part of a short gap on an otherwise black image.
+    cyan_row = (
+        (frame[150, 20:301, 0] > 150)
+        & (frame[150, 20:301, 1] > 150)
+        & (frame[150, 20:301, 2] < 100)
+    )
+    assert np.count_nonzero(~cyan_row) > 20
 
 
 def test_display_mode_label_is_rendered_without_changing_route_geometry():
@@ -173,9 +179,9 @@ def test_active_route_keeps_green_line_and_adds_direction_and_distance_badges():
     # Existing projected line remains green and unchanged away from the badges.
     assert np.array_equal(frame[292:304, 300:340], baseline[292:304, 300:340])
     assert np.count_nonzero(frame[:, :, 1] > 180) > 100
-    # Both bottom corners differ because GO and remaining-distance badges exist.
+    # The distance remains at the bottom; direction is moved above the floor.
     assert not np.array_equal(frame[430:475, :310], baseline[430:475, :310])
-    assert not np.array_equal(frame[430:475, 430:], baseline[430:475, 430:])
+    assert not np.array_equal(frame[48:130, 400:], baseline[48:130, 400:])
 
 
 def test_normal_overlay_hides_technical_detail_but_debug_mode_keeps_it():
@@ -202,9 +208,9 @@ def test_active_direction_panel_is_prominent_and_keeps_green_path():
         debug_overlay=False,
     )
     orange = (
-        (frame[390:, :, 2] > 180)
-        & (frame[390:, :, 1] > 80)
-        & (frame[390:, :, 0] < 80)
+        (frame[48:130, :, 2] > 180)
+        & (frame[48:130, :, 1] > 80)
+        & (frame[48:130, :, 0] < 80)
     )
     green = (
         (frame[:, :, 1] > 180)
@@ -213,6 +219,46 @@ def test_active_direction_panel_is_prominent_and_keeps_green_path():
     )
     assert np.count_nonzero(orange) > 250
     assert np.count_nonzero(green) > 100
+    # The cue stays above the floor route rather than covering the lower view.
+    assert np.array_equal(frame[390:470, 430:630], image[390:470, 430:630])
+
+
+@pytest.mark.parametrize('direction', ('LEFT', 'STRAIGHT', 'RIGHT'))
+def test_turn_shaped_direction_card_is_clear_for_every_safe_decision(direction):
+    image = np.zeros((480, 640, 3), np.uint8)
+    frame = render_frame(
+        image,
+        [],
+        'PATH OUT OF VIEW',
+        guidance=OffscreenGuidance(direction, 0.0, 2.4, 2.0),
+        debug_overlay=False,
+    )
+    orange = (
+        (frame[48:130, :, 2] > 180)
+        & (frame[48:130, :, 1] > 80)
+        & (frame[48:130, :, 0] < 80)
+    )
+    assert np.count_nonzero(orange) > 250
+    assert np.count_nonzero(frame[150:390]) == 0
+
+
+def test_reference_dashes_have_dark_halo_without_hiding_green_route():
+    image = np.full((180, 320, 3), 245, np.uint8)
+    reference = [((20, 140), (300, 140))]
+    overlap = [((20, 110), (300, 110))]
+    frame = render_frame(
+        image,
+        overlap,
+        'ACTIVE',
+        reference_segments=reference + overlap,
+        reference_thickness=3,
+    )
+    # Cyan remains readable on a bright background and has a dark edge.
+    assert np.any(np.all(frame[140] == (255, 255, 0), axis=1))
+    assert np.any(np.all(frame[136:145] == (18, 18, 18), axis=2))
+    # Green real Path is still rendered after the reference layer.
+    assert frame[110, 160, 1] > 180
+    assert frame[110, 160, 0] < 100
 
 
 def test_waypoint_badge_is_suppressed_by_non_path_viewer_states():

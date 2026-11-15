@@ -306,7 +306,7 @@ ros2 run ar_path_viewer calibrate_camera compare \
 
 ## 進行方向とPlan残長
 
-橙色の進行方向表示は、実Pathの現在位置に最も近い点から1.5 m先までをたどって`GO STRAIGHT`、`GO LEFT`、`GO RIGHT`を判定します。緑線が見える`ACTIVE`時は画面右下の大きな方向パネル、緑線を描画できる線分がない`PATH OUT OF VIEW`時は大きな固定UI矢印として表示します。いずれも床へ投影した架空線ではなく、受信した実`/plan`だけが根拠です。Pathを延長、移動、変形しません。
+橙色の進行方向表示は、実Pathの現在位置に最も近い点から1.5 m先までをたどって`GO STRAIGHT`、`TURN LEFT`、`TURN RIGHT`を判定します。緑線が見える`ACTIVE`時も、緑線を描画できる線分がない`PATH OUT OF VIEW`時も、状態バー直下の固定ナビカードとして表示します。LEFT/RIGHTは斜め前進と誤読しにくい90度の折れ矢印です。床経路が集中する画面下部を避けるため、実映像・緑線・水色線を従来より隠しません。いずれも床へ投影した架空線ではなく、受信した実`/plan`だけが根拠です。Pathを延長、移動、変形しません。
 
 次の場合は誤案内防止のため矢印も出しません。
 
@@ -318,9 +318,11 @@ ros2 run ar_path_viewer calibrate_camera compare \
 
 正しく投影できる部分は従来どおり緑線を維持し、その形状と線上矢印を優先します。橙色は緑と明確に区別し、MP4にも案内として記録されます。LEFT/RIGHT/STRAIGHTが変わった直後は旧矢印を即座に消し、既定0.35秒にわたり同じ最新判断が続くまで`DIRECTION CHECK`として案内を保留します。古い経路を補間したり、見かけだけ滑らかにつなぐ処理ではありません。判定根拠は`offscreen_guidance`ログへ集約して残します。閾値は`offscreen_guidance_*`、`guidance_direction_hold_sec` ROS parametersで調整できます。
 
+水色参考Pathの破線間隔・色・座標は維持し、明るい壁でも見失いにくい暗色の細い縁取りだけを描きます。緑の実Pathは後から描画されるため、重なった場所でも走行用経路が前面です。短い`/plan`から「曲がり角までの距離」を安定して識別できないため、その距離は推測表示しません。
+
 大きな再計画では、旧Pathを保持したり新旧を補間せず、新しい実`/plan`を既定0.35秒だけ非表示にして`REPLANNING` / `PATH CHANGE CHECK`を表示します。通常の走行進捗と、既にPathに含まれていた曲がり角への進入はmap座標上で旧Pathの対応位置へ合わせて比較するため、再計画とは扱いません。既定閾値は先頭2 m内の形状差0.60 mまたは方向差35度で、`path_change_*`パラメータから変更できます。
 
-Followerがpause、人物探索、task wait、holding stopを明示している間は、古い緑線、方向案内、`PLAN LEFT`を消し、`NAVIGATION HOLD`と実際の状態を表示します。Follower状態がない通常Viewerでは従来どおり`/plan`だけで動作します。緑線は`path_overlay_alpha`（既定0.82）で半透明にし、人物や周辺映像を完全には覆いません。これは深度や人物マスクに基づく遮蔽ではなく、線の前後関係を保証する機能ではありません。
+Followerがpause、人物探索、task wait、holding stopを明示している間は、古い緑線、方向案内、`PLAN LEFT`を消し、`NAVIGATION HOLD`と実際の状態を表示します。goal/Waypoint世代の切替中は、技術用語の`SWITCHING GOAL`ではなく`UPDATING ROUTE`と表示します。Follower状態がない通常Viewerでは従来どおり`/plan`だけで動作します。緑線は`path_overlay_alpha`（既定0.82）で半透明にし、人物や周辺映像を完全には覆いません。これは深度や人物マスクに基づく遮蔽ではなく、線の前後関係を保証する機能ではありません。
 
 `waypoint_distance_enabled: true`では、Followerの読み取り専用`/waypoint_follower/reference_state`を安全状態の確認に使い、画面左下に`PLAN LEFT: 2.4 m`を表示します。距離は直線距離でも次Waypointまでの距離でもなく、ロボットに最も近いPath位置からPath終点までの実`/plan`ポリライン残長です。1 m未満はcm表示です。`to_pose`と`through_poses`のどちらでも意味は「現在受信しているPlanの残長」に限定します。
 

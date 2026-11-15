@@ -254,6 +254,9 @@ launch全体の`.launch.log`を`~/ar_navigation_project/outputs`へ生成しま�
 終了時に削除します。AR 3ノードの重複、runnerの二重起動、C920を使用中の別プロセス
 を検出した場合は、既存プロセスを終了せず起動を拒否します。Launcher2、Follower、
 Nav2を起動・停止する処理や制御topic/actionは含みません。
+ROS 2の`setup.bash`は未定義の任意`AMENT_*`変数を確認することがあるため、runnerは
+setupをsourceする区間だけ`nounset`を解除し、直後に`set -u`を戻します。`set -e`と
+`pipefail`、録画名、ロック、C920競合検査、一時設定の終了時削除は維持します。
 
 同梱の`desktop/kokochan_navi_launcher2.desktop`は、インストール済みrunnerだけを
 呼ぶテンプレートです。NUC反映時は既存Desktopファイルを時刻付きでバックアップし、
