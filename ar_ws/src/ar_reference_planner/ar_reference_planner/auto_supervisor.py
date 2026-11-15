@@ -18,6 +18,7 @@ from time import monotonic
 from nav_msgs.msg import Path
 from rcl_interfaces.msg import ParameterType
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -460,12 +461,12 @@ def main(args=None) -> None:
     node = ReferencePlannerAutoSupervisor()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:
             node.destroy_node()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ExternalShutdownException):
             # ros2 launch forwards SIGINT to the child while it is already
             # unwinding from rclpy.spin().  The owned planner subprocess has
             # been stopped by our destroy_node() override before rclpy tears

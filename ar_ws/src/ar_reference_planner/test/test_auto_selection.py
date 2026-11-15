@@ -449,6 +449,9 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     desktop = (
         package / 'desktop' / 'kokochan_navi_launcher2.desktop'
     ).read_text(encoding='utf-8')
+    launch = (
+        package / 'launch' / 'launcher2_reference_ar.launch.py'
+    ).read_text(encoding='utf-8')
 
     assert "scripts=['scripts/run_kokochan_navi_launcher2']" in setup
     assert 'launcher2_reference_ar.launch.py' in runner
@@ -459,6 +462,16 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     assert '.mp4' in runner
     assert '.log' in runner
     assert '.launch.log' in runner
+    assert 'OnProcessExit' in launch
+    assert "Shutdown(reason='AR Viewer exited')" in launch
+    supervisor = (
+        package / 'ar_reference_planner' / 'auto_supervisor.py'
+    ).read_text(encoding='utf-8')
+    bridge = (
+        package / 'ar_reference_planner' / 'legacy_follower_bridge.py'
+    ).read_text(encoding='utf-8')
+    assert 'ExternalShutdownException' in supervisor
+    assert 'ExternalShutdownException' in bridge
     assert 'flock -n' in runner
     assert 'ros2 node list' in runner
     assert 'fuser' in runner

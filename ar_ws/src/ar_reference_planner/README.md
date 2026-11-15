@@ -188,6 +188,8 @@ Followerより先に起動した場合も1秒周期で再試行し、サービ�
 
 - Followerの絶対`waypoint_file`と`navigation_mode`をROSパラメータから取得できる
 - Nav2 Action statusにactiveなgoal UUIDが1つだけ存在する
+- Action statusはROS 2 Action標準のtransient-local QoSで受信し、既知の同一goal
+  UUIDを持つfeedbackだけをstatus heartbeat間の生存確認に利用できる
 - goal変更後に届いた`/plan`終点が、選択ルートのWaypointへ0.40 m以内で一意に対応する
 - 2番目のWaypoint候補との距離差が0.20 m以上ある
 - `through_poses`では同じgoal UUIDのfeedbackから残pose数を確認できる
@@ -204,6 +206,12 @@ statusがinactiveになった時点で`HOLDING_STOP`を出して緑線由来の�
 Nav2 goal UUIDの発行元そのものはAction statusだけでは証明できないため、終点が
 選択ルートの一意なWaypointと一致する条件を追加しています。この条件を満たさない
 走行では互換表示を推測で有効にしません。
+
+feedbackはstatusで一度確認済みのgoalを新規作成したり、異なるUUIDのgoalを許可したり
+しません。statusも同一UUIDのfeedbackも2.5秒を超えて古い場合は、従来どおり
+`legacy_action_status_stale`で非表示にします。Waypoint切替後は新goalのstatusと、
+そのgoal発行後の新しい`/plan`終点照合が完了するまで`UPDATING ROUTE`を維持します。
+これは通信揺れによる偽HOLDを減らしつつ、旧経路を新goalへ流用しないためです。
 
 次回走行では起動ログの`reference_path_configuration enabled=True`、
 supervisorのmap/waypoint選択、`reference_path`の`valid=true`、Viewerの
@@ -224,6 +232,21 @@ AMCL/TF、画角外をこの順で切り分けます。緑線の`REPLANNING`ま�
 通信断時は最後に検証済みの状態を表示許可falseの`HOLDING_STOP`として再送し、古い
 案内を復活させません。新しい起動スクリプトの`*.launch.log`にはBridge、Supervisor、
 Viewerを含むlaunch全体の遷移が残ります。
+
+Keepout有効地図では、マスク内容・geometry・FilterInfoに加え、共有する
+`filter_mask_server`と`costmap_filter_info_server`のLifecycle `ACTIVE`を1秒周期で
+確認します。明示的なnon-active応答は即時に参考経路を無効化します。ROS graphの
+瞬間的なservice未検出や応答失敗だけは、直近3.5秒以内に取得したACTIVE応答を
+上限付きで維持し、それを超えればfail closedに戻ります。次のログを順に確認します。
+
+- `keepout_lifecycle_verified server=mask ... state_id=3`
+- `keepout_lifecycle_verified server=info ... state_id=3`
+- `reference_plan_success ...`
+- Viewerの`reference_path_state ... valid=true`と`reason=visible`
+
+`keepout_lifecycle_not_active`はサーバーから明示的にACTIVE以外が返った状態、
+`keepout_lifecycle_transport_uncertain`はservice通信の不確実性です。両者を同じ
+「inactive」として診断しないでください。
 
 実機ではLauncher2/Nav2/Followerを従来手順で起動し、別ターミナルから次を実行します。
 
@@ -257,6 +280,11 @@ Nav2を起動・停止する処理や制御topic/actionは含みません。
 ROS 2の`setup.bash`は未定義の任意`AMENT_*`変数を確認することがあるため、runnerは
 setupをsourceする区間だけ`nounset`を解除し、直後に`set -u`を戻します。`set -e`と
 `pipefail`、録画名、ロック、C920競合検査、一時設定の終了時削除は維持します。
+q/Q/F10でViewerが終了した場合は、launchの`OnProcessExit`がBridgeとSupervisorも
+終了させ、Supervisorは自身が起動した参考Plannerのprocess groupを停止します。
+runnerは`ros2 launch`を前景で実行するため、SIGINTをAR子プロセスへ通常どおり伝え、
+終了後に一時overlayを削除します。Viewerログには判定したraw `key_code`も残るため、
+意図したキーとGUI backend由来の値を次回検証で区別できます。
 
 同梱の`desktop/kokochan_navi_launcher2.desktop`は、インストール済みrunnerだけを
 呼ぶテンプレートです。NUC反映時は既存Desktopファイルを時刻付きでバックアップし、

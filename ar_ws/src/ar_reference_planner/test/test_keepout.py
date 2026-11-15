@@ -11,6 +11,7 @@ from ar_reference_planner.keepout_config import (
 )
 from ar_reference_planner.keepout_gate import (
     KeepoutReadinessGate,
+    LifecycleStateEvidence,
     occupancy_data_sha256,
 )
 from ar_reference_planner.test_fixture import create_test_map_bundle
@@ -173,6 +174,27 @@ def test_enabled_runtime_gate_requires_all_shared_inputs_active():
     gate.set_lifecycle('mask', True)
     gate.set_lifecycle('info', True)
     assert gate.ready
+
+
+def test_lifecycle_transport_jitter_keeps_only_recent_positive_evidence():
+    """A graph miss is not inactive, but old positive evidence expires."""
+    evidence = LifecycleStateEvidence(3.5)
+
+    assert not evidence.active(10.0)
+    evidence.observe(True, 10.0)
+    assert evidence.active(13.49)
+    assert evidence.age(13.49) == pytest.approx(3.49)
+    assert not evidence.active(13.51)
+
+
+def test_explicit_non_active_lifecycle_response_revokes_without_grace():
+    """The grace period must never conceal an authoritative inactive state."""
+    evidence = LifecycleStateEvidence(3.5)
+    evidence.observe(True, 10.0)
+    evidence.observe(False, 10.1)
+
+    assert not evidence.active(10.1)
+    assert evidence.age(10.1) is None
 
 
 @pytest.mark.parametrize(

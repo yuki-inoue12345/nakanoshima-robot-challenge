@@ -8,6 +8,45 @@ import math
 from .keepout_config import MapSignature
 
 
+class LifecycleStateEvidence:
+    """
+    Retain a recent positive lifecycle observation across graph jitter.
+
+    An explicit non-active response revokes readiness immediately.  A missing
+    service or a failed request is transport uncertainty, not evidence that a
+    server changed lifecycle state, so a previously confirmed ACTIVE response
+    remains usable only for this short bounded interval.
+    """
+
+    def __init__(self, timeout_sec: float) -> None:
+        timeout = float(timeout_sec)
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError('lifecycle evidence timeout must be positive')
+        self.timeout_sec = timeout
+        self._active_confirmed_at = None
+
+    def observe(self, active: bool, now_sec: float) -> None:
+        """Record an authoritative GetState response."""
+        now = float(now_sec)
+        if not math.isfinite(now):
+            raise ValueError('lifecycle observation time must be finite')
+        self._active_confirmed_at = now if active else None
+
+    def active(self, now_sec: float) -> bool:
+        """Return whether a positive observation remains fresh."""
+        now = float(now_sec)
+        if self._active_confirmed_at is None or not math.isfinite(now):
+            return False
+        age = max(0.0, now - self._active_confirmed_at)
+        return age <= self.timeout_sec
+
+    def age(self, now_sec: float) -> float | None:
+        """Return the age of the last positive observation for diagnostics."""
+        if self._active_confirmed_at is None:
+            return None
+        return max(0.0, float(now_sec) - self._active_confirmed_at)
+
+
 def _yaw_from_quaternion(quaternion) -> float:
     x = float(quaternion.x)
     y = float(quaternion.y)

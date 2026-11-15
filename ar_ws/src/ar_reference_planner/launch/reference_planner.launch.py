@@ -162,6 +162,8 @@ def generate_launch_description():
                 'keepout_mask_state_service'),
             'keepout_info_state_service': LaunchConfiguration(
                 'keepout_info_state_service'),
+            'keepout_state_timeout_sec': LaunchConfiguration(
+                'keepout_state_timeout_sec'),
             'expected_map_width': ParameterValue(
                 LaunchConfiguration('expected_map_width'), value_type=int),
             'expected_map_height': ParameterValue(
@@ -211,6 +213,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'keepout_info_state_service',
             default_value='/costmap_filter_info_server/get_state'),
+        DeclareLaunchArgument(
+            'keepout_state_timeout_sec', default_value='3.5'),
         DeclareLaunchArgument(
             'robot_base_frame', default_value='robot/base_footprint'
         ),

@@ -10,6 +10,7 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Path as PathMessage
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -1060,7 +1061,9 @@ class ArPathViewerNode(Node):
                     if self._display_window is not None:
                         self._display_window.set_status(f"UI {mode}", True)
                 if is_exit_key(key_code):
-                    self._request_shutdown("keyboard q/Q/F10")
+                    self._request_shutdown(
+                        f"keyboard q/Q/F10 key_code={int(key_code)}"
+                    )
         log_gui = getattr(self, "_log_gui", None)
         if log_gui is not None:
             log_gui.poll()
@@ -1117,6 +1120,10 @@ def main(args=None) -> None:
         rclpy.spin(node)
     except KeyboardInterrupt:
         node._log_info("AR Path Viewer shutdown requested: Ctrl+C")
+    except ExternalShutdownException:
+        # A sibling launch shutdown is a normal termination path.  Resources
+        # are released by finally without reporting a false viewer crash.
+        pass
     except Exception as exc:
         node._log_error(
             f"Unhandled exception: {type(exc).__name__}: {exc}\n{traceback.format_exc()}"

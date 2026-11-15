@@ -10,6 +10,7 @@ from types import MethodType
 
 import cv2
 import numpy as np
+import pytest
 
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from nav_msgs.msg import Path
@@ -357,6 +358,51 @@ def test_real_messages_fresh_amcl_and_timed_tf_draw_independent_paths():
     substantial_dashes = stats[1:, cv2.CC_STAT_AREA] >= 4
     assert components > 2
     assert np.count_nonzero(substantial_dashes) >= 3
+
+
+@pytest.mark.parametrize(
+    ('direction', 'lateral_sign'),
+    (('LEFT', 1.0), ('STRAIGHT', 0.0), ('RIGHT', -1.0)),
+)
+def test_live_input_contract_draws_both_paths_and_direction_card(
+    monkeypatch, direction, lateral_sign
+):
+    """Exercise the full Viewer tick, not just the card drawing helper."""
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    captured = []
+    real_render = viewer_node.render_frame
+
+    def recording_render(*args, **kwargs):
+        captured.append((
+            kwargs.get('guidance'),
+            kwargs.get('waypoint_status'),
+        ))
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr(viewer_node, 'render_frame', recording_render)
+    _send_good_localization(fake, clock)
+    _send_authorized_reference(fake, clock, REFERENCE_POINTS)
+    plan = tuple(
+        (float(x), lateral_sign * 0.45 * float(x), 0.0)
+        for x in np.linspace(0.15, 4.0, 50)
+    )
+    viewer_node.ArPathViewerNode._on_path(fake, _path(plan, clock.now))
+
+    frame = _tick_frame(fake)
+
+    guidance, distance = captured[-1]
+    assert guidance is not None
+    assert guidance.direction == direction
+    assert distance.startswith('PLAN LEFT:')
+    assert _cyan_pixels(frame) > 100
+    assert _green_pixels(frame) > 100
+    orange = (
+        (frame[48:130, :, 2] > 180)
+        & (frame[48:130, :, 1] > 80)
+        & (frame[48:130, :, 0] < 80)
+    )
+    assert np.count_nonzero(orange) > 250
 
 
 def test_all_safety_stops_hide_reference_and_fresh_state_recovers():

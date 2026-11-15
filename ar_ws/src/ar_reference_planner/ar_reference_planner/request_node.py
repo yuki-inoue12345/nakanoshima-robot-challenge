@@ -14,13 +14,14 @@ from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Path
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollowerState
 
 from .follower_state import FollowerSnapshot, validate_snapshot
 from .keepout_config import MapSignature
-from .keepout_gate import KeepoutReadinessGate
+from .keepout_gate import KeepoutReadinessGate, LifecycleStateEvidence
 from .route import (
     load_route,
     planar_path_length,
@@ -67,6 +68,7 @@ class ReferencePathRequestNode(Node):
         self.declare_parameter(
             'keepout_info_state_service',
             '/costmap_filter_info_server/get_state')
+        self.declare_parameter('keepout_state_timeout_sec', 3.5)
         for prefix in ('map', 'mask'):
             self.declare_parameter(f'expected_{prefix}_width', 0)
             self.declare_parameter(f'expected_{prefix}_height', 0)
@@ -91,6 +93,9 @@ class ReferencePathRequestNode(Node):
         self._max_follower_state_age = float(
             self.get_parameter('max_follower_state_age_sec').value
         )
+        self._keepout_state_timeout = float(
+            self.get_parameter('keepout_state_timeout_sec').value
+        )
         for name, value in (
             ('target_length_m', self._target_length),
             ('minimum_length_m', self._minimum_length),
@@ -100,6 +105,7 @@ class ReferencePathRequestNode(Node):
             ('validity_sec', self._validity),
             ('max_result_stamp_age_sec', self._max_stamp_age),
             ('max_follower_state_age_sec', self._max_follower_state_age),
+            ('keepout_state_timeout_sec', self._keepout_state_timeout),
         ):
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f'{name} must be finite and non-negative')
@@ -108,7 +114,8 @@ class ReferencePathRequestNode(Node):
                 'lengths must satisfy 0 < minimum <= target <= maximum'
             )
         if (self._result_timeout <= 0.0 or self._validity <= 0.0
-                or self._max_follower_state_age <= 0.0):
+                or self._max_follower_state_age <= 0.0
+                or self._keepout_state_timeout <= 0.0):
             raise ValueError('timeout, validity and state age must be positive')
 
         self._map_frame = str(self.get_parameter('map_frame').value)
@@ -163,6 +170,8 @@ class ReferencePathRequestNode(Node):
         self._filter_info_subscription = None
         self._keepout_state_clients = {}
         self._keepout_state_futures = {}
+        self._keepout_lifecycle_evidence = {}
+        self._keepout_lifecycle_diagnostic = {}
         if keepout_required:
             self._mask_subscription = self.create_subscription(
                 OccupancyGrid,
@@ -187,6 +196,10 @@ class ReferencePathRequestNode(Node):
                     str(self.get_parameter(
                         'keepout_info_state_service').value),
                 ),
+            }
+            self._keepout_lifecycle_evidence = {
+                name: LifecycleStateEvidence(self._keepout_state_timeout)
+                for name in self._keepout_state_clients
             }
         self._action = ActionClient(
             self,
@@ -405,6 +418,19 @@ class ReferencePathRequestNode(Node):
         """Poll shared Keepout servers without changing their lifecycle."""
         if not self._keepout_gate.keepout_required:
             return
+        for server, evidence in self._keepout_lifecycle_evidence.items():
+            self._keepout_gate.set_lifecycle(server, evidence.active(now))
+            pending = self._keepout_state_futures.get(server)
+            if pending is None:
+                continue
+            future, started = pending
+            if now - started <= self._keepout_state_timeout:
+                continue
+            # Ignore a reply which arrives after this bounded request lifetime.
+            self._keepout_state_futures.pop(server, None)
+            future.cancel()
+            self._log_keepout_transport(
+                server, now, 'lifecycle_query_timeout')
         if now - self._last_keepout_state_query < 1.0:
             return
         self._last_keepout_state_query = now
@@ -412,30 +438,71 @@ class ReferencePathRequestNode(Node):
             if server in self._keepout_state_futures:
                 continue
             if not client.service_is_ready():
-                self._keepout_gate.set_lifecycle(server, False)
+                self._log_keepout_transport(
+                    server, now, 'lifecycle_service_unavailable')
                 continue
             future = client.call_async(GetState.Request())
-            self._keepout_state_futures[server] = future
+            self._keepout_state_futures[server] = (future, now)
             future.add_done_callback(
                 lambda completed, name=server: self._keepout_state_response(
                     name, completed))
 
     def _keepout_state_response(self, server: str, future) -> None:
+        pending = self._keepout_state_futures.get(server)
+        if pending is None or pending[0] is not future:
+            return
         self._keepout_state_futures.pop(server, None)
+        now = monotonic()
         try:
-            active = (
-                future.result().current_state.id
-                == State.PRIMARY_STATE_ACTIVE
-            )
+            state = future.result().current_state
+            state_id = int(state.id)
+            active = state_id == State.PRIMARY_STATE_ACTIVE
         except Exception as error:  # noqa: BLE001 - retry on next poll
-            active = False
-            self.get_logger().warning(
-                f'keepout_server_state_query_failed server={server} error={error}'
-            )
+            self._log_keepout_transport(
+                server, now, f'lifecycle_query_failed error={error}')
+            return
+        evidence = self._keepout_lifecycle_evidence[server]
+        evidence.observe(active, now)
         self._keepout_gate.set_lifecycle(server, active)
+        detail = (
+            f'state_id={state_id} '
+            f'label={str(getattr(state, "label", ""))!r}'
+        )
+        diagnostic = ('active' if active else f'not_active {detail}')
+        if self._keepout_lifecycle_diagnostic.get(server) != diagnostic:
+            self._keepout_lifecycle_diagnostic[server] = diagnostic
+            if active:
+                self.get_logger().info(
+                    'keepout_lifecycle_verified '
+                    f'server={server} {detail}'
+                )
+            else:
+                self.get_logger().warning(
+                    'keepout_lifecycle_not_active '
+                    f'server={server} {detail}'
+                )
         if not active:
             self._invalidate(
                 f'keepout_not_ready reason={self._keepout_gate.reason}')
+
+    def _log_keepout_transport(
+        self, server: str, now: float, detail: str
+    ) -> None:
+        """Apply a bounded grace period to transport uncertainty only."""
+        evidence = self._keepout_lifecycle_evidence[server]
+        active = evidence.active(now)
+        self._keepout_gate.set_lifecycle(server, active)
+        age = evidence.age(now)
+        age_text = 'never' if age is None else f'{age:.3f}'
+        diagnostic = f'transport {detail} active={active}'
+        if self._keepout_lifecycle_diagnostic.get(server) == diagnostic:
+            return
+        self._keepout_lifecycle_diagnostic[server] = diagnostic
+        self.get_logger().warning(
+            'keepout_lifecycle_transport_uncertain '
+            f'server={server} detail={detail} '
+            f'last_active_age_sec={age_text} grace_active={active}'
+        )
 
     def _query_planner_state(self, now: float) -> None:
         """Poll only this package's namespaced Planner lifecycle state."""
@@ -719,6 +786,8 @@ def main(args=None) -> None:
     try:
         node = ReferencePathRequestNode()
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         if node is not None:
             node.destroy_node()

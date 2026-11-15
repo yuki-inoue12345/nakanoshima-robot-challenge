@@ -12,13 +12,19 @@ from pathlib import Path
 from time import monotonic
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from nav2_msgs.action import NavigateThroughPoses
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import Path as PathMessage
 from rcl_interfaces.msg import ParameterType
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter_client import AsyncParameterClient
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    qos_profile_action_status_default,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from robotbase_waypoint_interfaces.msg import WaypointFollowerState
 
 from .legacy_compatibility import resolve_legacy_progress
@@ -75,6 +81,7 @@ class LegacyFollowerBridge(Node):
         self._minimum_plan_sequence = 1
         self._plan_endpoint = None
         self._plan_received_at = None
+        self._to_pose_feedback = None
         self._through_feedback = None
         self._last_progress = None
         self._last_reason = None
@@ -89,12 +96,18 @@ class LegacyFollowerBridge(Node):
             GoalStatusArray,
             '/navigate_to_pose/_action/status',
             lambda message: self._on_status('to_pose', message),
-            10,
+            qos_profile_action_status_default,
         )
         self.create_subscription(
             GoalStatusArray,
             '/navigate_through_poses/_action/status',
             lambda message: self._on_status('through_poses', message),
+            qos_profile_action_status_default,
+        )
+        self.create_subscription(
+            NavigateToPose.Impl.FeedbackMessage,
+            '/navigate_to_pose/_action/feedback',
+            self._on_to_pose_feedback,
             10,
         )
         self.create_subscription(
@@ -156,6 +169,7 @@ class LegacyFollowerBridge(Node):
         self._goal_generation += 1
         self._plan_endpoint = None
         self._plan_received_at = None
+        self._to_pose_feedback = None
         self._through_feedback = None
         self._last_progress = None
         self._minimum_plan_sequence = self._plan_sequence + 1
@@ -300,6 +314,7 @@ class LegacyFollowerBridge(Node):
             self._goal_generation += 1
             self._plan_endpoint = None
             self._plan_received_at = None
+            self._to_pose_feedback = None
             self._through_feedback = None
             self._last_progress = None
             self._minimum_plan_sequence = self._plan_sequence + 1
@@ -338,14 +353,34 @@ class LegacyFollowerBridge(Node):
             return
         self._through_feedback = (goal_uuid, remaining, monotonic())
 
+    def _on_to_pose_feedback(self, message) -> None:
+        """Record only the UUID and receipt time as positive goal liveness."""
+        try:
+            goal_uuid = bytes(
+                int(value) & 0xff for value in message.goal_id.uuid
+            ).hex()
+        except (AttributeError, TypeError, ValueError):
+            return
+        self._to_pose_feedback = (goal_uuid, monotonic())
+
+    def _feedback_liveness(self, mode: str, goal_uuid: str) -> float | None:
+        """Return a matching feedback receipt time without inventing a goal."""
+        if mode == 'to_pose':
+            feedback = self._to_pose_feedback
+            if feedback is None or feedback[0] != goal_uuid:
+                return None
+            return feedback[1]
+        feedback = self._through_feedback
+        if feedback is None or feedback[0] != goal_uuid:
+            return None
+        return feedback[2]
+
     def _active_goal(self, now: float) -> tuple[str | None, str]:
         mode = self._navigation_mode
         if mode not in self._active_goals:
             return None, 'legacy_navigation_mode_unavailable'
         received = self._status_received_at[mode]
         timeout = float(self.get_parameter('action_status_timeout_sec').value)
-        if received is None or now - received > timeout:
-            return None, 'legacy_action_status_stale'
         active = self._active_goals[mode]
         if len(active) == 0:
             return None, 'legacy_nav2_goal_inactive'
@@ -356,6 +391,15 @@ class LegacyFollowerBridge(Node):
         )
         if self._active_goals[other_mode]:
             return None, 'legacy_nav2_action_mode_ambiguous'
+        if received is None:
+            return None, 'legacy_action_status_stale'
+        feedback_received = self._feedback_liveness(mode, active[0])
+        latest_liveness = max(
+            received,
+            feedback_received if feedback_received is not None else received,
+        )
+        if now - latest_liveness > timeout:
+            return None, 'legacy_action_status_stale'
         return active[0], 'legacy_nav2_goal_active'
 
     def _resolve_progress(self, now: float):
@@ -485,7 +529,7 @@ def main(args=None) -> None:
     node = LegacyFollowerBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

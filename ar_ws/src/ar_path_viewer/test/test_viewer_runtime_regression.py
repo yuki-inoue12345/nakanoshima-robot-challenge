@@ -724,6 +724,9 @@ def test_q_and_backend_specific_f10_codes_request_exit(key_code):
 def test_unrelated_or_missing_keys_do_not_request_exit():
     assert not viewer_node.is_exit_key(-1)
     assert not viewer_node.is_exit_key(ord("y"))
+    # Extended backend codes which merely contain a q-like low byte are not
+    # accepted; only the documented exact q/Q/F10 values may stop recording.
+    assert not viewer_node.is_exit_key(0x01000071)
 
 
 def test_d_key_toggles_debug_overlay_without_requesting_exit():

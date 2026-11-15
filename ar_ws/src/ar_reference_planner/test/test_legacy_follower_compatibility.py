@@ -114,6 +114,14 @@ def test_action_status_must_be_fresh_unique_and_single_mode():
             'through_poses': (),
         }
         _status_received_at = {'to_pose': 10.0, 'through_poses': None}
+        _to_pose_feedback = None
+        _through_feedback = None
+
+        @staticmethod
+        def _feedback_liveness(mode, goal_uuid):
+            return LegacyFollowerBridge._feedback_liveness(
+                fake, mode, goal_uuid
+            )
 
         @staticmethod
         def get_parameter(name):
@@ -131,6 +139,52 @@ def test_action_status_must_be_fresh_unique_and_single_mode():
     fake._active_goals['through_poses'] = ()
     assert LegacyFollowerBridge._active_goal(fake, 13.0) == (
         None, 'legacy_action_status_stale'
+    )
+
+
+def test_matching_to_pose_feedback_bridges_status_heartbeat_gap():
+    """Fresh feedback for the same known UUID prevents a false HOLD."""
+    goal_uuid = '01' * 16
+    values = {'action_status_timeout_sec': 2.5}
+    fake = SimpleNamespace(
+        _navigation_mode='to_pose',
+        _active_goals={'to_pose': (goal_uuid,), 'through_poses': ()},
+        _status_received_at={'to_pose': 10.0, 'through_poses': None},
+        _to_pose_feedback=(goal_uuid, 12.8),
+        _through_feedback=None,
+        get_parameter=lambda name: SimpleNamespace(value=values[name]),
+    )
+    fake._feedback_liveness = lambda mode, goal: (
+        LegacyFollowerBridge._feedback_liveness(fake, mode, goal)
+    )
+
+    assert LegacyFollowerBridge._active_goal(fake, 13.0) == (
+        goal_uuid, 'legacy_nav2_goal_active'
+    )
+
+    fake._to_pose_feedback = ('02' * 16, 12.9)
+    assert LegacyFollowerBridge._active_goal(fake, 13.0) == (
+        None, 'legacy_action_status_stale'
+    )
+
+
+def test_feedback_never_creates_goal_without_status_identity():
+    """Feedback is liveness only; it cannot authorize an unknown goal."""
+    goal_uuid = '01' * 16
+    fake = SimpleNamespace(
+        _navigation_mode='to_pose',
+        _active_goals={'to_pose': (), 'through_poses': ()},
+        _status_received_at={'to_pose': None, 'through_poses': None},
+        _to_pose_feedback=(goal_uuid, 12.9),
+        _through_feedback=None,
+        get_parameter=lambda _name: SimpleNamespace(value=2.5),
+    )
+    fake._feedback_liveness = lambda mode, goal: (
+        LegacyFollowerBridge._feedback_liveness(fake, mode, goal)
+    )
+
+    assert LegacyFollowerBridge._active_goal(fake, 13.0) == (
+        None, 'legacy_nav2_goal_inactive'
     )
 
 
@@ -186,6 +240,7 @@ def test_goal_change_immediately_invalidates_previous_verified_progress():
         _goal_generation=4,
         _plan_endpoint=(3.0, 0.0, 7),
         _plan_received_at=10.0,
+        _to_pose_feedback=None,
         _through_feedback=None,
         _last_progress='verified-old-progress',
         _minimum_plan_sequence=7,
@@ -206,6 +261,18 @@ def test_goal_change_immediately_invalidates_previous_verified_progress():
         False,
     )]
     assert reasons == ['waiting_for_plan_after_nav2_goal_change']
+
+
+def test_action_status_subscriptions_use_ros_action_qos():
+    """Late bridge startup must receive Nav2's transient-local status."""
+    package_source = (
+        Path(__file__).parents[1]
+        / 'ar_reference_planner'
+        / 'legacy_follower_bridge.py'
+    )
+    text = package_source.read_text(encoding='utf-8')
+
+    assert text.count('qos_profile_action_status_default') >= 3
 
 
 def test_verified_legacy_state_is_accepted_by_strict_planner_contract(tmp_path):

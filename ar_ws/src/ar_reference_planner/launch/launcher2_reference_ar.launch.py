@@ -7,8 +7,16 @@ Follower remain their respective sources of truth.
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    LogInfo,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -27,14 +35,26 @@ def _launch_viewer(context):
     # The checked-in base YAML remains false. Only this explicit test launch
     # enables reference rendering after all Viewer gates pass.
     parameters.append({'reference_path_enabled': True})
-    return [Node(
+    viewer = Node(
         package='ar_path_viewer',
         executable='ar_path_viewer',
         name='ar_path_viewer',
         output='screen',
         condition=IfCondition(LaunchConfiguration('start_viewer')),
         parameters=parameters,
-    )]
+    )
+    # q/Q/F10 intentionally terminates the entire AR-only launch, not just
+    # the camera window. This lets the supervisor stop its owned Planner
+    # process and prevents Bridge/Supervisor nodes remaining after the UI is
+    # closed. It does not affect Launcher2, Nav2, or the legacy Follower.
+    shutdown_with_viewer = RegisterEventHandler(OnProcessExit(
+        target_action=viewer,
+        on_exit=[
+            LogInfo(msg='AR Viewer exited; stopping the AR-only launch stack'),
+            EmitEvent(event=Shutdown(reason='AR Viewer exited')),
+        ],
+    ))
+    return [viewer, shutdown_with_viewer]
 
 
 def generate_launch_description():
