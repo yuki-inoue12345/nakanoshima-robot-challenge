@@ -357,6 +357,11 @@ ros2 run ar_path_viewer ar_path_viewer --ros-args \
 
 診断ログの`reference_path_state`には有効性、route/index/generation、点数、全長を、`reference_path_projection`には画角内実長、描画線分数、非表示理由を残します。録画はGUI操作バーを含まない640×480フレームへ、実際に描いた緑実線・水色破線・橙案内をそのまま保存します。
 
+ロボットが実際に認識しているcostmap/LiDAR情報を将来AR表示するための、安全な
+読み取り専用設計は[docs/robot_perception_overlay_design.md](docs/robot_perception_overlay_design.md)
+に分離しています。現段階では実装・既定有効化しておらず、「高コスト」を未検証の
+まま「危険」と表示しません。
+
 ## ビルドとテスト
 
 ワークスペース直下で実行します。

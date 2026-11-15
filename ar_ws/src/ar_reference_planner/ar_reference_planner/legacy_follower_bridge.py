@@ -135,10 +135,14 @@ class LegacyFollowerBridge(Node):
 
     def _ensure_publisher(self) -> None:
         if self._publisher is None:
+            topic = str(self.get_parameter('output_topic').value)
             self._publisher = self.create_publisher(
                 WaypointFollowerState,
-                str(self.get_parameter('output_topic').value),
+                topic,
                 self._state_qos(),
+            )
+            self._log_info(
+                f'legacy_follower_state_publisher_created topic={topic}'
             )
 
     def _remove_publisher(self) -> None:
@@ -166,14 +170,54 @@ class LegacyFollowerBridge(Node):
             self._follower_parameters_available = False
             self._log_reason('follower_parameter_service_unavailable')
             return
-        future = self._parameter_client.get_parameters([
-            'waypoint_file',
-            'navigation_mode',
-            'map_frame',
-            'reference_state_topic',
-        ])
+        # Do not include the optional modern-only reference_state_topic in a
+        # GetParameters request.  Jazzy's rclpy parameter service returns an
+        # empty value array when any requested name is undeclared, which made
+        # all three valid legacy parameters appear missing.  Listing the exact
+        # optional name first works for both declared and undeclared cases.
+        future = self._parameter_client.list_parameters(
+            prefixes=['reference_state_topic'], depth=1
+        )
         self._parameter_future = future
-        future.add_done_callback(self._on_parameters)
+        future.add_done_callback(self._on_parameter_list)
+
+    def _parameter_transport_failed(self, reason: str) -> None:
+        """Keep a known route fail-closed while its parameter link is down."""
+        self._follower_parameters_available = False
+        self._log_reason(reason)
+
+    def _on_parameter_list(self, future) -> None:
+        if future is self._parameter_future:
+            self._parameter_future = None
+        try:
+            names = tuple(str(name) for name in future.result().result.names)
+        except Exception as error:  # noqa: BLE001 - ROS service transport
+            self._parameter_transport_failed(
+                f'follower_parameter_list_failed {error}'
+            )
+            return
+        if 'reference_state_topic' in names:
+            self._follower_parameters_available = True
+            self._modern_follower = True
+            self._legacy_verified = False
+            self._remove_publisher()
+            self._log_reason('modern_follower_native_state')
+            return
+
+        self._modern_follower = False
+        try:
+            parameter_future = self._parameter_client.get_parameters([
+                'waypoint_file',
+                'navigation_mode',
+                'map_frame',
+            ])
+        except Exception as error:  # noqa: BLE001 - ROS service transport
+            self._parameter_transport_failed(
+                f'follower_parameter_query_start_failed {error}'
+            )
+            return
+        self._parameter_future = parameter_future
+        parameter_future.add_done_callback(self._on_parameters)
 
     def _on_parameters(self, future) -> None:
         if future is self._parameter_future:
@@ -185,23 +229,17 @@ class LegacyFollowerBridge(Node):
             # publishing an explicit, disallowed HOLD snapshot.  Clearing it
             # here would let the last NAVIGATING heartbeat age out and could
             # briefly expose path-derived UI again after a subscriber restart.
-            self._follower_parameters_available = False
-            self._log_reason(f'follower_parameter_query_failed {error}')
+            self._parameter_transport_failed(
+                f'follower_parameter_query_failed {error}'
+            )
             return
-        if len(values) != 4:
-            self._follower_parameters_available = False
-            self._log_reason('follower_parameter_response_incomplete')
+        if len(values) != 3:
+            self._parameter_transport_failed(
+                'follower_parameter_response_incomplete '
+                f'expected=3 actual={len(values)}'
+            )
             return
         self._follower_parameters_available = True
-        # The modern follower owns the native state contract.  Never create a
-        # second publisher merely because its first heartbeat is delayed.
-        if values[3].type == ParameterType.PARAMETER_STRING:
-            self._modern_follower = True
-            self._legacy_verified = False
-            self._remove_publisher()
-            self._log_reason('modern_follower_native_state')
-            return
-        self._modern_follower = False
         if (
             values[0].type != ParameterType.PARAMETER_STRING
             or values[1].type != ParameterType.PARAMETER_STRING
@@ -422,14 +460,23 @@ class LegacyFollowerBridge(Node):
         if reason == self._last_reason:
             return
         self._last_reason = reason
-        log = self.get_logger().info
+        message = f'legacy_follower_compatibility reason={reason}'
         if not (
             reason.startswith('legacy_progress_verified')
             or reason.startswith('legacy_follower_verified')
             or reason == 'modern_follower_native_state'
         ):
-            log = self.get_logger().warning
-        log(f'legacy_follower_compatibility reason={reason}')
+            self._log_warning(message)
+            return
+        self._log_info(message)
+
+    def _log_info(self, message: str) -> None:
+        """Log INFO from a severity-stable rclpy caller location."""
+        self.get_logger().info(message)
+
+    def _log_warning(self, message: str) -> None:
+        """Log WARNING from a severity-stable rclpy caller location."""
+        self.get_logger().warning(message)
 
 
 def main(args=None) -> None:

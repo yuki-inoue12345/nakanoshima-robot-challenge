@@ -14,6 +14,7 @@ setup(
         ("share/" + package_name + "/config", glob("config/*.yaml")),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
         ("share/" + package_name + "/test_data", glob("test_data/*")),
+        ("share/" + package_name + "/docs", glob("docs/*.md")),
     ],
     install_requires=["setuptools"],
     tests_require=["pytest"],

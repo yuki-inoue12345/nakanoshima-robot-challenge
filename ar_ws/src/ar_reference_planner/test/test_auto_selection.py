@@ -436,6 +436,38 @@ def test_dedicated_launch_has_no_manual_map_or_waypoint_argument():
     )
     assert "'viewer_calibration_overlay_file', default_value=''" in launch
     assert 'if calibration_overlay:' in launch
+    assert "'viewer_runtime_overlay_file', default_value=''" in launch
+    assert 'if runtime_overlay:' in launch
+
+
+def test_installed_desktop_runner_is_read_only_and_session_scoped():
+    package = Path(__file__).parents[1]
+    runner = (
+        package / 'scripts' / 'run_kokochan_navi_launcher2'
+    ).read_text(encoding='utf-8')
+    setup = (package / 'setup.py').read_text(encoding='utf-8')
+    desktop = (
+        package / 'desktop' / 'kokochan_navi_launcher2.desktop'
+    ).read_text(encoding='utf-8')
+
+    assert "scripts=['scripts/run_kokochan_navi_launcher2']" in setup
+    assert 'launcher2_reference_ar.launch.py' in runner
+    assert 'viewer_runtime_overlay_file:=' in runner
+    assert 'ar_path_viewer_launcher2.yaml' in runner
+    assert 'ROS_DOMAIN_ID:-54' in runner
+    assert 'kokochan_navi_${stamp}' in runner
+    assert '.mp4' in runner
+    assert '.log' in runner
+    assert '.launch.log' in runner
+    assert 'flock -n' in runner
+    assert 'ros2 node list' in runner
+    assert 'fuser' in runner
+    assert 'cmd_vel' not in runner
+    assert 'NavigateToPose' not in runner
+    assert 'send_goal' not in runner
+    assert 'run_kokochan_navi_launcher2' in desktop
+    assert 'waypoint_follow' not in desktop
+    assert 'nav2' not in desktop.lower()
 
 
 @pytest.mark.parametrize('bad_value', (-1.0, float('nan')))

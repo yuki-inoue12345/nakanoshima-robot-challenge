@@ -16,6 +16,10 @@ from launch_ros.actions import Node
 def _launch_viewer(context):
     """Build Viewer parameters, adding a review overlay only when requested."""
     parameters = [LaunchConfiguration('viewer_config_file').perform(context)]
+    runtime_overlay = LaunchConfiguration(
+        'viewer_runtime_overlay_file').perform(context).strip()
+    if runtime_overlay:
+        parameters.append(runtime_overlay)
     calibration_overlay = LaunchConfiguration(
         'viewer_calibration_overlay_file').perform(context).strip()
     if calibration_overlay:
@@ -88,6 +92,8 @@ def generate_launch_description():
         DeclareLaunchArgument('start_viewer', default_value='true'),
         DeclareLaunchArgument(
             'viewer_config_file', default_value=default_viewer_config),
+        DeclareLaunchArgument(
+            'viewer_runtime_overlay_file', default_value=''),
         DeclareLaunchArgument(
             'viewer_calibration_overlay_file', default_value=''),
         legacy_bridge,

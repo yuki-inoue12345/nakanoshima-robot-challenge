@@ -177,6 +177,12 @@ the Follower. To use an already-running Viewer, add `start_viewer:=false`.
 `reference_state_topic`パラメータが存在する新実装では、このbridgeはpublisherを
 作らず、Follower本来の厳密な状態をそのまま使用します。
 
+ROS 2 Jazzyでは、未宣言パラメータを含む`GetParameters`要求は、同時に指定した
+宣言済みパラメータも含めて空の応答になります。そのためBridgeは、最初に
+`ListParameters`で新実装専用の`reference_state_topic`の有無だけを調べ、旧実装には
+宣言済みの`waypoint_file`、`navigation_mode`、`map_frame`だけを別要求します。
+Followerより先に起動した場合も1秒周期で再試行し、サービス出現後に復旧します。
+
 旧実装では、次の全条件を満たしたときだけ既存の
 `/waypoint_follower/reference_state`型へ読み取り専用状態を出します。
 
@@ -213,6 +219,12 @@ AMCL/TF、画角外をこの順で切り分けます。緑線の`REPLANNING`ま�
 - `legacy_follower_compatibility reason=legacy_progress_verified`
 - `reference_planner_auto_started map=... waypoint_file=...`
 
+`follower_parameter_response_incomplete expected=3 actual=...`は必須3項目の応答数を、
+`follower_parameter_service_unavailable`はFollower起動待ちまたは通信断を表します。
+通信断時は最後に検証済みの状態を表示許可falseの`HOLDING_STOP`として再送し、古い
+案内を復活させません。新しい起動スクリプトの`*.launch.log`にはBridge、Supervisor、
+Viewerを含むlaunch全体の遷移が残ります。
+
 実機ではLauncher2/Nav2/Followerを従来手順で起動し、別ターミナルから次を実行します。
 
 ```bash
@@ -227,6 +239,26 @@ export ROBOTBASE_LAUNCHER_ID=koko_launcher2
 ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
   viewer_config_file:=/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml
 ```
+
+### NUCデスクトップ起動用runner
+
+ビルド後の次のrunnerは、上記launchを同じ環境変数で起動します。
+
+```bash
+/home/koko-chan-nuc/inoueyuki_ws/nakanoshima-robot-challenge/ar_ws/install/\
+ar_reference_planner/lib/ar_reference_planner/run_kokochan_navi_launcher2
+```
+
+既存NUC YAMLを変更せず、一時overlayで同じタイムスタンプの`.mp4`、Viewer `.log`、
+launch全体の`.launch.log`を`~/ar_navigation_project/outputs`へ生成します。一時YAMLは
+終了時に削除します。AR 3ノードの重複、runnerの二重起動、C920を使用中の別プロセス
+を検出した場合は、既存プロセスを終了せず起動を拒否します。Launcher2、Follower、
+Nav2を起動・停止する処理や制御topic/actionは含みません。
+
+同梱の`desktop/kokochan_navi_launcher2.desktop`は、インストール済みrunnerだけを
+呼ぶテンプレートです。NUC反映時は既存Desktopファイルを時刻付きでバックアップし、
+このテンプレートをコピーしてから内容を確認します。現在の実機ファイルを開発PCから
+直接編集したり、Launcher2用ショートカットを置き換えたりはしません。
 
 ## Manual production-shaped launch (diagnostics only)
 

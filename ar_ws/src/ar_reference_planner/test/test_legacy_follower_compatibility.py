@@ -1,6 +1,7 @@
 """Verify fail-closed interoperability with the Launcher2 legacy follower."""
 
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
@@ -18,6 +19,9 @@ from ar_reference_planner.route import load_route
 from builtin_interfaces.msg import Time
 import pytest
 from rcl_interfaces.msg import ParameterType, ParameterValue
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
 from robotbase_waypoint_interfaces.msg import WaypointFollowerState
 import yaml
 
@@ -239,17 +243,12 @@ def test_verified_legacy_state_is_accepted_by_strict_planner_contract(tmp_path):
 
 
 def test_modern_follower_parameter_disables_compatibility_publisher():
-    values = [
-        ParameterValue(type=ParameterType.PARAMETER_STRING),
-        ParameterValue(type=ParameterType.PARAMETER_STRING),
-        ParameterValue(type=ParameterType.PARAMETER_STRING),
-        ParameterValue(type=ParameterType.PARAMETER_STRING),
-    ]
-
     class Future:
         @staticmethod
         def result():
-            return SimpleNamespace(values=values)
+            return SimpleNamespace(result=SimpleNamespace(
+                names=['reference_state_topic'],
+            ))
 
     future = Future()
     removed = []
@@ -263,13 +262,50 @@ def test_modern_follower_parameter_disables_compatibility_publisher():
         _log_reason=reasons.append,
     )
 
-    LegacyFollowerBridge._on_parameters(fake, future)
+    LegacyFollowerBridge._on_parameter_list(fake, future)
 
     assert fake._modern_follower is True
     assert fake._legacy_verified is False
     assert fake._follower_parameters_available is True
     assert removed == [True]
     assert reasons == ['modern_follower_native_state']
+
+
+def test_legacy_parameter_list_requests_only_declared_required_names():
+    callbacks = []
+
+    class ParameterFuture:
+        @staticmethod
+        def add_done_callback(callback):
+            callbacks.append(callback)
+
+    parameter_future = ParameterFuture()
+    requested = []
+    list_future = SimpleNamespace(
+        result=lambda: SimpleNamespace(
+            result=SimpleNamespace(names=['waypoint_file', 'map_frame']),
+        ),
+    )
+    fake = SimpleNamespace(
+        _parameter_future=list_future,
+        _on_parameters=lambda future: None,
+        _parameter_client=SimpleNamespace(
+            get_parameters=lambda names: (
+                requested.append(tuple(names)) or parameter_future
+            ),
+        ),
+        _modern_follower=True,
+        _parameter_transport_failed=lambda reason: pytest.fail(reason),
+    )
+
+    LegacyFollowerBridge._on_parameter_list(fake, list_future)
+
+    assert fake._modern_follower is False
+    assert requested == [(
+        'waypoint_file', 'navigation_mode', 'map_frame',
+    )]
+    assert fake._parameter_future is parameter_future
+    assert callbacks == [fake._on_parameters]
 
 
 def test_legacy_follower_parameters_load_exact_route_without_manual_selection(
@@ -289,7 +325,6 @@ def test_legacy_follower_parameters_load_exact_route_without_manual_selection(
             type=ParameterType.PARAMETER_STRING,
             string_value='map',
         ),
-        ParameterValue(type=ParameterType.PARAMETER_NOT_SET),
     ]
 
     class Future:
@@ -407,6 +442,10 @@ def test_parameter_query_failure_preserves_route_for_safe_hold():
         _parameter_future=future,
         _follower_parameters_available=True,
         _legacy_verified=True,
+        _parameter_transport_failed=lambda reason: (
+            setattr(fake, '_follower_parameters_available', False),
+            reasons.append(reason),
+        ),
         _log_reason=reasons.append,
     )
 
@@ -417,6 +456,96 @@ def test_parameter_query_failure_preserves_route_for_safe_hold():
     assert reasons == [
         'follower_parameter_query_failed service disconnected'
     ]
+
+
+def test_empty_parameter_response_is_diagnostic_and_fail_closed():
+    class Future:
+        @staticmethod
+        def result():
+            return SimpleNamespace(values=[])
+
+    future = Future()
+    reasons = []
+    fake = SimpleNamespace(
+        _parameter_future=future,
+        _follower_parameters_available=True,
+        _legacy_verified=True,
+        _parameter_transport_failed=lambda reason: (
+            setattr(fake, '_follower_parameters_available', False),
+            reasons.append(reason),
+        ),
+    )
+
+    LegacyFollowerBridge._on_parameters(fake, future)
+
+    assert fake._legacy_verified is True
+    assert fake._follower_parameters_available is False
+    assert reasons == [
+        'follower_parameter_response_incomplete expected=3 actual=0'
+    ]
+
+
+def test_real_jazzy_parameter_service_recovers_after_legacy_follower_start(
+    tmp_path, monkeypatch,
+):
+    route = _route(tmp_path)
+    log_dir = tmp_path / 'ros-log'
+    log_dir.mkdir()
+    monkeypatch.setenv('ROS_LOG_DIR', str(log_dir))
+    rclpy.init(args=[
+        '--ros-args',
+        '-p', 'follower_node_name:=/legacy_parameter_test_follower',
+        '-p', 'parameter_poll_sec:=0.05',
+        '-p', 'publish_period_sec:=0.05',
+    ])
+    bridge = LegacyFollowerBridge()
+    follower = None
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(bridge)
+    try:
+        unavailable_deadline = monotonic() + 0.25
+        while monotonic() < unavailable_deadline:
+            executor.spin_once(timeout_sec=0.05)
+        assert bridge._follower_parameters_available is False
+        assert bridge._publisher is None
+
+        follower = Node('legacy_parameter_test_follower')
+        follower.declare_parameter('waypoint_file', str(route.path))
+        follower.declare_parameter('navigation_mode', 'to_pose')
+        follower.declare_parameter('map_frame', 'map')
+        executor.add_node(follower)
+
+        ready_deadline = monotonic() + 3.0
+        while not bridge._legacy_verified and monotonic() < ready_deadline:
+            executor.spin_once(timeout_sec=0.05)
+
+        assert bridge._legacy_verified is True
+        assert bridge._follower_parameters_available is True
+        assert bridge._modern_follower is False
+        assert bridge._route.sha256 == route.sha256
+        assert bridge._publisher is not None
+        assert bridge.count_publishers(
+            '/waypoint_follower/reference_state'
+        ) == 1
+    finally:
+        for timer in bridge.timers:
+            timer.cancel()
+        drain_deadline = monotonic() + 1.0
+        while (
+            bridge._parameter_future is not None
+            and monotonic() < drain_deadline
+        ):
+            executor.spin_once(timeout_sec=0.05)
+        for _ in range(4):
+            executor.spin_once(timeout_sec=0.05)
+        executor.remove_node(bridge)
+        if follower is not None:
+            executor.remove_node(follower)
+        executor.shutdown()
+        bridge.destroy_node()
+        if follower is not None:
+            follower.destroy_node()
+        rclpy.try_shutdown()
 
 
 def test_dedicated_launch_starts_bridge_without_control_interfaces():
