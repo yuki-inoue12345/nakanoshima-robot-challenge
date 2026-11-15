@@ -1,58 +1,148 @@
-# Robot perception overlay design (review only)
+# Robot perception overlay
 
-## Scope and safety boundary
+## Safety boundary
 
-This future overlay is display-only. It may subscribe to the robot's existing
-costmap or LiDAR topics, but it must never publish a goal, velocity, costmap,
-filter, recovery command, or parameter update. Its absence or failure must not
-affect Nav2. The feature remains disabled by default until recorded-data tests
-and stationary NUC tests have passed.
+This is an opt-in, display-only layer. The Viewer subscribes to an existing
+Nav2 costmap and never publishes goals, velocity, costmap data, filters,
+recovery commands, or parameter updates. A missing, invalid, stale, or
+untransformable message suppresses only this layer. The real green Path,
+cyan reference Path, orange guidance, recording, and Nav2 operation remain
+independent.
 
-## Runtime facts to verify on the NUC
+Both tracked base profiles keep `perception_costmap_enabled: false`. The
+review overlay is the only tracked profile that enables it:
 
-Before implementing a decoder, record the exact type, QoS, `frame_id`, update
-rate, dimensions, resolution, origin, and a value histogram for:
+```bash
+ros2 run ar_path_viewer ar_path_viewer --ros-args \
+  --params-file /path/to/ar_path_viewer.yaml \
+  --params-file /path/to/perception_costmap_review_overlay.yaml
+```
 
-- `/local_costmap/costmap`
-- `/global_costmap/costmap`
-- `/hokuyo_scan`
+This command is for a stationary review after the live topic contract below
+has been checked. It is not a production default.
 
-Do not assume that an `OccupancyGrid` exposes Nav2's internal cost bytes
-unchanged. In particular, unknown, free, inflated, inscribed, and lethal values
-must be identified from the actual message encoding and the running Nav2
-version. A cost is not automatically a collision verdict or a general-purpose
-"danger" label.
+## Source selection
 
-## Proposed offline-first pipeline
+The first implementation uses `/local_costmap/costmap` as a
+`nav_msgs/msg/OccupancyGrid`:
 
-1. Read a recorded costmap message without changing its producer or QoS.
-2. Reject stale data, unsupported encodings, invalid geometry, missing TF, and
-   timestamps that cannot be aligned with the image.
-3. Transform only cell centres within a configured range from the message
-   frame to `robot/base_footprint` at the message time.
-4. Project a downsampled ground-plane grid through the same camera model and
-   clipping code used by the Nav2 paths. Do not shift off-screen cells into the
-   image and do not claim image-based object recognition.
-5. Render a low-alpha, separately labelled legend such as `COSTMAP COST`; keep
-   unknown, inflated, inscribed, and lethal classes visually distinct only
-   after their live encoding has been verified.
-6. Measure callback age, processed cells, render time, dropped frames, CPU, and
-   memory. Automatically suppress the overlay when its budget or freshness
-   limit is exceeded.
+- It represents the 2-D navigation evidence that Nav2 currently uses locally,
+  including merged observation and inflation layers.
+- Its grid geometry makes a bounded ground-plane visualization practical.
+- It must still be labelled as costmap information, not camera object
+  recognition, a person detector, or a general-purpose danger verdict.
 
-LiDAR points may be a later independent layer. They require the scan-time TF,
-range validity checks, angular geometry, camera calibration, and an explicit
-warning that a 2-D scan does not provide camera-image occlusion or object
-height. Costmap and raw scan observations must not be merged under one label.
+Direct LiDAR is deliberately deferred. A `sensor_msgs/msg/LaserScan` such as
+`/hokuyo_scan` or `/scan3` is closer to a raw sensor return, but it needs scan
+time interpolation, per-beam range validation, sensor-frame TF, and an honest
+statement that a 2-D scan provides neither object height nor image occlusion.
+The Global Costmap is also deferred because it is less useful for a
+camera-local view and can add a much larger sampling workload.
 
-## Acceptance phases
+The read-only Renya source snapshot (`fb8b808`) configures the Local Costmap
+as a 6 x 6 m rolling grid at 0.05 m, with 5 Hz update and 2 Hz publish rates.
+Its layers consume `/scan3` and `/hokuyo_scan_filtered`, then add inflation.
+The configured local frame is rewritten with the robot TF prefix at launch.
+These are source-code observations, **not confirmation of the running NUC**.
 
-- Phase P1: read-only metadata/value audit and rosbag-based rendering.
-- Phase P2: synthetic and recorded tests for transforms, timestamps, clipping,
-  value classes, and fail-closed behaviour.
-- Phase P3: stationary NUC test with the feature flag enabled, including frame
-  rate and resource measurements.
-- Phase P4: visual comparison during an approved run; still no control-side
-  interfaces.
+## Message semantics and rendering
 
-Until these phases pass, no production YAML should enable this overlay.
+The standard Nav2 OccupancyGrid publication uses values in `[-1, 100]`.
+This Viewer preserves three explicit classes:
+
+- `-1`: unknown, muted grey-blue dot
+- configurable `60..99`: high navigation cost, amber dot
+- configurable `100`: lethal-cost cell, magenta diamond
+
+The thresholds describe the received grid values only. In particular,
+inflation cost is not called an obstacle or danger, and a lethal-cost cell is
+not asserted to be a visually identifiable object. Live value histograms and
+the running Nav2 version still need checking on the NUC.
+
+Dense filled polygons were considered, but rejected for this first phase:
+they obscure the green and cyan Paths at 640 x 480 and cost more to render.
+The selected design samples at most 450 cells per class, projects their real
+cell centres, draws low-alpha semantic markers below the Path layers, and
+labels the layer `LOCAL COSTMAP`. Sampling is deterministic and retains the
+full per-class counts in diagnostics.
+
+## Costmap + real-Path explanation
+
+The optional explanation card uses the same fresh Local Costmap and the
+already-authorized real `/plan`.  It does **not** claim access to Nav2's
+internal planner objective or identify a camera-visible object.  The compact
+top-left card therefore uses neutral, directly supported wording:
+
+- `FRONT LOW COST | PATH STRAIGHT`
+- `RIGHT COST | PATH LEFT` / `LEFT COST | PATH RIGHT`
+- `PATH CHANGING | COST AHEAD`
+- `COSTMAP BLOCKED AHEAD`
+
+The first label requires low cost in a 0.4--2.5 m front region and a stable
+straight real-Path decision.  Side labels require both a stable Path turn and
+a configured cost asymmetry on the opposite side.  Replanning/HOLD labels
+require lethal-cost evidence in the front region.  Unknown-heavy or
+undersampled regions, stale messages, invalid TF, unstable localization,
+missing real Path, and ambiguous cost/path relationships produce no card.
+The diagnostics event is `perception_path_explanation` and records the exact
+fractions used for the decision.
+
+Two alternatives were rejected for the first implementation.  A dense heat
+map hid the two routes at 640 x 480.  A free-form statement such as "Nav2
+chose left because of an obstacle" overstated causality and object identity
+that cannot be established from the published OccupancyGrid and Path alone.
+Both `perception_costmap_enabled` and `perception_explanation_enabled` remain
+false in base profiles; the review overlay enables them together.
+
+## Transform and freshness contract
+
+For every accepted OccupancyGrid, the Viewer:
+
+1. validates frame, non-zero timestamp, dimensions, resolution, data length,
+   values, and a horizontal grid origin;
+2. converts cell centres using the OccupancyGrid origin translation and yaw;
+3. requests the transform from the message frame to `base_footprint` at the
+   message timestamp;
+4. rejects zero, stale, or future TF stamps;
+5. uses the same `CameraMount`, `CameraIntrinsics`, optical-axis conversion,
+   near clipping, and image bounds as the Path projection;
+6. clears invalid input and suppresses stale data instead of retaining old
+   markers.
+
+The marker plane defaults to 0.02 m above the costmap plane only to avoid
+numeric overlap. It does not infer object height or image occlusion. Camera
+calibration is still provisional, so visual alignment cannot be claimed until
+the stationary NUC review is complete.
+
+## NUC contract audit (read-only)
+
+Before enabling the review overlay, record the actual type, QoS, frame, rate,
+geometry, and values without changing the running system:
+
+```bash
+ros2 topic info /local_costmap/costmap --verbose
+ros2 topic hz /local_costmap/costmap
+ros2 topic echo /local_costmap/costmap --once --field header
+ros2 topic echo /local_costmap/costmap --once --field info
+ros2 topic type /hokuyo_scan
+ros2 topic type /scan3
+ros2 run tf2_ros tf2_echo robot/base_footprint robot/odom
+```
+
+The exact prefixed frames must be taken from the messages and graph; do not
+substitute these example names blindly. Confirm that the Publisher offers
+Reliable + Transient Local if the tracked subscription is to match it. If the
+live type, QoS, value encoding, or frames differ, leave the feature OFF and
+update the review implementation/test contract first.
+
+## Acceptance status
+
+- Completed offline: class decoding, grid-origin geometry, bounded sampling,
+  base/camera projection, left/right signs, stale/invalid/TF suppression,
+  recovery, conservative cost/path explanation, coexistence with both Paths
+  and guidance, and MP4 pixel checks.
+- Not yet completed: connection to the NUC topic, live QoS/type/frame/value
+  verification, real C920 alignment, full Viewer CPU/RSS, and approved-run
+  visual comparison.
+
+No production YAML should enable this layer until those live checks pass.

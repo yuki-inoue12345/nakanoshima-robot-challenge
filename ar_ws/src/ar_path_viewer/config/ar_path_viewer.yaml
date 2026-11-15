@@ -15,6 +15,34 @@ ar_path_viewer:
     # Show only remaining distance along the fresh real /plan as PLAN LEFT.
     # This is not presented as distance to the next Waypoint.
     waypoint_distance_enabled: true
+    # Read-only Nav2 Local Costmap perception layer. Keep OFF until the NUC
+    # topic/QoS/frame contract and real-camera alignment are reviewed.
+    perception_costmap_enabled: false
+    perception_costmap_topic: /local_costmap/costmap
+    perception_costmap_timeout_sec: 1.5
+    perception_costmap_stamp_max_age_sec: 1.5
+    perception_costmap_future_tolerance_sec: 0.5
+    perception_costmap_tf_max_age_sec: 1.5
+    # OccupancyGrid semantics: -1 unknown, 0..100 navigation cost.
+    perception_costmap_high_cost_min: 60
+    perception_costmap_lethal_cost_min: 100
+    perception_costmap_max_points_per_class: 450
+    perception_costmap_plane_height_m: 0.02
+    perception_costmap_alpha: 0.42
+    perception_costmap_radius_px: 2
+    # Evidence labels compare a fresh costmap with the fresh real /plan.
+    # They remain OFF with the perception layer in normal operation.
+    perception_explanation_enabled: false
+    perception_explanation_forward_min_m: 0.40
+    perception_explanation_forward_max_m: 2.50
+    perception_explanation_center_half_width_m: 0.45
+    perception_explanation_side_outer_width_m: 1.20
+    perception_explanation_maximum_unknown_fraction: 0.25
+    perception_explanation_low_cost_max_fraction: 0.08
+    perception_explanation_blocked_lethal_fraction: 0.03
+    perception_explanation_side_cost_min_fraction: 0.08
+    perception_explanation_side_cost_difference: 0.04
+    perception_explanation_minimum_region_cells: 80
     localization_pose_timeout_sec: 3.0
     localization_stamp_max_age_sec: 3.0
     localization_future_tolerance_sec: 1.5

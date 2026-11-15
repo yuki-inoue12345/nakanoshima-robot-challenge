@@ -7,6 +7,8 @@ from typing import Iterable, Tuple
 import cv2
 import numpy as np
 
+from .costmap_overlay import ProjectedCostmap
+from .costmap_explanation import CostmapExplanation
 from .offscreen_guidance import OffscreenGuidance
 
 
@@ -23,6 +25,85 @@ VALID_STATES = {
     "NAVIGATION HOLD",
     "INVALID CONFIG",
 }
+
+
+# These are Nav2 cost classes, not a claim about camera-visible object type or
+# generic danger.  BGR colors are deliberately distinct from green real Path,
+# cyan reference Path, and orange direction guidance.
+COSTMAP_UNKNOWN_BGR = (155, 135, 105)
+COSTMAP_HIGH_BGR = (20, 190, 230)
+COSTMAP_LETHAL_BGR = (205, 45, 235)
+
+
+def draw_costmap_explanation(
+    frame: np.ndarray,
+    explanation: CostmapExplanation | None,
+) -> None:
+    """Draw one compact evidence label without covering the navigation card."""
+    if explanation is None:
+        return
+    accent = {
+        "low_cost": (80, 210, 170),
+        "side_cost": COSTMAP_HIGH_BGR,
+        "replanning": COSTMAP_HIGH_BGR,
+        "blocked": COSTMAP_LETHAL_BGR,
+    }.get(explanation.kind, (210, 210, 210))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    label = explanation.label[:38]
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label, font, 0.50, 1
+    )
+    width = min(370, max(230, text_width + 22))
+    left, top, height = 10, 50, 53
+    layer = frame.copy()
+    cv2.rectangle(
+        layer, (left, top), (left + width, top + height), (18, 18, 18), -1
+    )
+    cv2.addWeighted(layer, 0.86, frame, 0.14, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (left + 5, top + height), accent, -1)
+    cv2.putText(
+        frame, "COSTMAP + PLAN", (left + 14, top + 16), font,
+        0.34, (190, 190, 190), 1, cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame, label, (left + 14, top + 38 + baseline // 2), font,
+        0.50, accent, 1, cv2.LINE_AA,
+    )
+
+
+def draw_costmap_overlay(
+    image: np.ndarray,
+    projection: ProjectedCostmap | None,
+    *,
+    alpha: float = 0.42,
+    radius_px: int = 2,
+) -> np.ndarray:
+    """Draw sparse semantic markers below every navigation overlay layer."""
+    if projection is None or projection.visible_points == 0:
+        return image.copy()
+    if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("costmap overlay alpha must be in (0, 1]")
+    if radius_px < 1:
+        raise ValueError("costmap marker radius must be positive")
+    frame = image.copy()
+    layer = frame.copy()
+    for x, y in projection.unknown_pixels:
+        cv2.circle(
+            layer, (int(x), int(y)), radius_px,
+            COSTMAP_UNKNOWN_BGR, -1, cv2.LINE_AA,
+        )
+    for x, y in projection.high_cost_pixels:
+        cv2.circle(
+            layer, (int(x), int(y)), radius_px + 1,
+            COSTMAP_HIGH_BGR, -1, cv2.LINE_AA,
+        )
+    for x, y in projection.lethal_cost_pixels:
+        cv2.drawMarker(
+            layer, (int(x), int(y)), COSTMAP_LETHAL_BGR,
+            cv2.MARKER_DIAMOND, radius_px * 3 + 1, 2, cv2.LINE_AA,
+        )
+    cv2.addWeighted(layer, alpha, frame, 1.0 - alpha, 0.0, frame)
+    return frame
 
 
 def direction_arrow_segments(
@@ -272,12 +353,21 @@ def render_frame(
     navigation_status: str = "",
     debug_overlay: bool = True,
     path_alpha: float = 1.0,
+    costmap_projection: ProjectedCostmap | None = None,
+    costmap_alpha: float = 0.42,
+    costmap_radius_px: int = 2,
+    costmap_explanation: CostmapExplanation | None = None,
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
     if not math.isfinite(path_alpha) or not 0.0 < path_alpha <= 1.0:
         raise ValueError("path_alpha must be finite and in (0, 1]")
-    frame = image.copy()
+    frame = draw_costmap_overlay(
+        image,
+        costmap_projection,
+        alpha=costmap_alpha,
+        radius_px=costmap_radius_px,
+    )
     segment_list = list(segments)
     reference_list = list(reference_segments)
     reference_dashes = dashed_line_segments(
@@ -322,6 +412,7 @@ def render_frame(
         "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
     ):
         _draw_navigation_status(frame, navigation_status)
+    draw_costmap_explanation(frame, costmap_explanation)
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
     detail_lines = (
         textwrap.wrap(detail, width=68)[:2]
@@ -367,6 +458,25 @@ def render_frame(
             font,
             scale,
             reference_color_bgr,
+            label_thickness,
+            cv2.LINE_AA,
+        )
+        right_edge -= label_width + 18
+    if costmap_projection is not None:
+        label = "LOCAL COSTMAP"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.43
+        label_thickness = 1
+        (label_width, _), _ = cv2.getTextSize(
+            label, font, scale, label_thickness
+        )
+        cv2.putText(
+            frame,
+            label,
+            (max(18, right_edge - label_width), 34),
+            font,
+            scale,
+            COSTMAP_HIGH_BGR,
             label_thickness,
             cv2.LINE_AA,
         )

@@ -13,10 +13,12 @@ import numpy as np
 import pytest
 
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
 from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollowerState
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
+from ar_path_viewer.costmap_explanation import CostmapExplanationSettings
+from ar_path_viewer.costmap_overlay import CostmapOverlaySettings, CostmapStore
 from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.image_source import SimulationSource
 from ar_path_viewer.localization_monitor import LocalizationMonitor, LocalizationThresholds
@@ -216,6 +218,8 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._writer = writer if writer is not None else MemoryWriter()
     fake._log_gui = None
     fake._reference_enabled = True
+    fake._perception_costmap_enabled = False
+    fake._perception_explanation_enabled = False
     fake._waypoint_distance_enabled = True
     fake._waypoint_progress_gate = WaypointProgressGate(
         timeout_sec=2.5, expected_frame="map"
@@ -248,6 +252,39 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
         clock=clock,
     )
     return fake
+
+
+def _costmap(stamp: float) -> OccupancyGrid:
+    message = OccupancyGrid()
+    message.header.frame_id = "map"
+    _set_stamp(message.header.stamp, stamp)
+    message.info.width = 30
+    message.info.height = 20
+    message.info.resolution = 0.10
+    message.info.origin.position.x = 2.5
+    message.info.origin.position.y = -1.0
+    message.info.origin.orientation.w = 1.0
+    data = np.zeros(message.info.width * message.info.height, dtype=np.int8)
+    # Three separate Nav2 semantics near the projected route.
+    data[8 * message.info.width + 8:8 * message.info.width + 14] = 70
+    data[10 * message.info.width + 11:10 * message.info.width + 17] = 100
+    data[12 * message.info.width + 14:12 * message.info.width + 20] = -1
+    message.data = data.tolist()
+    return message
+
+
+def _explanation_costmap(stamp: float) -> OccupancyGrid:
+    message = OccupancyGrid()
+    message.header.frame_id = "map"
+    _set_stamp(message.header.stamp, stamp)
+    message.info.width = 60
+    message.info.height = 60
+    message.info.resolution = 0.05
+    message.info.origin.position.x = 0.0
+    message.info.origin.position.y = -1.5
+    message.info.origin.orientation.w = 1.0
+    message.data = [0] * (message.info.width * message.info.height)
+    return message
 
 
 def _send_good_localization(fake, clock: MutableClock) -> None:
@@ -520,6 +557,187 @@ def test_all_safety_stops_hide_reference_and_fresh_state_recovers():
         for _, message in fake.logger.records
     )
     restore(route=ROUTE_B, index=2, generation=5)
+
+
+def test_local_costmap_paths_guidance_and_recording_are_independent():
+    """Exercise the opt-in perception layer through the full Viewer tick."""
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    fake._perception_costmap_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_alpha = 0.55
+    fake._costmap_radius = 2
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    _send_authorized_reference(fake, clock, REFERENCE_POINTS)
+    viewer_node.ArPathViewerNode._on_path(
+        fake,
+        _path(
+            tuple(
+                (float(x), 0.32 * float(x), 0.0)
+                for x in np.linspace(0.2, 4.0, 50)
+            ),
+            clock.now,
+        ),
+    )
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+
+    visible = _tick_frame(fake)
+    magenta = (
+        (visible[:, :, 0] > 120)
+        & (visible[:, :, 1] < 130)
+        & (visible[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(magenta) > 10
+    assert _cyan_pixels(visible) > 100
+    assert _green_pixels(visible) > 100
+    assert any(
+        "perception_costmap_projection" in message and "reason=visible" in message
+        for _, message in fake.logger.records
+    )
+
+    # Fresh paths remain, while stale perception data disappears fail-closed.
+    clock.now += 2.0
+    stale = _tick_frame(fake)
+    stale_magenta = (
+        (stale[:, :, 0] > 120)
+        & (stale[:, :, 1] < 130)
+        & (stale[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(stale_magenta) == 0
+    assert _cyan_pixels(stale) > 100
+    assert _green_pixels(stale) > 100
+
+    # A new costmap recovers, but an unavailable transform suppresses only it.
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+    fake._costmap_arrays_in_base = (
+        lambda _snapshot: (_ for _ in ()).throw(
+            ValueError("synthetic costmap TF unavailable")
+        )
+    )
+    no_tf = _tick_frame(fake)
+    no_tf_magenta = (
+        (no_tf[:, :, 0] > 120)
+        & (no_tf[:, :, 1] < 130)
+        & (no_tf[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(no_tf_magenta) == 0
+    assert _cyan_pixels(no_tf) > 100
+    assert _green_pixels(no_tf) > 100
+
+
+def test_fresh_costmap_and_authorized_real_path_draw_explanation_card():
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    fake._perception_costmap_enabled = True
+    fake._perception_explanation_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_explanation_settings = CostmapExplanationSettings()
+    fake._costmap_alpha = 0.42
+    fake._costmap_radius = 2
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    _send_authorized_reference(fake, clock, REFERENCE_POINTS)
+    straight = tuple((float(x), 0.0, 0.0) for x in np.linspace(0.2, 4.0, 50))
+    viewer_node.ArPathViewerNode._on_path(fake, _path(straight, clock.now))
+    viewer_node.ArPathViewerNode._on_local_costmap(
+        fake, _explanation_costmap(clock.now)
+    )
+
+    frame = _tick_frame(fake)
+
+    assert np.count_nonzero(frame[50:104, 10:380]) > 500
+    assert _green_pixels(frame) > 100
+    assert _cyan_pixels(frame) > 100
+    assert any(
+        "perception_path_explanation" in message
+        and "low_cost_front_with_straight_path" in message
+        for _, message in fake.logger.records
+    )
+
+    clock.now += 2.0
+    stale = _tick_frame(fake)
+    assert not np.array_equal(frame[50:104, 10:380], stale[50:104, 10:380])
+    assert any(
+        "perception_path_explanation" in message
+        and "visible=false" in message
+        for _, message in fake.logger.records
+    )
+
+
+def test_recorded_mp4_contains_only_fresh_local_costmap_markers(tmp_path):
+    output = tmp_path / "perception_costmap_offline_integration.mp4"
+    writer = cv2.VideoWriter(
+        str(output), cv2.VideoWriter_fourcc(*"mp4v"), 20.0, (640, 480)
+    )
+    assert writer.isOpened()
+    clock = MutableClock()
+    fake = _make_viewer(clock, writer=writer)
+    fake._perception_costmap_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_alpha = 0.60
+    fake._costmap_radius = 3
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    viewer_node.ArPathViewerNode._on_path(fake, _path(PLAN_POINTS, clock.now))
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+
+    for _ in range(4):
+        viewer_node.ArPathViewerNode._tick(fake)
+    clock.now += 2.0
+    for _ in range(4):
+        viewer_node.ArPathViewerNode._tick(fake)
+    writer.release()
+
+    capture = cv2.VideoCapture(str(output))
+    decoded = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    capture.release()
+
+    def largest_marker_component(frame):
+        mask = (
+            (frame[:, :, 0] > 105)
+            & (frame[:, :, 1] < 140)
+            & (frame[:, :, 2] > 125)
+        )
+        count, _, stats, _ = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8), 8
+        )
+        if count <= 1:
+            return 0
+        return int(stats[1:, cv2.CC_STAT_AREA].max())
+
+    assert output.stat().st_size > 0
+    assert len(decoded) == 8
+    counts = [largest_marker_component(frame) for frame in decoded]
+    assert min(counts[:4]) > 100
+    assert max(counts[4:]) <= 10
+    assert min(_green_pixels(frame) for frame in decoded) > 50
 
 
 def test_recorded_mp4_contains_cyan_dashes_and_removes_them_when_invalid(tmp_path):

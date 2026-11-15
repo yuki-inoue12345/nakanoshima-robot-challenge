@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import Path as PathMessage
+from nav_msgs.msg import OccupancyGrid, Path as PathMessage
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -21,6 +21,15 @@ from robotbase_waypoint_interfaces.msg import (
 from tf2_ros import Buffer, TransformListener
 
 from .camera_model import CameraUndistorter
+from .costmap_overlay import (
+    CostmapOverlaySettings,
+    CostmapStore,
+    project_costmap_points,
+)
+from .costmap_explanation import (
+    CostmapExplanationSettings,
+    explain_costmap_and_path,
+)
 from .diagnostics import DiagnosticReporter
 from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
 from .image_source import SimulationSource, make_image_source
@@ -66,6 +75,31 @@ class ArPathViewerNode(Node):
             "reference_path_timeout_sec": 6.5,
             "reference_follower_timeout_sec": 2.5,
             "waypoint_distance_enabled": True,
+            # Read-only perception overlay. Production remains opt-in until
+            # the NUC topic contract and real C920 alignment are verified.
+            "perception_costmap_enabled": False,
+            "perception_costmap_topic": "/local_costmap/costmap",
+            "perception_costmap_timeout_sec": 1.5,
+            "perception_costmap_stamp_max_age_sec": 1.5,
+            "perception_costmap_future_tolerance_sec": 0.5,
+            "perception_costmap_tf_max_age_sec": 1.5,
+            "perception_costmap_high_cost_min": 60,
+            "perception_costmap_lethal_cost_min": 100,
+            "perception_costmap_max_points_per_class": 450,
+            "perception_costmap_plane_height_m": 0.02,
+            "perception_costmap_alpha": 0.42,
+            "perception_costmap_radius_px": 2,
+            "perception_explanation_enabled": False,
+            "perception_explanation_forward_min_m": 0.40,
+            "perception_explanation_forward_max_m": 2.50,
+            "perception_explanation_center_half_width_m": 0.45,
+            "perception_explanation_side_outer_width_m": 1.20,
+            "perception_explanation_maximum_unknown_fraction": 0.25,
+            "perception_explanation_low_cost_max_fraction": 0.08,
+            "perception_explanation_blocked_lethal_fraction": 0.03,
+            "perception_explanation_side_cost_min_fraction": 0.08,
+            "perception_explanation_side_cost_difference": 0.04,
+            "perception_explanation_minimum_region_cells": 80,
             "localization_pose_timeout_sec": 3.0,
             "localization_stamp_max_age_sec": 3.0,
             "localization_future_tolerance_sec": 1.5,
@@ -242,6 +276,83 @@ class ArPathViewerNode(Node):
             self._path_alpha = self._float("path_overlay_alpha")
             if not 0.0 < self._path_alpha <= 1.0:
                 raise ValueError("path_overlay_alpha must be in (0, 1]")
+            self._perception_costmap_enabled = self._bool(
+                "perception_costmap_enabled"
+            )
+            self._costmap_settings = CostmapOverlaySettings(
+                timeout_sec=self._float("perception_costmap_timeout_sec"),
+                stamp_max_age_sec=self._float(
+                    "perception_costmap_stamp_max_age_sec"
+                ),
+                future_tolerance_sec=self._float(
+                    "perception_costmap_future_tolerance_sec"
+                ),
+                high_cost_min=self._int("perception_costmap_high_cost_min"),
+                lethal_cost_min=self._int(
+                    "perception_costmap_lethal_cost_min"
+                ),
+                max_points_per_class=self._int(
+                    "perception_costmap_max_points_per_class"
+                ),
+                plane_height_m=self._float(
+                    "perception_costmap_plane_height_m"
+                ),
+            )
+            self._costmap_settings.validate()
+            self._costmap_tf_max_age = self._float(
+                "perception_costmap_tf_max_age_sec"
+            )
+            self._costmap_alpha = self._float("perception_costmap_alpha")
+            self._costmap_radius = self._int("perception_costmap_radius_px")
+            if (
+                not math.isfinite(self._costmap_tf_max_age)
+                or self._costmap_tf_max_age <= 0.0
+            ):
+                raise ValueError(
+                    "perception_costmap_tf_max_age_sec must be positive"
+                )
+            if (
+                not math.isfinite(self._costmap_alpha)
+                or not 0.0 < self._costmap_alpha <= 1.0
+                or self._costmap_radius < 1
+            ):
+                raise ValueError("invalid costmap overlay alpha or radius")
+            self._perception_explanation_enabled = self._bool(
+                "perception_explanation_enabled"
+            )
+            self._costmap_explanation_settings = CostmapExplanationSettings(
+                forward_min_m=self._float(
+                    "perception_explanation_forward_min_m"
+                ),
+                forward_max_m=self._float(
+                    "perception_explanation_forward_max_m"
+                ),
+                center_half_width_m=self._float(
+                    "perception_explanation_center_half_width_m"
+                ),
+                side_outer_width_m=self._float(
+                    "perception_explanation_side_outer_width_m"
+                ),
+                maximum_unknown_fraction=self._float(
+                    "perception_explanation_maximum_unknown_fraction"
+                ),
+                low_cost_max_fraction=self._float(
+                    "perception_explanation_low_cost_max_fraction"
+                ),
+                blocked_lethal_fraction=self._float(
+                    "perception_explanation_blocked_lethal_fraction"
+                ),
+                side_cost_min_fraction=self._float(
+                    "perception_explanation_side_cost_min_fraction"
+                ),
+                side_cost_difference=self._float(
+                    "perception_explanation_side_cost_difference"
+                ),
+                minimum_region_cells=self._int(
+                    "perception_explanation_minimum_region_cells"
+                ),
+            )
+            self._costmap_explanation_settings.validate()
         except ValueError as exc:
             self._config_error = str(exc)
             self._log_error(f"Invalid configuration: {exc}")
@@ -259,6 +370,15 @@ class ArPathViewerNode(Node):
             self._guidance_stability = GuidanceStabilityGate(0.0)
             self._path_transition_gate = PathTransitionGate(0.0)
             self._path_alpha = 1.0
+            self._perception_costmap_enabled = False
+            self._costmap_settings = CostmapOverlaySettings()
+            self._costmap_tf_max_age = 1.5
+            self._costmap_alpha = 0.42
+            self._costmap_radius = 2
+            self._perception_explanation_enabled = False
+            self._costmap_explanation_settings = CostmapExplanationSettings()
+
+        self._costmap_store = CostmapStore(self._costmap_settings)
 
         try:
             self._image_source = make_image_source(
@@ -431,6 +551,20 @@ class ArPathViewerNode(Node):
         self._subscription = self.create_subscription(
             PathMessage, self._str("path_topic"), self._on_path, qos
         )
+        self._costmap_subscription = None
+        if self._perception_costmap_enabled:
+            costmap_qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._costmap_subscription = self.create_subscription(
+                OccupancyGrid,
+                self._str("perception_costmap_topic"),
+                self._on_local_costmap,
+                costmap_qos,
+            )
         self._reference_subscription = None
         if self._reference_enabled:
             self._reference_subscription = self.create_subscription(
@@ -495,6 +629,25 @@ class ArPathViewerNode(Node):
             f"{self._path_transition_gate.max_heading_change_deg:.1f} "
             f"path_overlay_alpha={self._path_alpha:.2f} "
             "old_path_held=false"
+        )
+        self._log_info(
+            "perception_costmap_configuration "
+            f"enabled={self._perception_costmap_enabled} "
+            f"topic={self._str('perception_costmap_topic')!r} "
+            "message_type='nav_msgs/msg/OccupancyGrid' "
+            f"timeout_sec={self._costmap_settings.timeout_sec:.3f} "
+            f"high_cost_min={self._costmap_settings.high_cost_min} "
+            f"lethal_cost_min={self._costmap_settings.lethal_cost_min} "
+            f"max_points_per_class="
+            f"{self._costmap_settings.max_points_per_class} "
+            "semantic_labels='unknown,high_cost,lethal_cost' "
+            "does_not_claim_camera_object_or_danger=true"
+        )
+        self._log_info(
+            "perception_explanation_configuration "
+            f"enabled={self._perception_explanation_enabled} "
+            "inputs='local_costmap,real_plan' "
+            "causal_planner_claim=false danger_label=false"
         )
 
     def _str(self, name: str) -> str:
@@ -596,6 +749,20 @@ class ArPathViewerNode(Node):
             status.state, status.detail, status.receive_count
         )
 
+    def _on_local_costmap(self, message: OccupancyGrid) -> None:
+        accepted = self._costmap_store.update(message, self._ros_now_sec())
+        snapshot = self._costmap_store.snapshot
+        detail = self._costmap_store.reason
+        if accepted and snapshot is not None:
+            detail = (
+                f"frame={snapshot.frame_id!r} "
+                f"unknown_cells={snapshot.unknown_cells} "
+                f"high_cost_cells={snapshot.high_cost_cells} "
+                f"lethal_cost_cells={snapshot.lethal_cost_cells} "
+                f"sampled_cells={snapshot.sampled_cells}"
+            )
+        self._diagnostics.costmap_update(accepted, detail)
+
     def _on_reference_follower_state(
         self, message: WaypointFollowerState
     ) -> None:
@@ -646,6 +813,41 @@ class ArPathViewerNode(Node):
             self._base_frame, frame_id, Time(), timeout=Duration(seconds=0.05)
         )
         return transform_message_points(points, transform)
+
+    def _costmap_arrays_in_base(
+        self, snapshot
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Transform drawing and evidence cells with one timestamped TF."""
+        if snapshot.frame_id == self._base_frame:
+            return (
+                snapshot.points.copy(),
+                snapshot.analysis_points.copy(),
+            )
+        query_time = Time(nanoseconds=int(round(snapshot.stamp_sec * 1e9)))
+        transform = self._tf_buffer.lookup_transform(
+            self._base_frame,
+            snapshot.frame_id,
+            query_time,
+            timeout=Duration(seconds=0.05),
+        )
+        stamp = transform.header.stamp
+        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        age = self._ros_now_sec() - stamp_sec
+        if stamp_sec <= 0.0 or age > self._costmap_tf_max_age:
+            raise ValueError(
+                f"costmap TF stale age={age:.3f}s "
+                f"limit={self._costmap_tf_max_age:.3f}s"
+            )
+        if age < -self._costmap_settings.future_tolerance_sec:
+            raise ValueError(
+                f"costmap TF future offset={-age:.3f}s"
+            )
+        combined = np.concatenate(
+            (snapshot.points, snapshot.analysis_points), axis=0
+        )
+        transformed = transform_message_points(combined, transform)
+        split = snapshot.points.shape[0]
+        return transformed[:split], transformed[split:]
 
     def _check_localization_tf(
         self,
@@ -759,11 +961,30 @@ class ArPathViewerNode(Node):
                 reference_state, reference_snapshot, reference_reason = (
                     reference_gate.state(self._ros_now_sec())
                 )
+            costmap_enabled = bool(
+                getattr(self, "_perception_costmap_enabled", False)
+            )
+            costmap_state = "DISABLED"
+            costmap_snapshot = None
+            costmap_reason = "disabled_by_configuration"
+            costmap_projection = None
+            costmap_analysis_points_base = None
+            costmap_explanation = None
+            costmap_explanation_reason = "disabled_by_configuration"
+            path_points_base = None
+            if costmap_enabled:
+                costmap_state, costmap_snapshot, costmap_reason = (
+                    self._costmap_store.state(self._ros_now_sec())
+                )
 
             localization = None
             tf_available = False
             tf_detail = ""
-            if state == "ACTIVE" or reference_state == "ACTIVE":
+            if (
+                state == "ACTIVE"
+                or reference_state == "ACTIVE"
+                or costmap_state == "ACTIVE"
+            ):
                 tf_available, tf_detail, tf_pose = self._check_localization_tf()
                 localization = self._localization.status(
                     freshness_confirmed=tf_available,
@@ -798,6 +1019,7 @@ class ArPathViewerNode(Node):
                         projection_stats = evaluation.stats
                         guidance = evaluation.guidance
                         progress = evaluation.progress
+                        path_points_base = evaluation.points_base
                         transition = None
                         transition_gate = getattr(
                             self, "_path_transition_gate", None
@@ -982,6 +1204,95 @@ class ArPathViewerNode(Node):
                             reference_reason,
                         )
 
+            if costmap_state == "ACTIVE" and costmap_snapshot is not None:
+                if localization is None or not localization.stable:
+                    costmap_reason = (
+                        "localization_not_stable"
+                        if localization is None
+                        else localization.state
+                    )
+                elif not tf_available:
+                    costmap_reason = f"localization_tf_unavailable {tf_detail}"
+                else:
+                    try:
+                        (
+                            points_in_base,
+                            costmap_analysis_points_base,
+                        ) = self._costmap_arrays_in_base(
+                            costmap_snapshot
+                        )
+                        costmap_projection = project_costmap_points(
+                            points_in_base,
+                            costmap_snapshot.classes,
+                            self._mount,
+                            self._intrinsics,
+                            self._near,
+                        )
+                    except Exception as exc:  # tf2 exceptions vary by ROS distro
+                        costmap_reason = (
+                            f"costmap_tf_or_projection_unavailable "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        costmap_reason = (
+                            "visible"
+                            if costmap_projection.visible_points > 0
+                            else "out_of_view"
+                        )
+                visible = (
+                    0
+                    if costmap_projection is None
+                    else costmap_projection.visible_points
+                )
+                self._diagnostics.costmap_projection(
+                    costmap_projection is not None,
+                    costmap_snapshot.frame_id,
+                    visible,
+                    costmap_snapshot.sampled_cells,
+                    costmap_reason,
+                )
+
+            explanation_enabled = bool(
+                getattr(self, "_perception_explanation_enabled", False)
+            )
+            if explanation_enabled:
+                if not costmap_enabled:
+                    costmap_explanation_reason = "costmap_overlay_disabled"
+                elif costmap_snapshot is None:
+                    costmap_explanation_reason = costmap_reason
+                elif costmap_projection is None:
+                    costmap_explanation_reason = costmap_reason
+                elif costmap_analysis_points_base is None:
+                    costmap_explanation_reason = "costmap_tf_unavailable"
+                elif path_points_base is None:
+                    costmap_explanation_reason = "real_path_unavailable"
+                elif localization is None or not localization.stable:
+                    costmap_explanation_reason = "localization_not_stable"
+                else:
+                    decision = explain_costmap_and_path(
+                        costmap_analysis_points_base,
+                        costmap_snapshot.analysis_costs,
+                        path_direction=(
+                            None if guidance is None else guidance.direction
+                        ),
+                        viewer_state=state,
+                        high_cost_min=self._costmap_settings.high_cost_min,
+                        lethal_cost_min=self._costmap_settings.lethal_cost_min,
+                        settings=self._costmap_explanation_settings,
+                    )
+                    costmap_explanation = decision.explanation
+                    costmap_explanation_reason = decision.reason
+                explanation_detail = (
+                    ""
+                    if costmap_explanation is None
+                    else costmap_explanation.detail
+                )
+                self._diagnostics.costmap_explanation(
+                    costmap_explanation is not None,
+                    costmap_explanation_reason,
+                    explanation_detail,
+                )
+
             if reference_enabled:
                 metadata = (
                     None if reference_gate is None else reference_gate.metadata
@@ -1008,6 +1319,25 @@ class ArPathViewerNode(Node):
                         reference_reason,
                     )
                 detail = f"{detail}; {reference_summary}" if detail else reference_summary
+            if costmap_enabled:
+                costmap_summary = (
+                    f"costmap={costmap_reason} sampled="
+                    f"{0 if costmap_snapshot is None else costmap_snapshot.sampled_cells} "
+                    f"visible={0 if costmap_projection is None else costmap_projection.visible_points}"
+                )
+                detail = (
+                    f"{detail}; {costmap_summary}"
+                    if detail else costmap_summary
+                )
+            if explanation_enabled and self._debug_overlay:
+                explanation_summary = (
+                    "explanation="
+                    f"{costmap_explanation_reason}"
+                )
+                detail = (
+                    f"{detail}; {explanation_summary}"
+                    if detail else explanation_summary
+                )
             frame = render_frame(
                 image,
                 segments,
@@ -1034,6 +1364,10 @@ class ArPathViewerNode(Node):
                 navigation_status=navigation_status,
                 debug_overlay=self._debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
+                costmap_projection=costmap_projection,
+                costmap_alpha=getattr(self, "_costmap_alpha", 0.42),
+                costmap_radius_px=getattr(self, "_costmap_radius", 2),
+                costmap_explanation=costmap_explanation,
             )
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:

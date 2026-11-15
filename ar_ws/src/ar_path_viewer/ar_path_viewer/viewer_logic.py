@@ -30,6 +30,7 @@ class PathProjectionState:
     guidance: OffscreenGuidance | None
     guidance_detail: str = ""
     progress: PathProgress | None = None
+    points_base: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,7 @@ def evaluate_path_state(
     if segments:
         return PathProjectionState(
             "ACTIVE", segments, stats, decision.guidance,
-            decision.detail(), progress,
+            decision.detail(), progress, points_base,
         )
     return PathProjectionState(
         "PATH OUT OF VIEW",
@@ -123,6 +124,7 @@ def evaluate_path_state(
         decision.guidance,
         decision.detail(),
         progress,
+        points_base,
     )
 
 

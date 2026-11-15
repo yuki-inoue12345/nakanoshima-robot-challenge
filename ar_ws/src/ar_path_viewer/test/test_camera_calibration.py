@@ -387,6 +387,29 @@ def test_post_remount_review_overlay_is_scoped_and_not_production_enabling():
         assert forbidden not in params
 
 
+def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
+    config_directory = Path(__file__).parents[1] / "config"
+    for filename in ("ar_path_viewer.yaml", "ar_path_viewer_c920.yaml"):
+        document = yaml.safe_load(
+            (config_directory / filename).read_text(encoding="utf-8")
+        )
+        params = document["ar_path_viewer"]["ros__parameters"]
+        assert params["perception_costmap_enabled"] is False
+        assert params["perception_explanation_enabled"] is False
+        assert params["perception_costmap_topic"] == "/local_costmap/costmap"
+
+    review = yaml.safe_load(
+        (config_directory / "perception_costmap_review_overlay.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    params = review["ar_path_viewer"]["ros__parameters"]
+    assert params == {
+        "perception_costmap_enabled": True,
+        "perception_explanation_enabled": True,
+    }
+
+
 def test_coplanar_survey_points_are_rejected_as_ambiguous():
     points = [
         {

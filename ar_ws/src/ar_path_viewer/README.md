@@ -359,10 +359,17 @@ ros2 run ar_path_viewer ar_path_viewer --ros-args \
 
 診断ログの`reference_path_state`には有効性、route/index/generation、点数、全長を、`reference_path_projection`には画角内実長、描画線分数、非表示理由を残します。録画はGUI操作バーを含まない640×480フレームへ、実際に描いた緑実線・水色破線・橙案内をそのまま保存します。
 
-ロボットが実際に認識しているcostmap/LiDAR情報を将来AR表示するための、安全な
-読み取り専用設計は[docs/robot_perception_overlay_design.md](docs/robot_perception_overlay_design.md)
-に分離しています。現段階では実装・既定有効化しておらず、「高コスト」を未検証の
-まま「危険」と表示しません。
+ロボットのナビゲーション認識を表示する任意レイヤーは
+[docs/robot_perception_overlay_design.md](docs/robot_perception_overlay_design.md)
+に分離しています。最初の実装は`/local_costmap/costmap`の
+`nav_msgs/OccupancyGrid`を購読し、未知・高コスト・lethal-costセルを意味を混同せず
+疎な半透明マーカーとして経路の下へ投影します。無効・古いCostmapやTFではこの
+レイヤーだけを消します。通常/C920設定は`perception_costmap_enabled: false`のまま
+で、実機の型・QoS・frame・値域と静止投影を確認するまでは本番有効化しません。
+レビュー用overlayでは、同じ最新Costmapと認可済み実`/plan`の空間関係だけを
+短文にする`perception_explanation_enabled`も有効にできます。Planner内部の因果や
+物体種別を断定せず、未知領域が多い、TF/AMCL/Pathが古い、左右差が曖昧な場合は
+`perception_path_explanation visible=false`としてカードを表示しません。
 
 ## ビルドとテスト
 

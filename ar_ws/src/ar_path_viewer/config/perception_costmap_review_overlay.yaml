@@ -1,0 +1,5 @@
+ar_path_viewer:
+  ros__parameters:
+    # Review-only opt-in. The normal and C920 base profiles remain false.
+    perception_costmap_enabled: true
+    perception_explanation_enabled: true

@@ -24,6 +24,7 @@ class DiagnosticReporter:
         self.record_sink = record_sink
         self.path_receive_count = 0
         self.reference_receive_count = 0
+        self.costmap_receive_count = 0
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -156,6 +157,51 @@ class DiagnosticReporter:
             "reference_path_projection "
             f"valid={str(valid).lower()} frame_id={frame_id!r} "
             f"reason={reason} {detail}",
+        )
+
+    def costmap_update(self, valid: bool, detail: str) -> None:
+        """Record Local Costmap reception independently from path state."""
+        self.costmap_receive_count += 1
+        level = "info" if valid else "warning"
+        self._emit(
+            level,
+            f"costmap_update:{valid}:{detail}",
+            "perception_costmap_state "
+            f"valid={str(valid).lower()} "
+            f"receive_count={self.costmap_receive_count} detail={detail}",
+            force=self.costmap_receive_count == 1,
+        )
+
+    def costmap_projection(
+        self,
+        valid: bool,
+        frame_id: str,
+        visible_points: int,
+        sampled_points: int,
+        reason: str,
+    ) -> None:
+        """Explain why the perception layer is visible or suppressed."""
+        level = "info" if valid and visible_points > 0 else "warning"
+        self._emit(
+            level,
+            f"costmap_projection:{valid}:{reason}",
+            "perception_costmap_projection "
+            f"valid={str(valid).lower()} frame_id={frame_id!r} "
+            f"visible_points={int(visible_points)} "
+            f"sampled_points={int(sampled_points)} reason={reason}",
+        )
+
+    def costmap_explanation(
+        self, visible: bool, reason: str, detail: str = ""
+    ) -> None:
+        """Record the evidence gate without claiming planner causality."""
+        suffix = f" {detail}" if detail else ""
+        level = "info" if visible else "warning"
+        self._emit(
+            level,
+            f"costmap_explanation:{visible}:{reason}",
+            "perception_path_explanation "
+            f"visible={str(visible).lower()} reason={reason}{suffix}",
         )
 
     def camera_configuration(self, detail: str) -> None:
