@@ -109,6 +109,16 @@ def test_all_required_states_render_and_only_active_draws_route():
             assert np.array_equal(midpoint, (0, 0, 0))
 
 
+
+def test_frame_sync_wait_is_supported_and_hides_route():
+    assert "FRAME SYNC WAIT" in VALID_STATES
+    image = np.zeros((100, 160, 3), np.uint8)
+    segment = [((20, 80), (140, 50))]
+    frame = render_frame(image, segment, "FRAME SYNC WAIT", thickness=3)
+    assert frame.shape == image.shape
+    assert np.array_equal(frame[65, 80], (0, 0, 0))
+
+
 def test_direction_arrow_follows_projected_path_direction():
     forward = direction_arrow_segments([((10, 50), (130, 50))])
     reverse = direction_arrow_segments([((130, 50), (10, 50))])
