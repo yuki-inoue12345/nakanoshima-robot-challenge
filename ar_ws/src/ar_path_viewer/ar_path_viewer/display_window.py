@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+import threading
 import time
 from typing import Any
 
@@ -251,6 +252,7 @@ class DisplayWindow:
         if normal_width < 1 or normal_height < 1:
             raise ValueError("display dimensions must be positive")
         self.cv = cv_module
+        self._owner_thread_id = threading.get_ident()
         self.normal_size = (int(normal_width), int(normal_height))
         self.fullscreen = False
         self.closed = False
@@ -275,6 +277,10 @@ class DisplayWindow:
         if set_mouse_callback is not None:
             set_mouse_callback(WINDOW_NAME, self._on_mouse)
 
+    def _require_owner_thread(self) -> None:
+        if threading.get_ident() != self._owner_thread_id:
+            raise RuntimeError("OpenCV HighGUI must run on its owner thread")
+
     def _on_mouse(self, event, x, y, flags=None, param=None) -> None:
         if event != getattr(self.cv, "EVENT_LBUTTONUP", 4):
             return
@@ -284,11 +290,13 @@ class DisplayWindow:
                 return
 
     def consume_actions(self) -> list[str]:
+        self._require_owner_thread()
         actions = self._pending_actions
         self._pending_actions = []
         return actions
 
     def set_status(self, text: str, success: bool, duration_sec: float = 3.0) -> None:
+        self._require_owner_thread()
         self._status_text = str(text)
         self._status_success = bool(success)
         self._status_until = self._clock() + max(0.1, float(duration_sec))
@@ -306,6 +314,7 @@ class DisplayWindow:
         return int(width), int(height)
 
     def toggle_fullscreen(self) -> bool:
+        self._require_owner_thread()
         target = not self.fullscreen
         try:
             value = (
@@ -328,6 +337,7 @@ class DisplayWindow:
         return True
 
     def show_and_poll(self, frame: np.ndarray) -> int:
+        self._require_owner_thread()
         if self._normal_resize_attempts > 0:
             try:
                 self.cv.resizeWindow(WINDOW_NAME, *self.normal_size)
@@ -356,6 +366,7 @@ class DisplayWindow:
         return key_code
 
     def close(self) -> None:
+        self._require_owner_thread()
         if self.closed:
             return
         self.closed = True

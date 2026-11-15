@@ -1,3 +1,5 @@
+import threading
+
 import cv2
 import numpy as np
 import pytest
@@ -487,6 +489,37 @@ def test_resizable_window_f11_toggle_and_q_passthrough():
     assert gui.resized[0][1:] == (960, 720)
     assert gui.resized[-1][1:] == (960, 720)
     window.close()
+    window.close()
+    assert len(gui.destroyed) == 1
+
+
+def test_highgui_operations_reject_a_different_thread():
+    gui = FakeHighGui((-1,))
+    window = DisplayWindow(960, 720, cv_module=gui)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    failures = []
+
+    def use_from_worker():
+        for operation in (
+            lambda: window.show_and_poll(frame),
+            window.consume_actions,
+            lambda: window.set_status("worker", True),
+            window.toggle_fullscreen,
+            window.close,
+        ):
+            try:
+                operation()
+            except RuntimeError as exc:
+                failures.append(str(exc))
+
+    worker = threading.Thread(target=use_from_worker)
+    worker.start()
+    worker.join()
+
+    assert len(failures) == 5
+    assert all("owner thread" in message for message in failures)
+    assert gui.shown == []
+    assert gui.destroyed == []
     window.close()
     assert len(gui.destroyed) == 1
 

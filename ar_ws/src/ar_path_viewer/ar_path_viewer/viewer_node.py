@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import threading
 import time
 import traceback
 
@@ -49,6 +50,7 @@ from .costmap_explanation import (
 )
 from .costmap_minimap import CostmapMinimap
 from .diagnostics import DiagnosticReporter
+from .display_dispatch import LatestDisplayFrame
 from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
 from .image_source import SimulationSource, make_image_source
 from .guidance_stability import GuidanceStabilityGate
@@ -82,6 +84,9 @@ class ArPathViewerNode(Node):
         super().__init__("ar_path_viewer")
         self._shutdown_requested = False
         self._resources_released = False
+        self._main_thread_id = threading.get_ident()
+        self._ui_state_lock = threading.Lock()
+        self._display_frames = LatestDisplayFrame()
         defaults = {
             "path_topic": "/plan",
             "amcl_pose_topic": "/amcl_pose",
@@ -689,6 +694,7 @@ class ArPathViewerNode(Node):
         )
         self._thickness = self._int("line_thickness")
         self._display = self._bool("display")
+        self._display_period_sec = 1.0 / max(1.0, self._float("fps"))
         self._debug_overlay = self._bool("debug_overlay_default")
         self._guidance_require_follower = self._bool(
             "guidance_require_follower_state"
@@ -761,7 +767,7 @@ class ArPathViewerNode(Node):
             self._session_paths.video
         )
         self._writer = self._make_writer(output_video, self._float("fps"))
-        self._timer = self.create_timer(1.0 / max(1.0, self._float("fps")), self._tick)
+        self._timer = self.create_timer(self._display_period_sec, self._tick)
         self._log_info("AR Path Viewer started in read-only/subscriber-only mode")
         self._log_info(
             "reference_path_configuration "
@@ -874,6 +880,7 @@ class ArPathViewerNode(Node):
         return PacedVideoWriter(writer, fps)
 
     def _handle_display_action(self, action: str) -> None:
+        ArPathViewerNode._require_main_thread(self)
         if action == ACTION_VIEW_LOG:
             success, message = self._log_gui.show(
                 self._session_log.text(), refresh_source=self._session_log.text
@@ -895,6 +902,149 @@ class ArPathViewerNode(Node):
             self._log_warning(f"log_ui action={action} result=failure detail={message}")
         if self._display_window is not None:
             self._display_window.set_status(toast, success)
+
+    def _require_main_thread(self) -> None:
+        owner = getattr(self, "_main_thread_id", threading.get_ident())
+        if threading.get_ident() != owner:
+            raise RuntimeError("Viewer GUI operation must run on the main thread")
+
+    def _ui_state_snapshot(self) -> dict[str, bool]:
+        defaults = {
+            "_display": False,
+            "_debug_overlay": False,
+            "_perception_costmap_visible": True,
+            "_perception_explanation_visible": True,
+            "_perception_minimap_visible": True,
+            "_perception_alert_visible": True,
+        }
+        lock = getattr(self, "_ui_state_lock", None)
+        if lock is None:
+            return {
+                name: bool(getattr(self, name, default))
+                for name, default in defaults.items()
+            }
+        with lock:
+            return {
+                name: bool(getattr(self, name, default))
+                for name, default in defaults.items()
+            }
+
+    def _publish_display_frame(self, frame: np.ndarray) -> None:
+        if not ArPathViewerNode._ui_state_snapshot(self)["_display"]:
+            return
+        exchange = getattr(self, "_display_frames", None)
+        if exchange is not None:
+            exchange.publish(frame)
+
+    def _poll_log_gui(self) -> None:
+        ArPathViewerNode._require_main_thread(self)
+        log_gui = getattr(self, "_log_gui", None)
+        if log_gui is not None:
+            log_gui.poll()
+
+    def _process_display_frame(self, frame: np.ndarray) -> None:
+        """Run every OpenCV/Tk GUI operation on the creating main thread."""
+        ArPathViewerNode._require_main_thread(self)
+        with getattr(self, "_ui_state_lock", threading.Lock()):
+            display_enabled = bool(getattr(self, "_display", False))
+            display_window = getattr(self, "_display_window", None)
+        if not display_enabled or display_window is None:
+            ArPathViewerNode._poll_log_gui(self)
+            return
+        try:
+            key_code = display_window.show_and_poll(frame)
+        except (AttributeError, RuntimeError, cv2.error) as exc:
+            self._log_warning(
+                f"OpenCV display failed; recording continues: {exc}"
+            )
+            try:
+                display_window.close()
+            finally:
+                lock = getattr(self, "_ui_state_lock", None)
+                if lock is None:
+                    self._display = False
+                    self._display_window = None
+                else:
+                    with lock:
+                        self._display = False
+                        self._display_window = None
+            ArPathViewerNode._poll_log_gui(self)
+            return
+
+        consume_actions = getattr(
+            display_window, "consume_actions", lambda: []
+        )
+        for action in consume_actions():
+            handler = getattr(self, "_handle_display_action", None)
+            if handler is None:
+                ArPathViewerNode._handle_display_action(self, action)
+            else:
+                handler(action)
+        if is_debug_toggle_key(key_code):
+            lock = getattr(self, "_ui_state_lock", None)
+            if lock is None:
+                self._debug_overlay = not self._debug_overlay
+                debug_overlay = self._debug_overlay
+            else:
+                with lock:
+                    self._debug_overlay = not self._debug_overlay
+                    debug_overlay = self._debug_overlay
+            mode = "DEBUG" if debug_overlay else "NORMAL"
+            self._log_info(f"navigation UI mode changed to {mode}")
+            display_window.set_status(f"UI {mode}", True)
+        perception_toggle = perception_toggle_key(key_code)
+        if perception_toggle is not None:
+            attribute, label = perception_toggle
+            configured = bool(getattr(
+                self, attribute.replace("_visible", "_enabled"), False
+            ))
+            if configured:
+                lock = getattr(self, "_ui_state_lock", None)
+                if lock is None:
+                    visible = not bool(getattr(self, attribute, True))
+                    setattr(self, attribute, visible)
+                else:
+                    with lock:
+                        visible = not bool(getattr(self, attribute, True))
+                        setattr(self, attribute, visible)
+                self._log_info(
+                    f"perception UI layer={label} visible={visible}"
+                )
+                display_window.set_status(
+                    f"{label} {'ON' if visible else 'OFF'}", True
+                )
+            else:
+                display_window.set_status(f"{label} not configured", False)
+        if is_exit_key(key_code):
+            self._request_shutdown(
+                f"keyboard q/Q/F10 key_code={int(key_code)}"
+            )
+        ArPathViewerNode._poll_log_gui(self)
+
+    def run_main_thread_ui(self, executor_done: threading.Event) -> None:
+        """Pump HighGUI on the main thread while ROS callbacks run elsewhere."""
+        ArPathViewerNode._require_main_thread(self)
+        sequence = 0
+        last_frame = np.zeros(
+            (self._intrinsics.height, self._intrinsics.width, 3), np.uint8
+        )
+        period = float(getattr(self, "_display_period_sec", 0.05))
+        exchange = getattr(self, "_display_frames", None)
+        while (
+            not self._shutdown_requested
+            and not executor_done.is_set()
+            and rclpy.ok(context=self.context)
+        ):
+            if exchange is not None:
+                sequence, frame = exchange.wait_for_new(sequence, period)
+                if frame is not None:
+                    last_frame = frame
+            else:
+                executor_done.wait(period)
+            if ArPathViewerNode._ui_state_snapshot(self)["_display"]:
+                ArPathViewerNode._process_display_frame(self, last_frame)
+            else:
+                ArPathViewerNode._poll_log_gui(self)
 
     def _on_path(self, message: PathMessage) -> None:
         raw_frame = str(getattr(getattr(message, "header", None), "frame_id", ""))
@@ -1192,6 +1342,11 @@ class ArPathViewerNode(Node):
     def _tick(self) -> None:
         if self._shutdown_requested:
             return
+        # GUI keyboard actions are written by the main thread.  Use one
+        # coherent snapshot for the entire rendered frame instead of reading
+        # those booleans repeatedly while the main thread can change them.
+        ui_state = ArPathViewerNode._ui_state_snapshot(self)
+        debug_overlay = ui_state["_debug_overlay"]
         capture_started_monotonic = time.monotonic()
         capture_started_ros = self._ros_now_sec()
         image = self._image_source.read()
@@ -1260,21 +1415,21 @@ class ArPathViewerNode(Node):
                 if waiting_for_delayed_frame else "image source returned no frame"
             )
             frame = render_frame(
-                image, [], state, debug_overlay=self._debug_overlay
+                image, [], state, debug_overlay=debug_overlay
             )
         elif self._camera_error:
             state = "CAMERA UNAVAILABLE"
             detail = self._camera_error
             frame = render_frame(
                 image, [], state, detail=detail,
-                debug_overlay=self._debug_overlay,
+                debug_overlay=debug_overlay,
             )
         elif self._config_error:
             state = "INVALID CONFIG"
             detail = self._config_error
             frame = render_frame(
                 image, [], state, detail=detail,
-                debug_overlay=self._debug_overlay,
+                debug_overlay=debug_overlay,
             )
         else:
             source_shape = (
@@ -1307,7 +1462,7 @@ class ArPathViewerNode(Node):
                 )
             costmap_enabled = bool(
                 getattr(self, "_perception_costmap_enabled", False)
-                and getattr(self, "_perception_costmap_visible", True)
+                and ui_state["_perception_costmap_visible"]
             )
             costmap_state = "DISABLED"
             costmap_snapshot = None
@@ -1789,7 +1944,7 @@ class ArPathViewerNode(Node):
 
             explanation_enabled = bool(
                 getattr(self, "_perception_explanation_enabled", False)
-                and getattr(self, "_perception_explanation_visible", True)
+                and ui_state["_perception_explanation_visible"]
             )
             if explanation_enabled:
                 if not costmap_enabled:
@@ -1831,7 +1986,7 @@ class ArPathViewerNode(Node):
 
             minimap_enabled = bool(
                 getattr(self, "_perception_minimap_enabled", False)
-                and getattr(self, "_perception_minimap_visible", True)
+                and ui_state["_perception_minimap_visible"]
             )
             if (
                 minimap_enabled
@@ -1855,7 +2010,7 @@ class ArPathViewerNode(Node):
 
             alert_enabled = bool(
                 getattr(self, "_perception_alert_enabled", False)
-                and getattr(self, "_perception_alert_visible", True)
+                and ui_state["_perception_alert_visible"]
             )
             if alert_enabled:
                 now_sec = self._ros_now_sec()
@@ -1939,7 +2094,7 @@ class ArPathViewerNode(Node):
                     f"{detail}; {costmap_summary}"
                     if detail else costmap_summary
                 )
-            if explanation_enabled and self._debug_overlay:
+            if explanation_enabled and debug_overlay:
                 explanation_summary = (
                     "explanation="
                     f"{costmap_explanation_reason}"
@@ -1989,7 +2144,7 @@ class ArPathViewerNode(Node):
                 ))),
                 waypoint_status=waypoint_status,
                 navigation_status=navigation_status,
-                debug_overlay=self._debug_overlay,
+                debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
                 costmap_projection=costmap_projection,
                 costmap_alpha=getattr(self, "_costmap_alpha", 0.42),
@@ -2011,68 +2166,26 @@ class ArPathViewerNode(Node):
         self._diagnostics.state_changed(state, detail)
         if self._writer is not None:
             self._writer.write(frame)
-        if self._display:
-            try:
-                key_code = self._display_window.show_and_poll(frame)
-            except (AttributeError, RuntimeError, cv2.error) as exc:
-                self._log_warning(
-                    f"OpenCV display failed; recording continues: {exc}"
-                )
-                self._display = False
-                if self._display_window is not None:
-                    self._display_window.close()
-            else:
-                consume_actions = getattr(
-                    self._display_window, "consume_actions", lambda: []
-                )
-                for action in consume_actions():
-                    self._handle_display_action(action)
-                if is_debug_toggle_key(key_code):
-                    self._debug_overlay = not self._debug_overlay
-                    mode = "DEBUG" if self._debug_overlay else "NORMAL"
-                    self._log_info(f"navigation UI mode changed to {mode}")
-                    if self._display_window is not None:
-                        self._display_window.set_status(f"UI {mode}", True)
-                perception_toggle = perception_toggle_key(key_code)
-                if perception_toggle is not None:
-                    attribute, label = perception_toggle
-                    configured = bool(getattr(
-                        self, attribute.replace("_visible", "_enabled"), False
-                    ))
-                    if configured:
-                        visible = not bool(getattr(self, attribute, True))
-                        setattr(self, attribute, visible)
-                        self._log_info(
-                            f"perception UI layer={label} visible={visible}"
-                        )
-                        if self._display_window is not None:
-                            self._display_window.set_status(
-                                f"{label} {'ON' if visible else 'OFF'}", True
-                            )
-                    elif self._display_window is not None:
-                        self._display_window.set_status(
-                            f"{label} not configured", False
-                        )
-                if is_exit_key(key_code):
-                    self._request_shutdown(
-                        f"keyboard q/Q/F10 key_code={int(key_code)}"
-                    )
-        log_gui = getattr(self, "_log_gui", None)
-        if log_gui is not None:
-            log_gui.poll()
+        ArPathViewerNode._publish_display_frame(self, frame)
 
     def _request_shutdown(self, reason: str) -> None:
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
         self._log_info(f"AR Path Viewer shutdown requested: {reason}")
-        self._release_resources()
+        # Resource destruction (especially OpenCV HighGUI/Tk) belongs to the
+        # creating main thread.  main() stops the executor, then destroys the
+        # node there.  Shutting down the context wakes executor.spin().
         shutdown_ros_context()
 
     def _release_resources(self) -> None:
+        ArPathViewerNode._require_main_thread(self)
         if self._resources_released:
             return
         self._resources_released = True
+        display_frames = getattr(self, "_display_frames", None)
+        if display_frames is not None:
+            display_frames.close()
         self._image_source.close()
         if self._writer is not None:
             self._writer.release()
@@ -2127,31 +2240,70 @@ def perception_toggle_key(key_code: int):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = ArPathViewerNode()
-    # Camera acquisition and OpenCV rendering run in the timer callback.  A
-    # second executor worker lets TransformListener's reentrant callback group
-    # continue ingesting 30 Hz TF while that timer is busy.  Other Viewer
-    # subscriptions remain in the node's mutually-exclusive default group.
+    # HighGUI requires window creation, imshow/waitKey, and destruction on one
+    # thread (the process main thread on Qt/GTK).  ROS callbacks therefore run
+    # in this background executor while the main thread pumps the GUI below.
+    # Two executor workers remain necessary: camera/rendering uses the node's
+    # mutually-exclusive default callback group, while TransformListener's
+    # reentrant callbacks can continue ingesting 30 Hz TF on the other worker.
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
+    executor_done = threading.Event()
+    executor_failure: list[tuple[BaseException, str]] = []
+
+    def spin_ros_callbacks() -> None:
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            # q/F10 or a sibling launch shutdown closes the ROS context.
+            pass
+        except BaseException as exc:  # reported and re-raised on main below
+            executor_failure.append((exc, traceback.format_exc()))
+        finally:
+            executor_done.set()
+
+    executor_thread = threading.Thread(
+        target=spin_ros_callbacks,
+        name="ar-path-viewer-ros-executor",
+        daemon=False,
+    )
+    executor_thread.start()
+    pending_failure: BaseException | None = None
     try:
-        executor.spin()
+        node.run_main_thread_ui(executor_done)
+        if executor_failure:
+            pending_failure, failure_traceback = executor_failure[0]
+            node._log_error(
+                "Unhandled ROS executor exception: "
+                f"{type(pending_failure).__name__}: {pending_failure}\n"
+                f"{failure_traceback}"
+            )
     except KeyboardInterrupt:
         if rclpy.ok(context=node.context):
-            node._log_info("AR Path Viewer shutdown requested: Ctrl+C")
-    except ExternalShutdownException:
-        # A sibling launch shutdown is a normal termination path.  Resources
-        # are released by finally without reporting a false viewer crash.
-        pass
+            node._request_shutdown("Ctrl+C")
     except Exception as exc:
         node._log_error(
             f"Unhandled exception: {type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         )
-        raise
+        pending_failure = exc
     finally:
+        # Wake spin() before waiting for the worker.  Resource release is
+        # deliberately postponed until the executor has stopped, so camera
+        # read/render/write cannot race close()/release().
+        shutdown_ros_context()
         try:
-            executor.shutdown(timeout_sec=1.0)
+            executor.shutdown(timeout_sec=2.0)
         except (KeyboardInterrupt, ExternalShutdownException):
             pass
+        executor_thread.join(timeout=2.0)
+        if executor_thread.is_alive():
+            node._log_error(
+                "ROS executor did not stop within 2.0s; a camera read or ROS "
+                "callback may be blocked, and forced cleanup is not a normal "
+                "shutdown result"
+            )
+            if pending_failure is None:
+                pending_failure = RuntimeError("ROS executor shutdown timed out")
         try:
             node.destroy_node()
         except (KeyboardInterrupt, ExternalShutdownException):
@@ -2163,6 +2315,8 @@ def main(args=None) -> None:
             shutdown_ros_context()
         except KeyboardInterrupt:
             pass
+    if pending_failure is not None:
+        raise pending_failure
 
 
 def shutdown_ros_context() -> None:

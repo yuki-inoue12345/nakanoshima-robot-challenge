@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+import threading
 
 import numpy as np
 import pytest
 from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
+from ar_path_viewer.display_dispatch import LatestDisplayFrame
 from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.localization_monitor import (
     AmclObservation,
@@ -63,8 +65,10 @@ class RecordingDisplayWindow:
         self.frames = []
         self.statuses = []
         self.close_count = 0
+        self.thread_ids = []
 
     def show_and_poll(self, frame):
+        self.thread_ids.append(threading.get_ident())
         self.frames.append(frame.copy())
         return self.key_code
 
@@ -132,6 +136,10 @@ def make_viewer(clock=None):
     active_clock = clock or __import__("time").monotonic
     fake._shutdown_requested = False
     fake._resources_released = False
+    fake._main_thread_id = threading.get_ident()
+    fake._ui_state_lock = threading.Lock()
+    fake._display_frames = LatestDisplayFrame()
+    fake._display_period_sec = 0.05
     fake._intrinsics = CameraIntrinsics()
     fake._source_intrinsics = fake._intrinsics
     fake._undistorter = None
@@ -180,6 +188,13 @@ def make_viewer(clock=None):
         100.0,
     )
     return fake
+
+
+def process_latest_display_frame(fake, after_sequence=0):
+    sequence, frame = fake._display_frames.wait_for_new(after_sequence, 0.0)
+    assert frame is not None
+    viewer_node.ArPathViewerNode._process_display_frame(fake, frame)
+    return sequence
 
 
 def path_message(points, frame="map", stamp=1.0):
@@ -756,6 +771,7 @@ def test_perception_review_keys_map_only_to_read_only_display_layers():
     fake._session_log = MemorySessionLog()
     fake._log_gui = RecordingLogGui()
     viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake)
     assert fake._debug_overlay
     assert not fake._shutdown_requested
     assert fake._display_window.statuses == [("UI DEBUG", True)]
@@ -863,12 +879,15 @@ def test_keyboard_exit_records_frame_and_releases_resources_once(monkeypatch):
     )
 
     viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake)
     assert len(writer.frames) == 1
-    assert writer.release_count == 1
-    assert source.close_count == 1
+    # q requests ROS shutdown, but main() releases camera/writer/HighGUI only
+    # after the executor callback has stopped.
+    assert writer.release_count == 0
+    assert source.close_count == 0
     assert len(display_window.frames) == 1
     assert display_window.frames[0].shape == (480, 640, 3)
-    assert display_window.close_count == 1
+    assert display_window.close_count == 0
     assert shutdown_calls == [True]
     fake._request_shutdown("duplicate")
     fake._release_resources()
@@ -898,6 +917,7 @@ def test_log_view_copy_failure_and_control_bar_never_enter_recording(monkeypatch
     )
 
     viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake)
 
     assert len(fake._writer.frames) == 1
     assert fake._writer.frames[0].shape == (480, 640, 3)
@@ -916,6 +936,127 @@ def test_log_view_copy_failure_and_control_bar_never_enter_recording(monkeypatch
         level == "WARNING" and "clipboard unavailable" in message
         for level, message in fake._session_log.records
     )
+
+
+def test_worker_tick_never_calls_highgui_and_main_thread_consumes_frame():
+    fake = make_viewer()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow()
+    worker_errors = []
+
+    def tick_on_worker():
+        try:
+            viewer_node.ArPathViewerNode._tick(fake)
+        except Exception as exc:  # pragma: no cover - asserted below
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=tick_on_worker)
+    worker.start()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert worker_errors == []
+    assert len(fake._writer.frames) == 1
+    assert fake._display_window.frames == []
+
+    process_latest_display_frame(fake)
+    assert len(fake._display_window.frames) == 1
+
+
+def test_ui_state_changes_are_applied_to_the_next_complete_frame(monkeypatch):
+    debug_values = []
+
+    def render(image, segments, state, *args, **kwargs):
+        debug_values.append(kwargs.get("debug_overlay"))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow(ord("d"))
+    fake._log_gui = RecordingLogGui()
+
+    viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake)
+    assert debug_values[-1] is False
+
+    fake._display_window.key_code = -1
+    viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake, after_sequence=1)
+    assert debug_values[-1] is True
+
+
+def test_resource_release_is_rejected_off_main_thread():
+    fake = make_viewer()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow()
+    failures = []
+
+    def release_on_worker():
+        try:
+            viewer_node.ArPathViewerNode._release_resources(fake)
+        except RuntimeError as exc:
+            failures.append(str(exc))
+
+    worker = threading.Thread(target=release_on_worker)
+    worker.start()
+    worker.join()
+
+    assert failures == ["Viewer GUI operation must run on the main thread"]
+    assert fake._resources_released is False
+    assert fake._image_source.close_count == 0
+    assert fake._writer.release_count == 0
+    assert fake._display_window.close_count == 0
+
+    viewer_node.ArPathViewerNode._release_resources(fake)
+    assert fake._image_source.close_count == 1
+    assert fake._writer is None
+    assert fake._display_window.close_count == 1
+
+
+def test_main_thread_ui_pumps_twenty_frames_while_worker_produces(monkeypatch):
+    fake = make_viewer()
+    fake.context = object()
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow()
+    fake._log_gui = RecordingLogGui()
+    fake._display_period_sec = 0.01
+    executor_done = threading.Event()
+    producer_errors = []
+
+    monkeypatch.setattr(viewer_node.rclpy, "ok", lambda context=None: True)
+
+    def produce():
+        try:
+            for value in range(20):
+                fake._display_frames.publish(
+                    np.full((480, 640, 3), value, np.uint8)
+                )
+                deadline = __import__("time").monotonic() + 0.5
+                while (
+                    len(fake._display_window.frames) <= value
+                    and __import__("time").monotonic() < deadline
+                ):
+                    __import__("time").sleep(0.001)
+                if len(fake._display_window.frames) <= value:
+                    raise TimeoutError("main-thread display did not consume frame")
+        except Exception as exc:  # pragma: no cover - asserted below
+            producer_errors.append(exc)
+        finally:
+            executor_done.set()
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    viewer_node.ArPathViewerNode.run_main_thread_ui(fake, executor_done)
+    producer.join(timeout=1.0)
+
+    assert not producer.is_alive()
+    assert producer_errors == []
+    # A timeout may intentionally repaint the most recent frame to keep the
+    # HighGUI event loop responsive even when the producer has a small gap.
+    assert len(fake._display_window.frames) >= 20
+    assert set(fake._display_window.thread_ids) == {threading.get_ident()}
+    assert int(fake._display_window.frames[-1][0, 0, 0]) == 19
 
 
 def test_localization_tf_requires_a_fresh_timestamp():
