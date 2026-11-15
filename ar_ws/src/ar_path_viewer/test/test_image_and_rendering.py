@@ -5,6 +5,7 @@ import pytest
 from ar_path_viewer import display_window
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.offscreen_guidance import OffscreenGuidance
+from ar_path_viewer.paced_video_writer import PacedVideoWriter
 from ar_path_viewer.display_window import (
     ACTION_COPY_LOG,
     ACTION_VIEW_LOG,
@@ -57,6 +58,41 @@ def test_video_file_input(tmp_path):
 def test_camera_disconnect_or_missing_device_is_reported():
     with pytest.raises(OSError):
         make_image_source("camera", "/dev/ar_path_viewer-device-does-not-exist", 64, 48)
+
+
+def test_paced_video_writer_preserves_elapsed_duration_with_real_frames():
+    class Writer:
+        def __init__(self):
+            self.frames = []
+            self.released = False
+
+        def write(self, frame):
+            self.frames.append(frame.copy())
+
+        def release(self):
+            self.released = True
+
+    now = [0.0]
+    output = Writer()
+    writer = PacedVideoWriter(output, 20.0, clock=lambda: now[0])
+    writer.write(np.full((2, 2, 3), 10, np.uint8))
+    # A faster callback is retained but does not create an extra 20 fps slot.
+    now[0] = 0.02
+    writer.write(np.full((2, 2, 3), 20, np.uint8))
+    # At 0.11 s the file needs three frames. Fill one missed slot with the
+    # last actually rendered frame, then write the current rendering.
+    now[0] = 0.11
+    writer.write(np.full((2, 2, 3), 30, np.uint8))
+    writer.release()
+
+    assert [int(frame[0, 0, 0]) for frame in output.frames] == [10, 20, 30]
+    assert writer.frames_written == 3
+    assert output.released
+
+
+def test_paced_video_writer_rejects_invalid_fps():
+    with pytest.raises(ValueError, match="FPS"):
+        PacedVideoWriter(object(), 0.0)
 
 
 def test_all_required_states_render_and_only_active_draws_route():

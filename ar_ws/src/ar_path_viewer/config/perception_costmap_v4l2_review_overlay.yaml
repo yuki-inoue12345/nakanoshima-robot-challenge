@@ -1,0 +1,9 @@
+# REVIEW ONLY: Requires a Linux V4L2 MONOTONIC per-frame buffer timestamp.
+# Never enable before C920 and ROS timing checks on the NUC.
+ar_path_viewer:
+  ros__parameters:
+    image_input_type: camera_timestamped
+    perception_costmap_enabled: true
+    perception_minimap_enabled: true
+    perception_explanation_enabled: true
+    perception_alert_enabled: true

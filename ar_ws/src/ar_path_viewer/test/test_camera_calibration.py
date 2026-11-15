@@ -396,7 +396,19 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
         params = document["ar_path_viewer"]["ros__parameters"]
         assert params["perception_costmap_enabled"] is False
         assert params["perception_explanation_enabled"] is False
+        assert params["perception_minimap_enabled"] is False
+        assert params["perception_alert_enabled"] is False
         assert params["perception_costmap_topic"] == "/local_costmap/costmap"
+        assert params["perception_costmap_max_grid_width_cells"] == 512
+        assert params["perception_costmap_max_grid_height_cells"] == 512
+        assert params["perception_costmap_max_grid_cells"] == 65536
+        assert params["perception_camera_sync_max_age_sec"] == 0.40
+        assert params["perception_camera_sync_max_capture_duration_sec"] == 0.12
+        assert params["perception_camera_sync_max_frame_transport_age_sec"] == 0.12
+        assert params["perception_camera_sync_clock_tolerance_sec"] == 0.02
+        assert params["perception_camera_sync_max_translation_m"] == 0.20
+        assert params["perception_camera_sync_max_rotation_deg"] == 15.0
+        assert params["perception_camera_sync_exact_tf_tolerance_sec"] == 0.005
 
     review = yaml.safe_load(
         (config_directory / "perception_costmap_review_overlay.yaml").read_text(
@@ -407,6 +419,8 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
     assert params == {
         "perception_costmap_enabled": True,
         "perception_explanation_enabled": True,
+        "perception_minimap_enabled": True,
+        "perception_alert_enabled": True,
     }
 
 
@@ -470,3 +484,18 @@ def test_before_after_projection_comparison_writes_side_by_side_image(tmp_path):
         compare_projection(
             image_path, points_path, before_path, overlay_path, output_path
         )
+
+
+def test_v4l2_timestamped_review_profile_is_not_production_default():
+    config_dir = Path(__file__).parents[1] / "config"
+    opt_in = yaml.safe_load((config_dir / (
+        "perception_costmap_v4l2_review_overlay.yaml"
+    )).read_text(encoding="utf-8"))["ar_path_viewer"]["ros__parameters"]
+    assert opt_in["image_input_type"] == "camera_timestamped"
+    assert opt_in["perception_costmap_enabled"] is True
+    for profile in ("ar_path_viewer.yaml", "ar_path_viewer_c920.yaml"):
+        base = yaml.safe_load((config_dir / profile).read_text(
+            encoding="utf-8"
+        ))["ar_path_viewer"]["ros__parameters"]
+        assert base["perception_costmap_enabled"] is False
+        assert base["image_input_type"] != "camera_timestamped"

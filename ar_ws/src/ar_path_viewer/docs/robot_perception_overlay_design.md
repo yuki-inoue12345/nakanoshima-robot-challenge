@@ -21,6 +21,64 @@ ros2 run ar_path_viewer ar_path_viewer --ros-args \
 This command is for a stationary review after the live topic contract below
 has been checked. It is not a production default.
 
+## Camera-frame time alignment (P1-① review)
+
+Costmap's stamped `robot/odom` coordinates are re-expressed in the robot base
+frame **at the camera frame's estimated acquisition time**, rather than
+projecting the previous Costmap-time base coordinates onto a later image.
+The complete relative 3-D translation and rotation between these two TFs
+are bounded; yaw-only and XY-only checks are insufficient for a tilting robot.
+An interpolated tf2 lookup is permitted only when its returned stamp matches
+the *requested* time within 5 ms. This does not authorize a lookup of the
+latest available TF in place of the requested timestamp.
+
+This C920 OpenCV capture path has **no hardware exposure timestamp**. The
+ROS clock sampled immediately after `VideoCapture.read()` is merely a host
+receipt-time estimate. A camera-driver frame queue can still contain a
+previously exposed frame despite a fast `read()`. The 120 ms read-time,
+400 ms Costmap age, 200 mm displacement, and 15-degree 3-D orientation gates
+reduce, but **do not eliminate**, that uncertainty. A truly guaranteed
+per-frame temporal overlay requires a validated capture timestamp / buffer
+freshness contract. The NUC stationary and motion acceptance tests remain
+mandatory; a passing pure-Python geometry test is not evidence of correct
+hardware exposure-time alignment. Historical/replayed MP4 sources without a
+trusted timestamp must not silently be treated as live camera frames.
+
+Failures suppress Costmap-derived image overlays, minimap, and cost-based
+explanations/alerts. They do not alter the real Nav2 Path or navigation.
+Pending-order and Path-goal-generation audit items P1-②/P1-③ are independent
+and **not fixed** by this timestamp alignment.
+
+## Pending Costmap ordering (P1-② review)
+
+The Costmap store and exact-time TF queue both require **globally strictly
+increasing header stamps**, including across `frame_id` changes. Each newly
+accepted sample supersedes all older unresolved pending samples; late TF
+arrival cannot revive an older unseen Costmap. A previously synchronized
+(`ready`) sample may be retained only while its independent freshness tests
+pass, and never across an accepted frame change.
+
+A frame transition with a newer stamp invalidates ready/pending geometry and
+retires the previous frame ID. A delayed callback from any retired frame is
+ignored even if its header stamp is later than the current watermark; frame
+A→B→A is **not** treated as an implicit epoch reset. A subsequent distinct
+frame C with a strictly newer stamp can still be accepted. The store performs
+the same ordering checks before replacing its snapshot, and the Viewer treats
+these rejections as non-invalidating (preserving a newer ready pair).
+
+The watermark and retired-frame set survive TF expiry, stale snapshots, and
+invalid-input clears. An actual ROS clock reset or a deliberate return to a
+retired frame therefore requires an **externally verified new session**, such
+as a Viewer restart; merely receiving another `frame_id` does not authorize
+resetting history. This sacrifices automatic recovery from an unverified
+clock/configuration change to prevent stale overlays. P1-③ (real Path/Goal
+generation correspondence) is separate and remains unresolved.
+
+The pending queue now holds at most one unresolved Costmap.  The legacy
+`max_pending_messages` configuration remains accepted for compatibility,
+but its configured limit is no longer used to justify retaining superseded
+pending samples.
+
 ## Source selection
 
 The first implementation uses `/local_costmap/costmap` as a
@@ -146,3 +204,59 @@ update the review implementation/test contract first.
   visual comparison.
 
 No production YAML should enable this layer until those live checks pass.
+
+
+## Camera source timestamp gate (P1-1; pre-NUC review)
+
+The standard `image_input_type: camera` uses OpenCV `VideoCapture.read()`,
+which supplies no per-frame acquisition timestamp.  Even a fast `read()` can
+return a stale queued image.  Consequently **camera frames from this source
+never authorize Costmap-derived AR, minimap, path explanation or costmap
+alerts**.  Green `/plan`, cyan reference, guidance, live camera and recording
+continue unchanged. This is intentional fail-closed behavior, not a missing
+Costmap subscription.
+
+An **experimental, explicitly opt-in** `image_input_type: camera_timestamped`
+uses Linux V4L2 streaming with `VIDIOC_DQBUF` on the same camera file
+descriptor that supplies MJPEG image bytes.  It requires the kernel monotonic
+buffer timestamp flag; metadata and image can therefore be associated with
+one specific dequeued buffer.  Age since the timestamp must be <=0.12s;
+ROS/monotonic clock drift within/between acquisitions must be <=0.02s; the
+existing Costmap age/motion/TF gates still apply. A non-monotonic/absent
+kernel timestamp, old queued frame, or decode failure never triggers a
+fallback to OpenCV timestamps. **Only kernel SOE (start-of-exposure) source
+flags authorize AR**. An EOF timestamp is accepted as provenance for
+diagnostics but does not authorize camera/Costmap alignment until its
+exposure-to-EOF offset is separately measured and a reviewed policy is added.
+
+**V4L2 buffer timestamp is not guaranteed to be the true C920 exposure time.**
+The camera driver may report SOE or EOF (end-of-frame) time. In particular,
+the interval from exposure to an EOF timestamp depends on the camera and USB
+transport. Until that uncertainty is characterized on the NUC, do not claim
+that the kernel timestamp has proven image-to-world alignment or that the
+P1-1 real-robot release gate has passed. Keep normal YAML defaults OFF.
+The opt-in review file
+`config/perception_costmap_v4l2_review_overlay.yaml` does not replace the
+robot's installed camera device URI/recording paths. Use only after checking
+C920 MJPEG 640x480 support, V4L2 timestamp source flags, image/Costmap/TF
+clocks and static/rotational test footage.  The OpenCV preview remains
+available if the V4L2 source is not supported, but no perception overlay is
+shown from unverified capture timestamps.
+
+### P2: Costmap input budgets and minimap class priority
+
+- OccupancyGrid dimensions are checked **before** NumPy conversion and before
+  generating row/column/world-coordinate arrays. Configurable limits:
+  `perception_costmap_max_grid_width_cells=512`,
+  `perception_costmap_max_grid_height_cells=512`,
+  `perception_costmap_max_grid_cells=65536` (the observed local grid is 120x120).
+  Over-limit input is invalid and clears the current Costmap snapshot; it must
+  not be displayed or used for alerts. This bounds allocation at the callback,
+  **not** the ROS middleware's message receive/deserialization itself.
+- Minimap sampling is class-aware. Lethal-cost cells are retained first, then
+  high-cost cells, then unknown cells, up to 2500 plotted cells. If lethal alone
+  exceeds the budget, lethal is spatially downsampled. Free cells are not
+  plotted. The minimap is not an exhaustive occupancy visualization: several
+  cells may share one pixel, and later path/robot strokes may cover a point.
+- These protections do not change the full-resolution data passed to the
+  separate alert evaluator, which remains independently gated.

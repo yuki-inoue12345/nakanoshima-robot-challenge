@@ -97,4 +97,7 @@ def make_image_source(kind: str, uri: str, width: int, height: int) -> ImageSour
     if normalized == "camera":
         source: str | int = int(uri) if uri.strip().isdigit() else uri
         return CaptureSource(source, width, height)
+    if normalized == "camera_timestamped":
+        from .v4l2_timestamp_source import V4L2TimestampCameraSource
+        return V4L2TimestampCameraSource(uri, width, height)
     raise ValueError(f"unsupported image input type: {kind}")

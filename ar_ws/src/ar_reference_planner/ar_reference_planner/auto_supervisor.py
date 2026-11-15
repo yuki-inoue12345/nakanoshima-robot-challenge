@@ -473,4 +473,7 @@ def main(args=None) -> None:
             # down its internal parameter services, so a repeated interrupt
             # here is safe to absorb and should not produce a crash report.
             pass
-        rclpy.try_shutdown()
+        try:
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass

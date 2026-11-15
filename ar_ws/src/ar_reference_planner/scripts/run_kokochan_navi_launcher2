@@ -3,10 +3,48 @@
 
 set -euo pipefail
 
-repository="${KOKO_NAVI_REPOSITORY:-/home/koko-chan-nuc/inoueyuki_ws/nakanoshima-robot-challenge}"
-viewer_config="${KOKO_NAVI_VIEWER_CONFIG:-/home/koko-chan-nuc/ar_navigation_project/config/ar_path_viewer_launcher2.yaml}"
-output_dir="${KOKO_NAVI_OUTPUT_DIR:-/home/koko-chan-nuc/ar_navigation_project/outputs}"
-camera_device="${KOKO_NAVI_CAMERA_DEVICE:-/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_66F7D3AF-video-index0}"
+notify_failure() {
+    local message="$1"
+    echo "${message}" >&2
+    if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}" ]]; then
+        notify-send -u critical "ココちゃんナビ" "${message}" || true
+    fi
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+inferred_repository="$(cd -- "${script_dir}/../../../../.." 2>/dev/null && pwd -P || true)"
+repository="${KOKO_NAVI_REPOSITORY:-${inferred_repository}}"
+if [[ -z "${repository}" || ! -d "${repository}/ar_ws" ]]; then
+    for candidate in \
+        "${HOME}/inoueyuki_ws/nakanoshima-robot-challenge" \
+        "${HOME}/care_patrol_ws/local_repositories/nakanoshima-robot-challenge"; do
+        if [[ -d "${candidate}/ar_ws" ]]; then
+            repository="${candidate}"
+            break
+        fi
+    done
+fi
+
+default_config="${HOME}/ar_navigation_project/config/ar_path_viewer_launcher2.yaml"
+if [[ ! -r "${default_config}" && -r "${repository}/ar_ws/src/ar_path_viewer/config/ar_path_viewer_c920.yaml" ]]; then
+    default_config="${repository}/ar_ws/src/ar_path_viewer/config/ar_path_viewer_c920.yaml"
+fi
+
+viewer_config="${KOKO_NAVI_VIEWER_CONFIG:-${default_config}}"
+output_dir="${KOKO_NAVI_OUTPUT_DIR:-${HOME}/ar_navigation_project/outputs}"
+camera_device="${KOKO_NAVI_CAMERA_DEVICE:-}"
+if [[ -z "${camera_device}" ]]; then
+    for candidate in /dev/v4l/by-id/*C920*video-index0; do
+        if [[ -e "${candidate}" ]]; then
+            camera_device="${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -z "${camera_device}" || ! -e "${camera_device}" ]]; then
+    notify_failure "C920 video device was not found; camera was not opened."
+    exit 2
+fi
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-54}"
 export ROBOTBASE_TF_PREFIX="${ROBOTBASE_TF_PREFIX:-robot}"
@@ -14,16 +52,16 @@ export ROBOTBASE_ID="${ROBOTBASE_ID:-koko}"
 export ROBOTBASE_LAUNCHER_ID="${ROBOTBASE_LAUNCHER_ID:-koko_launcher2}"
 
 if [[ ! -f /opt/ros/jazzy/setup.bash ]]; then
-    echo "ROS 2 Jazzy setup not found" >&2
+    notify_failure "ROS 2 Jazzy setup not found"
     exit 2
 fi
 if [[ ! -f "${repository}/robot_ws/install/setup.bash" ]] || \
    [[ ! -f "${repository}/ar_ws/install/setup.bash" ]]; then
-    echo "Build overlays are missing under ${repository}" >&2
+    notify_failure "Build overlays are missing under ${repository}"
     exit 2
 fi
 if [[ ! -r "${viewer_config}" ]]; then
-    echo "Viewer config is not readable: ${viewer_config}" >&2
+    notify_failure "Viewer config is not readable: ${viewer_config}"
     exit 2
 fi
 
@@ -41,28 +79,28 @@ set -u
 
 mkdir -p "${output_dir}"
 if ! command -v flock >/dev/null 2>&1; then
-    echo "Required command not found: flock" >&2
+    notify_failure "Required command not found: flock"
     exit 2
 fi
 lock_file="${XDG_RUNTIME_DIR:-/tmp}/kokochan_navi_launcher2.lock"
 exec 9>"${lock_file}"
 if ! flock -n 9; then
-    echo "Koko-chan Navi is already starting or running." >&2
+    notify_failure "Koko-chan Navi is already starting or running."
     exit 3
 fi
 
 running_nodes="$(ros2 node list 2>/dev/null || true)"
 for node in /ar_path_viewer /legacy_follower_reference_bridge /reference_planner_auto_supervisor; do
     if grep -Fxq "${node}" <<<"${running_nodes}"; then
-        echo "Refusing duplicate AR startup; node already exists: ${node}" >&2
+        notify_failure "Refusing duplicate AR startup; node already exists: ${node}"
         exit 3
     fi
 done
 
-if [[ -e "${camera_device}" ]] && command -v fuser >/dev/null 2>&1; then
+if [[ -n "${camera_device}" && -e "${camera_device}" ]] && command -v fuser >/dev/null 2>&1; then
     camera_users="$(fuser "${camera_device}" 2>/dev/null || true)"
     if [[ -n "${camera_users//[[:space:]]/}" ]]; then
-        echo "C920 is already in use; not taking it from another process." >&2
+        notify_failure "C920 is already in use; not taking it from another process."
         exit 4
     fi
 fi
@@ -81,6 +119,7 @@ trap cleanup EXIT
 cat >"${runtime_overlay}" <<EOF
 ar_path_viewer:
   ros__parameters:
+    image_input_uri: "${camera_device}"
     output_video: "${session_base}.mp4"
     log_output: "${session_base}.log"
 EOF
@@ -89,7 +128,19 @@ echo "Koko-chan Navi session: ${session_base}"
 echo "Viewer config: ${viewer_config}"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID} TF_PREFIX=${ROBOTBASE_TF_PREFIX}"
 
+launch_arguments=(
+    "viewer_config_file:=${viewer_config}"
+    "viewer_runtime_overlay_file:=${runtime_overlay}"
+)
+if [[ "${KOKO_NAVI_PERCEPTION_REVIEW:-0}" == "1" ]]; then
+    perception_overlay="$(ros2 pkg prefix ar_path_viewer)/share/ar_path_viewer/config/perception_costmap_review_overlay.yaml"
+    if [[ ! -r "${perception_overlay}" ]]; then
+        notify_failure "Perception review overlay is missing: ${perception_overlay}"
+        exit 2
+    fi
+    launch_arguments+=("viewer_perception_overlay_file:=${perception_overlay}")
+fi
+
+echo "Stop: q/Q/F10 in the Viewer. Logs and recording: ${session_base}.*"
 ros2 launch ar_reference_planner launcher2_reference_ar.launch.py \
-    viewer_config_file:="${viewer_config}" \
-    viewer_runtime_overlay_file:="${runtime_overlay}" \
-    2>&1 | tee "${session_base}.launch.log"
+    "${launch_arguments[@]}" 2>&1 | tee "${session_base}.launch.log"

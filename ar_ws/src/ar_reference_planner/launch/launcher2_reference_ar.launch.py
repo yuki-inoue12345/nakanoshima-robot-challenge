@@ -30,6 +30,10 @@ def _launch_viewer(context):
         parameters.append(runtime_overlay)
     calibration_overlay = LaunchConfiguration(
         'viewer_calibration_overlay_file').perform(context).strip()
+    perception_overlay = LaunchConfiguration(
+        'viewer_perception_overlay_file').perform(context).strip()
+    if perception_overlay:
+        parameters.append(perception_overlay)
     if calibration_overlay:
         parameters.append(calibration_overlay)
     # The checked-in base YAML remains false. Only this explicit test launch
@@ -114,6 +118,8 @@ def generate_launch_description():
             'viewer_config_file', default_value=default_viewer_config),
         DeclareLaunchArgument(
             'viewer_runtime_overlay_file', default_value=''),
+        DeclareLaunchArgument(
+            'viewer_perception_overlay_file', default_value=''),
         DeclareLaunchArgument(
             'viewer_calibration_overlay_file', default_value=''),
         legacy_bridge,

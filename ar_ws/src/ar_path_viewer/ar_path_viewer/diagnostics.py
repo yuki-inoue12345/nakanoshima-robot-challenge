@@ -182,13 +182,39 @@ class DiagnosticReporter:
     ) -> None:
         """Explain why the perception layer is visible or suppressed."""
         level = "info" if valid and visible_points > 0 else "warning"
+        # tf2 exception text embeds changing timestamps.  Key on the stable
+        # category so a 20 fps retry cannot bypass diagnostic throttling.
+        category = str(reason).split(" ", 1)[0]
         self._emit(
             level,
-            f"costmap_projection:{valid}:{reason}",
+            f"costmap_projection:{valid}:{category}",
             "perception_costmap_projection "
             f"valid={str(valid).lower()} frame_id={frame_id!r} "
             f"visible_points={int(visible_points)} "
             f"sampled_points={int(sampled_points)} reason={reason}",
+        )
+
+    def costmap_sync(
+        self, state: str, pending: int, resolved: int, expired: int, reason: str
+    ) -> None:
+        level = "info" if state == "ACTIVE" else "warning"
+        category = str(reason).split(" ", 1)[0]
+        self._emit(
+            level,
+            f"costmap_sync:{state}:{category}",
+            "perception_costmap_sync "
+            f"state={state} pending={int(pending)} resolved={int(resolved)} "
+            f"expired={int(expired)} reason={reason}",
+        )
+
+    def costmap_alert(self, visible: bool, reason: str, detail: str = "") -> None:
+        level = "info" if visible else "warning"
+        suffix = f" {detail}" if detail else ""
+        self._emit(
+            level,
+            f"costmap_alert:{visible}:{reason}",
+            "perception_costmap_alert "
+            f"visible={str(visible).lower()} reason={reason}{suffix}",
         )
 
     def costmap_explanation(

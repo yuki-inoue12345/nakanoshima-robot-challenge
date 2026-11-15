@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from ar_reference_planner.auto_supervisor import (
@@ -453,7 +454,9 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
         package / 'launch' / 'launcher2_reference_ar.launch.py'
     ).read_text(encoding='utf-8')
 
-    assert "scripts=['scripts/run_kokochan_navi_launcher2']" in setup
+    assert "'scripts/run_kokochan_navi_launcher2'" in setup
+    assert "'scripts/install_kokochan_navi_desktop'" in setup
+    assert "'scripts/run_kokochan_navi_offline_review'" in setup
     assert 'launcher2_reference_ar.launch.py' in runner
     assert 'viewer_runtime_overlay_file:=' in runner
     assert 'ar_path_viewer_launcher2.yaml' in runner
@@ -472,6 +475,8 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     ).read_text(encoding='utf-8')
     assert 'ExternalShutdownException' in supervisor
     assert 'ExternalShutdownException' in bridge
+    assert 'except KeyboardInterrupt' in supervisor
+    assert 'except KeyboardInterrupt' in bridge
     assert 'flock -n' in runner
     assert 'ros2 node list' in runner
     assert 'fuser' in runner
@@ -486,6 +491,53 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     assert 'run_kokochan_navi_launcher2' in desktop
     assert 'waypoint_follow' not in desktop
     assert 'nav2' not in desktop.lower()
+    assert '/home/koko-chan-nuc' not in desktop
+    assert 'viewer_perception_overlay_file:=' in runner
+    assert 'image_input_uri:' in runner
+    assert 'C920 video device was not found' in runner
+    assert "'viewer_perception_overlay_file', default_value=''" in launch
+
+
+def test_desktop_installer_backs_up_and_restores(tmp_path):
+    package = Path(__file__).parents[1]
+    installer = package / 'scripts' / 'install_kokochan_navi_desktop'
+    desktop = tmp_path / 'Desktop'
+    desktop.mkdir()
+    destination = desktop / 'ココちゃんナビ.desktop'
+    destination.write_text('old entry\n', encoding='utf-8')
+    environment = dict(os.environ)
+    environment['HOME'] = str(tmp_path)
+    environment['XDG_DESKTOP_DIR'] = str(desktop)
+
+    subprocess.run(
+        [str(installer)], check=True, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    installed = destination.read_text(encoding='utf-8')
+    assert 'run_kokochan_navi_launcher2' in installed
+    assert list(desktop.glob('ココちゃんナビ.desktop.backup.*'))
+
+    subprocess.run(
+        [str(installer), '--restore'], check=True, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert destination.read_text(encoding='utf-8') == 'old entry\n'
+
+
+def test_offline_review_filters_control_topics_and_rejects_production_domain():
+    package = Path(__file__).parents[1]
+    review = (
+        package / 'scripts' / 'run_kokochan_navi_offline_review'
+    ).read_text(encoding='utf-8')
+    assert 'KOKO_NAVI_REVIEW_DOMAIN_ID:-154' in review
+    assert 'production ROS_DOMAIN_ID=54' in review
+    assert '/local_costmap/costmap' in review
+    assert '/plan' in review
+    assert '/cmd_vel' not in review
+    assert 'NavigateToPose' not in review
+    assert 'send_goal' not in review
+    assert 'kill -TERM "${bag_pid}"' in review
+    assert 'kill -KILL "${bag_pid}"' in review
 
 
 @pytest.mark.parametrize('bad_value', (-1.0, float('nan')))

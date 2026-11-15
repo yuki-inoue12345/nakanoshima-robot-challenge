@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Isolated development-PC review using a saved video and optional filtered bag.
+
+set -euo pipefail
+
+usage() {
+    echo "Usage: $0 --video FILE [--bag BAG_DIRECTORY] [--viewer-config YAML]" >&2
+}
+
+video=""
+bag=""
+viewer_config=""
+while (($#)); do
+    case "$1" in
+        --video) video="${2:-}"; shift 2 ;;
+        --bag) bag="${2:-}"; shift 2 ;;
+        --viewer-config) viewer_config="${2:-}"; shift 2 ;;
+        *) usage; exit 2 ;;
+    esac
+done
+if [[ ! -r "${video}" ]]; then
+    usage
+    echo "Saved video is not readable: ${video}" >&2
+    exit 2
+fi
+if [[ -n "${bag}" && ! -d "${bag}" ]]; then
+    echo "Bag directory is not readable: ${bag}" >&2
+    exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repository="${KOKO_NAVI_REPOSITORY:-$(cd -- "${script_dir}/../../../../.." 2>/dev/null && pwd -P || true)}"
+if [[ ! -d "${repository}/ar_ws" ]]; then
+    repository="${HOME}/care_patrol_ws/local_repositories/nakanoshima-robot-challenge"
+fi
+if [[ -z "${viewer_config}" ]]; then
+    viewer_config="${repository}/ar_ws/src/ar_path_viewer/config/ar_path_viewer_c920.yaml"
+fi
+if [[ ! -r "${viewer_config}" ]]; then
+    echo "Viewer config is not readable: ${viewer_config}" >&2
+    exit 2
+fi
+
+export ROS_DOMAIN_ID="${KOKO_NAVI_REVIEW_DOMAIN_ID:-154}"
+if [[ "${ROS_DOMAIN_ID}" == "54" ]]; then
+    echo "Offline review refuses the production ROS_DOMAIN_ID=54" >&2
+    exit 3
+fi
+set +u
+# shellcheck disable=SC1091
+source /opt/ros/jazzy/setup.bash
+# shellcheck disable=SC1091
+source "${repository}/robot_ws/install/setup.bash"
+# shellcheck disable=SC1091
+source "${repository}/ar_ws/install/setup.bash"
+set -u
+
+output_dir="${KOKO_NAVI_REVIEW_OUTPUT_DIR:-${repository}/analysis_outputs/offline_review}"
+mkdir -p "${output_dir}"
+stamp="$(date +%Y%m%d_%H%M%S)"
+base="${output_dir}/offline_review_${stamp}"
+runtime="$(mktemp /tmp/kokochan_navi_offline_review.XXXXXX.yaml)"
+bag_pid=""
+cleanup() {
+    if [[ -n "${bag_pid}" ]] && kill -0 "${bag_pid}" 2>/dev/null; then
+        # Background jobs may inherit ignored SIGINT from a non-interactive
+        # shell. TERM is bounded below, so bag replay cannot remain after the
+        # Viewer exits.
+        kill -TERM "${bag_pid}" 2>/dev/null || true
+        for _ in {1..20}; do
+            kill -0 "${bag_pid}" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "${bag_pid}" 2>/dev/null; then
+            kill -KILL "${bag_pid}" 2>/dev/null || true
+        fi
+        wait "${bag_pid}" 2>/dev/null || true
+    fi
+    rm -f -- "${runtime}"
+}
+trap cleanup EXIT INT TERM
+
+cat >"${runtime}" <<EOF
+ar_path_viewer:
+  ros__parameters:
+    image_input_type: video
+    image_input_uri: "${video}"
+    display: true
+    output_video: "${base}.mp4"
+    log_output: "${base}.log"
+    reference_path_enabled: true
+    use_sim_time: $([[ -n "${bag}" ]] && echo true || echo false)
+EOF
+
+perception="$(ros2 pkg prefix ar_path_viewer)/share/ar_path_viewer/config/perception_costmap_review_overlay.yaml"
+if [[ -n "${bag}" ]]; then
+    # Replay only perception/navigation observations on an isolated domain.
+    # Control topics and actions are intentionally excluded.
+    ros2 bag play "${bag}" --clock --topics \
+        /tf /tf_static /amcl_pose /plan /local_costmap/costmap \
+        /waypoint_follower/reference_state /ar/reference_path_state \
+        >"${base}.bag.log" 2>&1 &
+    bag_pid=$!
+fi
+
+echo "Offline review only; video/bag synchronization depends on the recording."
+echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID} output=${base}.*"
+ros2 run ar_path_viewer ar_path_viewer --ros-args \
+    --params-file "${viewer_config}" \
+    --params-file "${perception}" \
+    --params-file "${runtime}" 2>&1 | tee "${base}.launch.log"

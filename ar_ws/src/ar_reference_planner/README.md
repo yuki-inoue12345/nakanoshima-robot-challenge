@@ -291,6 +291,39 @@ runnerは`ros2 launch`を前景で実行するため、SIGINTをAR子プロセ�
 このテンプレートをコピーしてから内容を確認します。現在の実機ファイルを開発PCから
 直接編集したり、Launcher2用ショートカットを置き換えたりはしません。
 
+ビルド後は次のinstallerをユーザー権限で1回実行すると、現在のDesktop entryを
+時刻付きでバックアップし、インストール済みrunnerの絶対パスを持つentryへ更新します。
+`--restore`は最新バックアップへ戻します。Launcher2のdesktop entryには触れません。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source robot_ws/install/setup.bash
+source ar_ws/install/setup.bash
+ar_ws/install/ar_reference_planner/lib/ar_reference_planner/\
+install_kokochan_navi_desktop
+
+# 復元
+ar_ws/install/ar_reference_planner/lib/ar_reference_planner/\
+install_kokochan_navi_desktop --restore
+```
+
+Costmap認識レイヤーは実機受入まで既定OFFです。静止レビュー時だけrunnerへ
+`KOKO_NAVI_PERCEPTION_REVIEW=1`を与えると、明示的なreview overlayが追加されます。
+通常のdesktop起動ではこの環境変数を設定しません。runnerはC920のby-idデバイスを
+発見できない場合や別processが使用中の場合、cameraを開かず通知して終了します。
+
+開発PCの保存動画・bagレビューはproduction domain 54を拒否する専用runnerを使います。
+bagを指定した場合も観測topicだけを再生し、制御topic/actionを含めません。録画動画と
+bagに共通時刻がない場合、画面とROSデータが同期した検証とは扱えません。
+
+```bash
+export KOKO_NAVI_REVIEW_DOMAIN_ID=154
+ar_ws/install/ar_reference_planner/lib/ar_reference_planner/\
+run_kokochan_navi_offline_review \
+  --video /absolute/path/to/recording.mp4 \
+  --bag /absolute/path/to/rosbag_directory
+```
+
 ## Manual production-shaped launch (diagnostics only)
 
 The root map server, TF, `/scan3`, and `/hokuyo_scan` must already exist.

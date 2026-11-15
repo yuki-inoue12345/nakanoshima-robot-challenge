@@ -13,7 +13,11 @@ setup(
     name=package_name,
     version='0.1.0',
     packages=find_packages(exclude=['test']),
-    scripts=['scripts/run_kokochan_navi_launcher2'],
+    scripts=[
+        'scripts/run_kokochan_navi_launcher2',
+        'scripts/run_kokochan_navi_offline_review',
+        'scripts/install_kokochan_navi_desktop',
+    ],
     data_files=[
         ('share/ament_index/resource_index/packages', [f'resource/{package_name}']),
         (f'share/{package_name}', ['package.xml']),

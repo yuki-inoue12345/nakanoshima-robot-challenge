@@ -18,7 +18,11 @@ from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollow
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
 from ar_path_viewer.costmap_explanation import CostmapExplanationSettings
-from ar_path_viewer.costmap_overlay import CostmapOverlaySettings, CostmapStore
+from ar_path_viewer.costmap_overlay import (
+    CostmapCameraSyncSettings,
+    CostmapOverlaySettings,
+    CostmapStore,
+)
 from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.image_source import SimulationSource
 from ar_path_viewer.localization_monitor import LocalizationMonitor, LocalizationThresholds
@@ -93,6 +97,22 @@ class TimedTfBuffer:
         _set_stamp(message.header.stamp, stamp)
         message.transform.rotation.w = 1.0
         return message
+
+
+class MissingImageTimeTfBuffer(TimedTfBuffer):
+    """Allow localization/Costmap TF, then fail the image-time lookup."""
+
+    def __init__(self, clock: MutableClock):
+        super().__init__(clock)
+        self.explicit_queries = 0
+
+    def lookup_transform(self, target_frame, source_frame, *args, **kwargs):
+        query = args[0] if args else None
+        if query is not None and getattr(query, "nanoseconds", 0) > 0:
+            self.explicit_queries += 1
+            if self.explicit_queries == 2:
+                raise LookupError("synthetic image-time TF unavailable")
+        return super().lookup_transform(target_frame, source_frame, *args, **kwargs)
 
 
 class OfflineViewer:
@@ -208,6 +228,9 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._debug_overlay = False
     fake._path_store = PathStore(timeout_sec=6.5, clock=clock)
     fake._image_source = SimulationSource(640, 480)
+    fake._image_input_kind = "simulation"
+    fake._last_image_frame_timing = None
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
     fake._camera_error = ""
     fake._config_error = ""
     fake._base_frame = "robot/base_footprint"
@@ -237,6 +260,9 @@ def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake._tf_buffer = TimedTfBuffer(clock)
     fake._ros_now_sec = lambda: clock.now
     fake._points_in_base = MethodType(viewer_node.ArPathViewerNode._points_in_base, fake)
+    fake._costmap_arrays_at_image_time = MethodType(
+        viewer_node.ArPathViewerNode._costmap_arrays_at_image_time, fake
+    )
     fake._check_localization_tf = MethodType(
         viewer_node.ArPathViewerNode._check_localization_tf, fake
     )
@@ -631,6 +657,94 @@ def test_local_costmap_paths_guidance_and_recording_are_independent():
     assert np.count_nonzero(no_tf_magenta) == 0
     assert _cyan_pixels(no_tf) > 100
     assert _green_pixels(no_tf) > 100
+
+
+def test_untrusted_camera_time_hides_costmap_then_recovers():
+    """Camera-time failure hides perception without hiding either path."""
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    fake._perception_costmap_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_alpha = 0.55
+    fake._costmap_radius = 2
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    _send_authorized_reference(fake, clock, REFERENCE_POINTS)
+    viewer_node.ArPathViewerNode._on_path(
+        fake, _path(PLAN_POINTS, clock.now)
+    )
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+
+    fake._image_input_kind = "video"
+    hidden = _tick_frame(fake)
+    hidden_magenta = (
+        (hidden[:, :, 0] > 120)
+        & (hidden[:, :, 1] < 130)
+        & (hidden[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(hidden_magenta) == 0
+    assert _cyan_pixels(hidden) > 100
+    assert _green_pixels(hidden) > 100
+    assert any(
+        "camera_time_alignment_unavailable" in message
+        and "untrusted_source" in message
+        for _, message in fake.logger.records
+    )
+
+    fake._image_input_kind = "simulation"
+    recovered = _tick_frame(fake)
+    recovered_magenta = (
+        (recovered[:, :, 0] > 120)
+        & (recovered[:, :, 1] < 130)
+        & (recovered[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(recovered_magenta) > 10
+    assert _cyan_pixels(recovered) > 100
+    assert _green_pixels(recovered) > 100
+
+
+def test_missing_image_time_tf_hides_costmap_without_hiding_paths():
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    fake._tf_buffer = MissingImageTimeTfBuffer(clock)
+    fake._perception_costmap_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_alpha = 0.55
+    fake._costmap_radius = 2
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    _send_authorized_reference(fake, clock, REFERENCE_POINTS)
+    viewer_node.ArPathViewerNode._on_path(fake, _path(PLAN_POINTS, clock.now))
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+
+    frame = _tick_frame(fake)
+    magenta = (
+        (frame[:, :, 0] > 120)
+        & (frame[:, :, 1] < 130)
+        & (frame[:, :, 2] > 140)
+    )
+    assert np.count_nonzero(magenta) == 0
+    assert _cyan_pixels(frame) > 100
+    assert _green_pixels(frame) > 100
+    assert any(
+        "camera_time_alignment_unavailable" in message
+        and "image-time TF unavailable" in message
+        for _, message in fake.logger.records
+    )
 
 
 def test_fresh_costmap_and_authorized_real_path_draw_explanation_card():

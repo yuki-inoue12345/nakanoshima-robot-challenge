@@ -9,6 +9,12 @@ import numpy as np
 
 from .costmap_overlay import ProjectedCostmap
 from .costmap_explanation import CostmapExplanation
+from .costmap_alerts import CostmapAlert
+from .costmap_minimap import (
+    CostmapMinimap,
+    draw_costmap_minimap,
+    draw_costmap_minimap_status,
+)
 from .offscreen_guidance import OffscreenGuidance
 
 
@@ -69,6 +75,32 @@ def draw_costmap_explanation(
         frame, label, (left + 14, top + 38 + baseline // 2), font,
         0.50, accent, 1, cv2.LINE_AA,
     )
+
+
+def draw_costmap_alert(
+    frame: np.ndarray,
+    alert: CostmapAlert | None,
+) -> None:
+    """Draw a neutral Costmap observation, never a generic danger claim."""
+    if alert is None:
+        return
+    accent = (
+        COSTMAP_LETHAL_BGR
+        if alert.kind in ("nearby", "lethal_path")
+        else COSTMAP_HIGH_BGR
+    )
+    label = alert.label[:38]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (text_width, text_height), baseline = cv2.getTextSize(label, font, 0.48, 1)
+    left, top = 10, 109
+    width = min(370, max(230, text_width + 22))
+    height = 38
+    layer = frame.copy()
+    cv2.rectangle(layer, (left, top), (left + width, top + height), (18, 18, 18), -1)
+    cv2.addWeighted(layer, 0.86, frame, 0.14, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (left + 5, top + height), accent, -1)
+    cv2.putText(frame, label, (left + 14, top + 24 + baseline // 2),
+                font, 0.48, accent, 1, cv2.LINE_AA)
 
 
 def draw_costmap_overlay(
@@ -357,6 +389,11 @@ def render_frame(
     costmap_alpha: float = 0.42,
     costmap_radius_px: int = 2,
     costmap_explanation: CostmapExplanation | None = None,
+    costmap_minimap: CostmapMinimap | None = None,
+    costmap_minimap_size_px: int = 142,
+    costmap_minimap_range_m: float = 3.0,
+    costmap_minimap_status: str = "",
+    costmap_alert: CostmapAlert | None = None,
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -413,6 +450,16 @@ def render_frame(
     ):
         _draw_navigation_status(frame, navigation_status)
     draw_costmap_explanation(frame, costmap_explanation)
+    draw_costmap_alert(frame, costmap_alert)
+    draw_costmap_minimap(
+        frame, costmap_minimap,
+        size_px=costmap_minimap_size_px,
+        range_m=costmap_minimap_range_m,
+    )
+    if costmap_minimap is None:
+        draw_costmap_minimap_status(
+            frame, costmap_minimap_status, size_px=costmap_minimap_size_px
+        )
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
     detail_lines = (
         textwrap.wrap(detail, width=68)[:2]

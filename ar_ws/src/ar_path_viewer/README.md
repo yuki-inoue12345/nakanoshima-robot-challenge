@@ -371,6 +371,43 @@ ros2 run ar_path_viewer ar_path_viewer --ros-args \
 物体種別を断定せず、未知領域が多い、TF/AMCL/Pathが古い、左右差が曖昧な場合は
 `perception_path_explanation visible=false`としてカードを表示しません。
 
+Local Costmapはmessageの`header.stamp`に対するTFだけで変換します。TFがmessageより
+後に届く実機順序に対応するため、最大`perception_costmap_tf_wait_timeout_sec`秒、
+最大`perception_costmap_max_pending_messages`件の有限キューで非同期に再試行します。
+期限切れ、frame変更、古い順序のmessageは棄却し、最新TFへの置換や時刻の偽装は
+行いません。直前のexact-time結果は通常のCostmap鮮度条件を満たす間だけ維持します。
+
+Costmap時刻のbase座標を後続の画像へ流用しません。各画像は`VideoCapture.read()`直前・
+直後のROS時刻とmonotonic時刻を記録し、C920ライブではread完了時のhost ROS時刻を
+撮影時刻の推定値として使います。これは露光時刻ではないため、既定ではCostmap年齢
+0.40秒、read所要時間0.12秒、Costmap時刻から画像時刻までの並進0.20 m・旋回15度を
+上限とします。両時刻のexact TFでCostmapの元frameから画像時刻のbaseへ再変換し、
+TF欠落、clock逆行、時刻差・移動量超過、base frameだけで固定座標へ戻せない入力では、
+実写マーカー、ミニマップ、説明、注意表示をまとめてfail closedで消します。`video`や
+`image`入力はROS時刻との対応がないため、Costmap ARの時刻としては採用しません。
+MP4とMCAPを同期再生するには別途明示的な時刻対応が必要です。
+
+レビュー用overlayでは次も個別に有効になります。
+
+- `perception_minimap_enabled`: ロボット前方を上にした小型俯瞰図。unknown、高コスト、
+  lethal-cost、実`/plan`、任意の参考Path、設定済みfootprintを区別します。
+- `perception_alert_enabled`: exact-time Costmapと有効な実`/plan`だけから
+  `HIGH COST NEAR PATH`、`LETHAL COST NEAR PATH`、
+  `COSTMAP ALERT: NEARBY`を判定します。一般的な「危険」や物体種別は断定しません。
+- `PATH UPDATED`: 既存のPath遷移ゲートが再計画を確定した事実だけを1秒表示します。
+
+警告は設定済みfootprintからの距離とPath corridorを使い、confirmation/releaseの
+ヒステリシスを持ちます。Path、TF、AMCL、Costmapのいずれかが不明・古い場合は
+fail closedで消え、不明を安全とは表示しません。実行中の表示だけを`C`（実写Costmap）、
+`M`（ミニマップ）、`E`（説明）、`A`（注意表示）で切り替えられます。このキー操作は
+ROS/Nav2設定を変更せず、設定で有効になっていないレイヤーを新規有効化もしません。
+通常設定とC920設定は全レイヤー既定OFF、
+`config/perception_costmap_review_overlay.yaml`だけが明示的にONです。
+
+MP4はOpenCVの固定fps形式で個別frame timestampを持たないため、Viewer callbackが遅れた
+場合は最後に実際に描画したframeで欠けた20fps slotを補います。これにより録画の再生時間
+が実セッションより短くなることを防ぎます。補間画像や架空経路は生成しません。
+
 ## ビルドとテスト
 
 ワークスペース直下で実行します。

@@ -24,9 +24,34 @@ ar_path_viewer:
     perception_costmap_high_cost_min: 60
     perception_costmap_lethal_cost_min: 100
     perception_costmap_max_points_per_class: 450
+    # 120x120 on-robot local grid; bound total cells before NumPy conversion.
+    perception_costmap_max_grid_width_cells: 512
+    perception_costmap_max_grid_height_cells: 512
+    perception_costmap_max_grid_cells: 65536
     perception_costmap_plane_height_m: 0.02
+    perception_costmap_tf_wait_timeout_sec: 1.5
+    perception_costmap_max_pending_messages: 8
+    # OpenCV host receive time is an estimate, not the C920 exposure stamp.
+    perception_camera_sync_max_age_sec: 0.40
+    perception_camera_sync_max_capture_duration_sec: 0.12
+    perception_camera_sync_max_frame_transport_age_sec: 0.12
+    perception_camera_sync_max_translation_m: 0.20
+    perception_camera_sync_max_rotation_deg: 15.0
+    perception_camera_sync_clock_tolerance_sec: 0.02
+    perception_camera_sync_future_tolerance_sec: 0.02
+    perception_camera_sync_exact_tf_tolerance_sec: 0.005
     perception_costmap_alpha: 0.42
     perception_costmap_radius_px: 2
+    perception_minimap_enabled: false
+    perception_minimap_size_px: 142
+    perception_minimap_range_m: 3.0
+    perception_alert_enabled: false
+    perception_alert_path_corridor_width_m: 0.35
+    perception_alert_nearby_lethal_distance_m: 0.60
+    perception_alert_robot_half_length_m: 0.30
+    perception_alert_robot_half_width_m: 0.29
+    perception_alert_confirm_sec: 0.25
+    perception_alert_release_sec: 0.40
     perception_explanation_enabled: false
     perception_explanation_forward_min_m: 0.40
     perception_explanation_forward_max_m: 2.50

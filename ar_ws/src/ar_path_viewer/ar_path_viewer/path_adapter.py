@@ -18,6 +18,8 @@ class PathSnapshot:
     frame_id: str
     received_monotonic: float
     generation: int
+    header_stamp_sec: Optional[float] = None
+    received_ros_sec: Optional[float] = None
 
 
 class PathStore:
@@ -39,7 +41,12 @@ class PathStore:
             raise ValueError(f"invalid frame_id: {frame_id!r}")
         return clean
 
-    def replace(self, points: np.ndarray, frame_id: str, received_at: float | None = None) -> PathSnapshot:
+    def replace(
+        self, points: np.ndarray, frame_id: str,
+        received_at: float | None = None,
+        *, header_stamp_sec: float | None = None,
+        received_ros_sec: float | None = None,
+    ) -> PathSnapshot:
         frame = self.validate_frame_id(frame_id)
         array = np.asarray(points, dtype=np.float64)
         if array.size == 0:
@@ -51,11 +58,20 @@ class PathStore:
         timestamp = self._clock() if received_at is None else float(received_at)
         if not np.isfinite(timestamp):
             raise ValueError("received_at must be finite")
+        if header_stamp_sec is not None and (
+            not np.isfinite(header_stamp_sec) or header_stamp_sec <= 0.0
+        ):
+            raise ValueError("Path header stamp must be finite and positive")
+        if received_ros_sec is not None and not np.isfinite(received_ros_sec):
+            raise ValueError("Path ROS receipt time must be finite")
         immutable = np.array(array, copy=True)
         immutable.setflags(write=False)
         with self._lock:
             self._generation += 1
-            self._snapshot = PathSnapshot(immutable, frame, timestamp, self._generation)
+            self._snapshot = PathSnapshot(
+                immutable, frame, timestamp, self._generation,
+                header_stamp_sec, received_ros_sec,
+            )
             return self._snapshot
 
     def snapshot(self) -> Optional[PathSnapshot]:

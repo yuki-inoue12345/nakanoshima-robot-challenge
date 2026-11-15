@@ -3,3 +3,5 @@ ar_path_viewer:
     # Review-only opt-in. The normal and C920 base profiles remain false.
     perception_costmap_enabled: true
     perception_explanation_enabled: true
+    perception_minimap_enabled: true
+    perception_alert_enabled: true

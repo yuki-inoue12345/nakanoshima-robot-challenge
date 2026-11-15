@@ -734,6 +734,22 @@ def test_d_key_toggles_debug_overlay_without_requesting_exit():
     assert viewer_node.is_debug_toggle_key(ord("D"))
     assert not viewer_node.is_debug_toggle_key(ord("q"))
 
+
+def test_perception_review_keys_map_only_to_read_only_display_layers():
+    assert viewer_node.perception_toggle_key(ord("c")) == (
+        "_perception_costmap_visible", "COSTMAP AR"
+    )
+    assert viewer_node.perception_toggle_key(ord("M")) == (
+        "_perception_minimap_visible", "MINIMAP"
+    )
+    assert viewer_node.perception_toggle_key(ord("e"))[0] == (
+        "_perception_explanation_visible"
+    )
+    assert viewer_node.perception_toggle_key(ord("A"))[0] == (
+        "_perception_alert_visible"
+    )
+    assert viewer_node.perception_toggle_key(ord("q")) is None
+
     fake = make_viewer()
     fake._display = True
     fake._display_window = RecordingDisplayWindow(ord("d"))

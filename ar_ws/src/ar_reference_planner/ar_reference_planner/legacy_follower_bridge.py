@@ -532,5 +532,14 @@ def main(args=None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+        try:
+            node.destroy_node()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            # ros2 launch can forward another SIGINT while rclpy is already
+            # tearing down parameter clients. The bridge owns no robot-side
+            # resource or control operation that needs a second cleanup pass.
+            pass
+        try:
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:
+            pass
