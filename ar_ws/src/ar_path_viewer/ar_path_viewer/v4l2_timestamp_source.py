@@ -7,6 +7,8 @@ particular may trail exposure.  The Viewer applies further age/motion gates.
 """
 
 import ctypes as C
+from dataclasses import dataclass
+import errno
 import fcntl
 import mmap
 import os
@@ -99,6 +101,24 @@ _TIMESTAMP_SOURCE_SOE = 0x00010000
 _BUF_ERROR = 0x00000040
 
 
+@dataclass(frozen=True)
+class V4L2ReadMetrics:
+    """Bounded per-read evidence; values never authorize an AR overlay."""
+
+    frame_timestamp_monotonic_sec: float | None = None
+    dequeue_monotonic_sec: float | None = None
+    transport_age_sec: float | None = None
+    read_duration_sec: float = 0.0
+    dequeue_duration_sec: float = 0.0
+    decode_duration_sec: float = 0.0
+    sequence: int | None = None
+    sequence_gap: int = 0
+    dequeued_buffers: int = 0
+    discarded_buffers: int = 0
+    total_discarded_buffers: int = 0
+    error_reason: str = ""
+
+
 def timestamp_from_v4l2_buffer(buf, *, monotonic_now):
     """Return (monotonic timestamp, kind) or raise for untrusted metadata."""
     if buf.flags & _BUF_ERROR:
@@ -137,6 +157,8 @@ class V4L2TimestampCameraSource:
         self.frame_timestamp_monotonic = None
         self.frame_timestamp_kind = ''
         self._last_sequence = None
+        self._discarded_buffer_total = 0
+        self.last_read_metrics = V4L2ReadMetrics()
         try:
             self._fd = os.open(device, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
             fmt = _Format()
@@ -182,47 +204,193 @@ class V4L2TimestampCameraSource:
         return buf
 
     def read(self):
+        read_started = time.monotonic()
         self.frame_timestamp_monotonic = None
         self.frame_timestamp_kind = ''
+        self.last_read_metrics = V4L2ReadMetrics(
+            total_discarded_buffers=self._discarded_buffer_total
+        )
         if self._fd < 0:
+            self._record_read_metrics(
+                read_started=read_started, error_reason='camera_closed'
+            )
             return None
         try:
             ready, _, _ = select.select([self._fd], [], [], 0.12)
-        except OSError:
+        except OSError as exc:
+            self._record_read_metrics(
+                read_started=read_started,
+                error_reason=f'v4l2_select_failed_errno_{exc.errno}',
+            )
             return None
         if not ready:
+            self._record_read_metrics(
+                read_started=read_started, error_reason='v4l2_select_timeout'
+            )
             return None
-        buf = self._new_buffer()
-        try:
-            fcntl.ioctl(self._fd, _DQBUF, buf, True)
-        except (BlockingIOError, OSError):
+
+        # V4L2 returns completed buffers in capture order.  Processing only
+        # one buffer per 20 Hz Viewer tick can permanently trail a 20 Hz
+        # camera by the other completed MMAP buffers.  Drain the finite ready
+        # set without blocking, requeue older buffers, and retain exactly the
+        # newest buffer with its own image bytes, sequence and kernel stamp.
+        candidate = None
+        dequeued = 0
+        discarded = 0
+        dequeue_started = time.monotonic()
+        dequeue_error = ''
+        for _ in range(len(self._mappings)):
+            buf = self._new_buffer()
+            try:
+                fcntl.ioctl(self._fd, _DQBUF, buf, True)
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    break
+                dequeue_error = f'v4l2_dequeue_failed_errno_{exc.errno}'
+                break
+            try:
+                self._validate_dequeued_buffer(buf)
+            except ValueError as exc:
+                dequeue_error = str(exc)
+                if buf.index < len(self._mappings):
+                    try:
+                        self._queue_buffer(buf.index)
+                    except OSError:
+                        pass
+                break
+            dequeued += 1
+            if candidate is not None:
+                try:
+                    self._queue_buffer(candidate.index)
+                except OSError as exc:
+                    dequeue_error = f'v4l2_qbuf_failed_errno_{exc.errno}'
+                    try:
+                        self._queue_buffer(buf.index)
+                    except OSError:
+                        pass
+                    candidate = None
+                    break
+                discarded += 1
+                self._discarded_buffer_total += 1
+            candidate = buf
+        dequeue_finished = time.monotonic()
+        if dequeue_error:
+            if candidate is not None:
+                try:
+                    self._queue_buffer(candidate.index)
+                except OSError:
+                    pass
+            self._record_read_metrics(
+                read_started=read_started,
+                dequeue_duration_sec=dequeue_finished - dequeue_started,
+                dequeued_buffers=dequeued,
+                discarded_buffers=discarded,
+                error_reason=dequeue_error,
+            )
             return None
+        if candidate is None:
+            self._record_read_metrics(
+                read_started=read_started,
+                dequeue_duration_sec=dequeue_finished - dequeue_started,
+                dequeued_buffers=dequeued,
+                discarded_buffers=discarded,
+                error_reason=dequeue_error or 'v4l2_dequeue_empty',
+            )
+            return None
+
+        image = None
+        stamp = None
+        kind = ''
+        sequence_gap = 0
+        decode_duration = 0.0
+        error_reason = dequeue_error
         try:
-            if buf.index >= len(self._mappings):
-                raise ValueError('V4L2 returned out-of-bounds buffer index')
-            if not 0 < buf.bytesused <= len(self._mappings[buf.index]):
-                raise ValueError('V4L2 returned invalid frame size')
             stamp, kind = timestamp_from_v4l2_buffer(
-                buf, monotonic_now=time.monotonic())
-            if self._last_sequence is not None and buf.sequence <= self._last_sequence:
+                candidate, monotonic_now=time.monotonic())
+            if (
+                self._last_sequence is not None
+                and candidate.sequence <= self._last_sequence
+            ):
                 raise ValueError('V4L2 frame sequence did not advance')
-            raw = self._mappings[buf.index][:buf.bytesused]
+            if self._last_sequence is not None:
+                sequence_gap = max(
+                    0, int(candidate.sequence) - int(self._last_sequence) - 1
+                )
+            raw = self._mappings[candidate.index][:candidate.bytesused]
+            decode_started = time.monotonic()
             image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            decode_duration = time.monotonic() - decode_started
             if image is None:
                 raise ValueError('V4L2 MJPEG frame could not be decoded')
-            self._last_sequence = buf.sequence
+            self._last_sequence = candidate.sequence
             self.frame_timestamp_monotonic = stamp
             self.frame_timestamp_kind = kind
-            return image
-        except ValueError:
-            return None
+        except ValueError as exc:
+            error_reason = str(exc)
+            image = None
         finally:
             try:
-                fcntl.ioctl(self._fd, _QBUF, self._new_buffer(buf.index), True)
-            except OSError:
+                self._queue_buffer(candidate.index)
+            except OSError as exc:
                 # Do not expose a timestamp from a failed video stream.
                 self.frame_timestamp_monotonic = None
                 self.frame_timestamp_kind = ''
+                error_reason = f'v4l2_qbuf_failed_errno_{exc.errno}'
+        self._record_read_metrics(
+            read_started=read_started,
+            dequeue_duration_sec=dequeue_finished - dequeue_started,
+            decode_duration_sec=decode_duration,
+            frame_timestamp_monotonic_sec=stamp,
+            dequeue_monotonic_sec=dequeue_finished,
+            sequence=int(candidate.sequence),
+            sequence_gap=sequence_gap,
+            dequeued_buffers=dequeued,
+            discarded_buffers=discarded,
+            error_reason=error_reason,
+        )
+        return image
+
+    def _validate_dequeued_buffer(self, buf):
+        if buf.index >= len(self._mappings):
+            raise ValueError('V4L2 returned out-of-bounds buffer index')
+        if not 0 < buf.bytesused <= len(self._mappings[buf.index]):
+            raise ValueError('V4L2 returned invalid frame size')
+
+    def _queue_buffer(self, index):
+        fcntl.ioctl(self._fd, _QBUF, self._new_buffer(index), True)
+
+    def _record_read_metrics(
+        self,
+        *,
+        read_started,
+        dequeue_duration_sec=0.0,
+        decode_duration_sec=0.0,
+        frame_timestamp_monotonic_sec=None,
+        dequeue_monotonic_sec=None,
+        sequence=None,
+        sequence_gap=0,
+        dequeued_buffers=0,
+        discarded_buffers=0,
+        error_reason='',
+    ):
+        finished = time.monotonic()
+        transport_age = None
+        if frame_timestamp_monotonic_sec is not None:
+            transport_age = finished - float(frame_timestamp_monotonic_sec)
+        self.last_read_metrics = V4L2ReadMetrics(
+            frame_timestamp_monotonic_sec=frame_timestamp_monotonic_sec,
+            dequeue_monotonic_sec=dequeue_monotonic_sec,
+            transport_age_sec=transport_age,
+            read_duration_sec=max(0.0, finished - float(read_started)),
+            dequeue_duration_sec=max(0.0, float(dequeue_duration_sec)),
+            decode_duration_sec=max(0.0, float(decode_duration_sec)),
+            sequence=sequence,
+            sequence_gap=max(0, int(sequence_gap)),
+            dequeued_buffers=max(0, int(dequeued_buffers)),
+            discarded_buffers=max(0, int(discarded_buffers)),
+            total_discarded_buffers=self._discarded_buffer_total,
+            error_reason=str(error_reason),
+        )
 
     def close(self):
         if getattr(self, '_fd', -1) >= 0:

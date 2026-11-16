@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
@@ -143,6 +145,22 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
         pending_frames=0,
         discarded_frames=2,
         recorded=True,
+        source_metrics=SimpleNamespace(
+            transport_age_sec=0.035,
+            read_duration_sec=0.008,
+            dequeue_duration_sec=0.001,
+            decode_duration_sec=0.004,
+            frame_timestamp_monotonic_sec=123.4,
+            dequeue_monotonic_sec=123.435,
+            sequence=42,
+            sequence_gap=3,
+            dequeued_buffers=4,
+            discarded_buffers=3,
+            total_discarded_buffers=9,
+            error_reason="",
+        ),
+        tick_interval_sec=0.05,
+        tick_duration_sec=0.012,
     )
     now[0] = 10.1
     reporter.camera_pipeline(
@@ -159,6 +177,15 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
     assert "timestamp_usable=0" in text
     assert "rendered=1" in text
     assert "recorded=1 pending=0 discarded=2" in text
+    assert "transport_age_ms=p50:35.0,p95:35.0,max:35.0" in text
+    assert "read_ms=p50:8.0,p95:8.0,max:8.0" in text
+    assert "dequeue_ms=p50:1.0,p95:1.0,max:1.0" in text
+    assert "decode_ms=p50:4.0,p95:4.0,max:4.0" in text
+    assert "tick_interval_ms=p50:50.0,p95:50.0,max:50.0" in text
+    assert "v4l2_sequence=42" in text
+    assert "sequence_gap=3 dequeued=4" in text
+    assert "v4l2_stamp_mono=123.4 dq_mono=123.435" in text
+    assert "source_discarded=3 source_discarded_total=9" in text
     assert reporter.camera_read_count == 2
     assert reporter.camera_read_success_count == 2
     assert reporter.camera_timestamp_usable_count == 1

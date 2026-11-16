@@ -1,5 +1,7 @@
 """Rate-limited diagnostics for Path reception and viewer state transitions."""
 
+from collections import deque
+import math
 import time
 from typing import Callable, Optional
 
@@ -31,6 +33,12 @@ class DiagnosticReporter:
         self.camera_display_frame_count = 0
         self.camera_synchronized_frame_count = 0
         self.camera_recorded_frame_count = 0
+        self._camera_transport_age_sec = deque(maxlen=200)
+        self._camera_read_duration_sec = deque(maxlen=200)
+        self._camera_dequeue_duration_sec = deque(maxlen=200)
+        self._camera_decode_duration_sec = deque(maxlen=200)
+        self._camera_tick_interval_sec = deque(maxlen=200)
+        self._camera_tick_duration_sec = deque(maxlen=200)
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -255,6 +263,9 @@ class DiagnosticReporter:
         pending_frames: int,
         discarded_frames: int,
         recorded: bool,
+        source_metrics=None,
+        tick_interval_sec: float | None = None,
+        tick_duration_sec: float | None = None,
     ) -> None:
         """Expose bounded camera/synchronization progress for field logs."""
         self.camera_read_count += 1
@@ -263,8 +274,53 @@ class DiagnosticReporter:
         self.camera_display_frame_count += 1
         self.camera_synchronized_frame_count += int(mode == "synchronized")
         self.camera_recorded_frame_count += int(bool(recorded))
+        self._append_camera_metric(
+            self._camera_transport_age_sec,
+            getattr(source_metrics, "transport_age_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_read_duration_sec,
+            getattr(source_metrics, "read_duration_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_dequeue_duration_sec,
+            getattr(source_metrics, "dequeue_duration_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_decode_duration_sec,
+            getattr(source_metrics, "decode_duration_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_tick_interval_sec, tick_interval_sec
+        )
+        self._append_camera_metric(
+            self._camera_tick_duration_sec, tick_duration_sec
+        )
         reason = str(timestamp_reason).split(" ", 1)[0]
         level = "info" if read_success else "warning"
+        usable_rate = (
+            100.0 * self.camera_timestamp_usable_count
+            / max(1, self.camera_read_count)
+        )
+        sync_rate = (
+            100.0 * self.camera_synchronized_frame_count
+            / max(1, self.camera_read_count)
+        )
+        source_detail = ""
+        if source_metrics is not None:
+            source_detail = (
+                f" v4l2_sequence={getattr(source_metrics, 'sequence', None)}"
+                " v4l2_stamp_mono="
+                f"{getattr(source_metrics, 'frame_timestamp_monotonic_sec', None)}"
+                " dq_mono="
+                f"{getattr(source_metrics, 'dequeue_monotonic_sec', None)}"
+                f" sequence_gap={getattr(source_metrics, 'sequence_gap', 0)}"
+                f" dequeued={getattr(source_metrics, 'dequeued_buffers', 0)}"
+                f" source_discarded={getattr(source_metrics, 'discarded_buffers', 0)}"
+                " source_discarded_total="
+                f"{getattr(source_metrics, 'total_discarded_buffers', 0)}"
+                f" source_error={getattr(source_metrics, 'error_reason', '') or 'none'}"
+            )
         self._emit(
             level,
             f"camera_pipeline:{mode}:{reason}",
@@ -277,8 +333,37 @@ class DiagnosticReporter:
             f"recorded={self.camera_recorded_frame_count} "
             f"pending={int(pending_frames)} "
             f"discarded={int(discarded_frames)} "
-            f"mode={mode} timestamp_reason={timestamp_reason}",
+            f"timestamp_usable_rate_pct={usable_rate:.1f} "
+            f"synchronized_rate_pct={sync_rate:.1f} "
+            f"transport_age_ms={self._camera_metric_summary(self._camera_transport_age_sec)} "
+            f"read_ms={self._camera_metric_summary(self._camera_read_duration_sec)} "
+            f"dequeue_ms={self._camera_metric_summary(self._camera_dequeue_duration_sec)} "
+            f"decode_ms={self._camera_metric_summary(self._camera_decode_duration_sec)} "
+            f"tick_interval_ms={self._camera_metric_summary(self._camera_tick_interval_sec)} "
+            f"tick_duration_ms={self._camera_metric_summary(self._camera_tick_duration_sec)} "
+            f"mode={mode} timestamp_reason={timestamp_reason}{source_detail}",
             force=self.camera_read_count == 1,
+        )
+
+    @staticmethod
+    def _append_camera_metric(values, value) -> None:
+        if value is None:
+            return
+        numeric = float(value)
+        if math.isfinite(numeric) and numeric >= 0.0:
+            values.append(numeric)
+
+    @staticmethod
+    def _camera_metric_summary(values) -> str:
+        if not values:
+            return "unavailable"
+        ordered = sorted(values)
+        count = len(ordered)
+        median = ordered[(count - 1) // 2]
+        p95 = ordered[max(0, math.ceil(count * 0.95) - 1)]
+        return (
+            f"p50:{median * 1000.0:.1f},"
+            f"p95:{p95 * 1000.0:.1f},max:{ordered[-1] * 1000.0:.1f}"
         )
 
     def localization_update(

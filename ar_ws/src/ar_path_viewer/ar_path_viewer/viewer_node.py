@@ -1348,8 +1348,17 @@ class ArPathViewerNode(Node):
         ui_state = ArPathViewerNode._ui_state_snapshot(self)
         debug_overlay = ui_state["_debug_overlay"]
         capture_started_monotonic = time.monotonic()
+        previous_tick_started = getattr(self, "_last_tick_started_monotonic", None)
+        tick_interval_sec = (
+            None if previous_tick_started is None
+            else capture_started_monotonic - float(previous_tick_started)
+        )
+        self._last_tick_started_monotonic = capture_started_monotonic
         capture_started_ros = self._ros_now_sec()
         captured_image = self._image_source.read()
+        source_read_metrics = getattr(
+            self._image_source, "last_read_metrics", None
+        )
         capture_finished_ros = self._ros_now_sec()
         capture_finished_monotonic = time.monotonic()
         previous_timing = getattr(self, "_last_image_frame_timing", None)
@@ -2236,6 +2245,9 @@ class ArPathViewerNode(Node):
                 0 if frame_delay is None else frame_delay.discarded
             ),
             recorded=recorded,
+            source_metrics=source_read_metrics,
+            tick_interval_sec=tick_interval_sec,
+            tick_duration_sec=time.monotonic() - capture_started_monotonic,
         )
 
     def _request_shutdown(self, reason: str) -> None:
