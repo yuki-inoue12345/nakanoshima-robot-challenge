@@ -75,6 +75,9 @@ def draw_costmap_minimap(
         return
     height, width = frame.shape[:2]
     left = max(8, width - size_px - 10)
+    # Retain the established right-column geometry so the top-down position
+    # remains stable across Viewer versions.  The compact legend is placed
+    # below the panel and does not move any Costmap cell.
     top = min(max(132, int(round(height * 0.29))), height - size_px - 10)
     right, bottom = left + size_px, top + size_px
     layer = frame.copy()
@@ -155,6 +158,34 @@ def draw_costmap_minimap(
     cv2.arrowedLine(frame, (center_x, origin_y - 2),
                     (center_x, origin_y - 2 * half_l - 7),
                     (230, 230, 230), 1, cv2.LINE_AA, tipLength=0.4)
+    _draw_costmap_legend(frame, left, bottom, size_px)
+
+
+def _draw_costmap_legend(
+    frame: np.ndarray, left: int, bottom: int, size_px: int
+) -> None:
+    """Label Nav2 cost classes without using a generic danger claim."""
+    if bottom + 17 >= frame.shape[0]:
+        return
+    items = (
+        ("UNK", (90, 80, 65)),
+        ("HIGH", (20, 190, 230)),
+        ("LETHAL", (205, 45, 235)),
+    )
+    layer = frame.copy()
+    cv2.rectangle(
+        layer, (left, bottom + 2), (left + size_px, bottom + 20),
+        (12, 12, 12), -1,
+    )
+    cv2.addWeighted(layer, 0.82, frame, 0.18, 0.0, frame)
+    x = left + 5
+    for label, color in items:
+        cv2.rectangle(frame, (x, bottom + 8), (x + 5, bottom + 13), color, -1)
+        cv2.putText(
+            frame, label, (x + 8, bottom + 14), cv2.FONT_HERSHEY_SIMPLEX,
+            0.24, color, 1, cv2.LINE_AA,
+        )
+        x += {"UNK": 38, "HIGH": 44, "LETHAL": 54}[label]
 
 
 def draw_costmap_minimap_status(

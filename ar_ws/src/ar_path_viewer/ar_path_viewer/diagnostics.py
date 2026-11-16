@@ -25,6 +25,12 @@ class DiagnosticReporter:
         self.path_receive_count = 0
         self.reference_receive_count = 0
         self.costmap_receive_count = 0
+        self.camera_read_count = 0
+        self.camera_read_success_count = 0
+        self.camera_timestamp_usable_count = 0
+        self.camera_display_frame_count = 0
+        self.camera_synchronized_frame_count = 0
+        self.camera_recorded_frame_count = 0
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -237,6 +243,42 @@ class DiagnosticReporter:
             "camera_configuration",
             f"camera_configuration {detail}",
             force=True,
+        )
+
+    def camera_pipeline(
+        self,
+        *,
+        read_success: bool,
+        timestamp_usable: bool,
+        timestamp_reason: str,
+        mode: str,
+        pending_frames: int,
+        discarded_frames: int,
+        recorded: bool,
+    ) -> None:
+        """Expose bounded camera/synchronization progress for field logs."""
+        self.camera_read_count += 1
+        self.camera_read_success_count += int(bool(read_success))
+        self.camera_timestamp_usable_count += int(bool(timestamp_usable))
+        self.camera_display_frame_count += 1
+        self.camera_synchronized_frame_count += int(mode == "synchronized")
+        self.camera_recorded_frame_count += int(bool(recorded))
+        reason = str(timestamp_reason).split(" ", 1)[0]
+        level = "info" if read_success else "warning"
+        self._emit(
+            level,
+            f"camera_pipeline:{mode}:{reason}",
+            "camera_pipeline "
+            f"reads={self.camera_read_count} "
+            f"read_success={self.camera_read_success_count} "
+            f"timestamp_usable={self.camera_timestamp_usable_count} "
+            f"rendered={self.camera_display_frame_count} "
+            f"synchronized={self.camera_synchronized_frame_count} "
+            f"recorded={self.camera_recorded_frame_count} "
+            f"pending={int(pending_frames)} "
+            f"discarded={int(discarded_frames)} "
+            f"mode={mode} timestamp_reason={timestamp_reason}",
+            force=self.camera_read_count == 1,
         )
 
     def localization_update(

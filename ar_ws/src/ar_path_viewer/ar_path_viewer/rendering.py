@@ -93,15 +93,36 @@ def draw_costmap_alert(
     label = alert.label[:38]
     font = cv2.FONT_HERSHEY_SIMPLEX
     (text_width, text_height), baseline = cv2.getTextSize(label, font, 0.48, 1)
+    detail_label = ""
+    for prefix, title in (
+        ("nearest_lethal_m=", "LETHAL CELL GAP"),
+        ("path_distance_m=", "PATH GAP"),
+    ):
+        if alert.detail.startswith(prefix):
+            try:
+                detail_label = f"{title} {float(alert.detail[len(prefix):]):.2f} m"
+            except ValueError:
+                detail_label = ""
+            break
+    if alert.detail == "confirmed_real_plan_generation_change":
+        detail_label = "REAL /plan GENERATION CHANGED"
     left, top = 10, 109
     width = min(370, max(230, text_width + 22))
+    if detail_label:
+        width = min(370, max(width, 278))
     height = 38
     layer = frame.copy()
     cv2.rectangle(layer, (left, top), (left + width, top + height), (18, 18, 18), -1)
     cv2.addWeighted(layer, 0.86, frame, 0.14, 0.0, frame)
     cv2.rectangle(frame, (left, top), (left + 5, top + height), accent, -1)
-    cv2.putText(frame, label, (left + 14, top + 24 + baseline // 2),
+    label_y = top + (15 if detail_label else 24) + baseline // 2
+    cv2.putText(frame, label, (left + 14, label_y),
                 font, 0.48, accent, 1, cv2.LINE_AA)
+    if detail_label:
+        cv2.putText(
+            frame, detail_label, (left + 14, top + 32), font,
+            0.31, (205, 205, 205), 1, cv2.LINE_AA,
+        )
 
 
 def draw_costmap_overlay(

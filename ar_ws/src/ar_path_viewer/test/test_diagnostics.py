@@ -131,6 +131,42 @@ def test_effective_camera_configuration_is_logged_once_with_projection_values():
     ]
 
 
+def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
+    now = [10.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 5.0, clock=lambda: now[0])
+    reporter.camera_pipeline(
+        read_success=True,
+        timestamp_usable=False,
+        timestamp_reason="camera_timestamp_missing",
+        mode="preview_sync_wait",
+        pending_frames=0,
+        discarded_frames=2,
+        recorded=True,
+    )
+    now[0] = 10.1
+    reporter.camera_pipeline(
+        read_success=True,
+        timestamp_usable=True,
+        timestamp_reason="v4l2_monotonic_soe",
+        mode="synchronized",
+        pending_frames=3,
+        discarded_frames=2,
+        recorded=True,
+    )
+    text = "\n".join(message for _, message in logger.records)
+    assert "camera_pipeline reads=1 read_success=1" in text
+    assert "timestamp_usable=0" in text
+    assert "rendered=1" in text
+    assert "recorded=1 pending=0 discarded=2" in text
+    assert reporter.camera_read_count == 2
+    assert reporter.camera_read_success_count == 2
+    assert reporter.camera_timestamp_usable_count == 1
+    assert reporter.camera_display_frame_count == 2
+    assert reporter.camera_synchronized_frame_count == 1
+    assert reporter.camera_recorded_frame_count == 2
+
+
 def test_emitted_diagnostics_are_forwarded_to_session_sink():
     logger = RecordingLogger()
     saved = []

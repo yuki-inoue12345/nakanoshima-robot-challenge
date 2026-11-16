@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 import threading
 
+import cv2
 import numpy as np
 import pytest
 from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
 from ar_path_viewer.display_dispatch import LatestDisplayFrame
+from ar_path_viewer.costmap_overlay import CostmapCameraSyncSettings
 from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.localization_monitor import (
     AmclObservation,
@@ -15,6 +17,7 @@ from ar_path_viewer.localization_monitor import (
 )
 from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.path_transition import PathTransitionGate
+from ar_path_viewer.perception_frame_delay import DelayedFrame, PerceptionFrameDelay
 from ar_path_viewer.offscreen_guidance import GuidanceSettings
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
@@ -56,6 +59,21 @@ class RecordingWriter:
 
     def release(self):
         self.release_count += 1
+
+
+class CountingWriter:
+    """Bounded test writer for long camera-pipeline runs."""
+
+    def __init__(self):
+        self.frame_count = 0
+        self.first_pixels = []
+
+    def write(self, frame):
+        self.frame_count += 1
+        self.first_pixels.append(int(frame[0, 0, 0]))
+
+    def release(self):
+        pass
 
 
 class RecordingDisplayWindow:
@@ -961,6 +979,222 @@ def test_worker_tick_never_calls_highgui_and_main_thread_consumes_frame():
 
     process_latest_display_frame(fake)
     assert len(fake._display_window.frames) == 1
+
+
+def test_frame_sync_wait_keeps_fresh_camera_visible_for_thirty_seconds(monkeypatch):
+    """Untrusted exposure time suppresses AR, never the live camera image."""
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((state, int(image[0, 0, 0]), list(segments)))
+        return image.copy()
+
+    class ChangingTimestampedSource(ImageSource):
+        def __init__(self):
+            super().__init__()
+            self.index = 0
+            self.frame_timestamp_monotonic = None
+            self.frame_timestamp_kind = ""
+
+        def read(self):
+            self.index += 1
+            # Values never include black.  A black rendered frame therefore
+            # proves that the Viewer replaced a successful camera read.
+            value = 20 + self.index % 200
+            return np.full_like(self.image, value)
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._image_source = ChangingTimestampedSource()
+    fake._image_input_kind = "camera_timestamped"
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
+    fake._perception_frame_delay = PerceptionFrameDelay(
+        delay_sec=0.12, max_age_sec=0.30
+    )
+    fake._writer = CountingWriter()
+
+    # 600 frames is 30 seconds at the configured 20 fps.  Hardware exposure
+    # metadata is deliberately unavailable for the whole run.
+    for _ in range(600):
+        viewer_node.ArPathViewerNode._tick(fake)
+
+    assert fake._writer.frame_count == 600
+    assert len(rendered) == 600
+    assert all(state == "FRAME SYNC WAIT" for state, _, _ in rendered)
+    assert all(pixel >= 20 for _, pixel, _ in rendered)
+    assert all(not segments for _, _, segments in rendered)
+    assert fake._perception_frame_delay.pending_count == 0
+
+
+def test_exact_tf_wait_keeps_preview_then_recovers_same_synchronized_frame(monkeypatch):
+    """A retained candidate cannot freeze preview and is used only after TF."""
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((state, int(image[0, 0, 0]), list(segments)))
+        return image.copy()
+
+    class CurrentFrameSource(ImageSource):
+        def read(self):
+            return np.full_like(self.image, 90)
+
+    class RetainedFrameDelay:
+        def __init__(self):
+            timing = SimpleNamespace(
+                usable=True, reason="v4l2_monotonic_soe", stamp_sec=100.1,
+                monotonic_finished_sec=10.0,
+            )
+            self.item = DelayedFrame(
+                image=np.full((480, 640, 3), 30, np.uint8), timing=timing
+            )
+            self.pending_count = 1
+            self.discarded = 0
+            self.consumed = False
+
+        def add(self, image, timing):
+            pass
+
+        def peek(self, now):
+            return self.item
+
+        def consume(self, item):
+            assert item is self.item
+            self.consumed = True
+            self.pending_count = 0
+            return True
+
+        def clear(self):
+            pass
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._image_source = CurrentFrameSource()
+    fake._image_input_kind = "simulation"
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
+    fake._perception_frame_delay = RetainedFrameDelay()
+    fake._base_frame = "robot/base_footprint"
+    tf_ready = [False]
+
+    def transform_at_image_time(_self, points, _frame, _stamp):
+        if not tf_ready[0]:
+            raise RuntimeError("exact image-time TF has not arrived")
+        return np.asarray(points, dtype=np.float64)
+
+    monkeypatch.setattr(
+        viewer_node.ArPathViewerNode,
+        "_points_in_base_at",
+        transform_at_image_time,
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 0.0, 0.0), (4.0, 0.0, 0.0)))
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert rendered[-1] == ("FRAME SYNC WAIT", 90, [])
+    assert not fake._perception_frame_delay.consumed
+
+    tf_ready[0] = True
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][0] == "ACTIVE"
+    assert rendered[-1][1] == 30
+    assert rendered[-1][2]
+    assert fake._perception_frame_delay.consumed
+
+
+def test_camera_read_failure_never_replays_a_buffered_delayed_frame(monkeypatch):
+    rendered = []
+
+    class FailedSource(ImageSource):
+        def read(self):
+            return None
+
+    class OldFrameDelay:
+        pending_count = 1
+        discarded = 0
+
+        def __init__(self):
+            self.cleared = False
+
+        def clear(self):
+            self.cleared = True
+            self.pending_count = 0
+
+        def peek(self, _now):
+            raise AssertionError("a failed current read must not replay old pixels")
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((state, int(np.max(image)), list(segments)))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    fake = make_viewer()
+    fake._image_source = FailedSource()
+    fake._image_input_kind = "camera_timestamped"
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
+    fake._perception_frame_delay = OldFrameDelay()
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert fake._perception_frame_delay.cleared
+    assert rendered[-1] == ("CAMERA UNAVAILABLE", 0, [])
+
+
+def test_frame_sync_wait_live_preview_is_recorded_at_twenty_fps(
+    monkeypatch, tmp_path
+):
+    class ChangingTimestampedSource(ImageSource):
+        def __init__(self):
+            super().__init__()
+            self.index = 0
+            self.frame_timestamp_monotonic = None
+            self.frame_timestamp_kind = ""
+
+        def read(self):
+            self.index += 1
+            frame = np.full_like(self.image, 35 + self.index)
+            cv2.circle(frame, (40 + self.index * 5, 260), 14, (220, 180, 60), -1)
+            return frame
+
+    # Keep this test about the Viewer pipeline, not text rasterization.
+    monkeypatch.setattr(
+        viewer_node,
+        "render_frame",
+        lambda image, segments, state, *args, **kwargs: image.copy(),
+    )
+    fake = make_viewer()
+    fake._image_source = ChangingTimestampedSource()
+    fake._image_input_kind = "camera_timestamped"
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
+    fake._perception_frame_delay = PerceptionFrameDelay(
+        delay_sec=0.12, max_age_sec=0.30
+    )
+    output = tmp_path / "sync_wait_preview.mp4"
+    writer = cv2.VideoWriter(
+        str(output), cv2.VideoWriter_fourcc(*"mp4v"), 20.0, (640, 480)
+    )
+    if not writer.isOpened():
+        pytest.skip("OpenCV MP4 writer is unavailable")
+    fake._writer = writer
+
+    for _ in range(40):
+        viewer_node.ArPathViewerNode._tick(fake)
+    writer.release()
+    fake._writer = None
+
+    capture = cv2.VideoCapture(str(output))
+    assert capture.isOpened()
+    assert capture.get(cv2.CAP_PROP_FPS) == pytest.approx(20.0, abs=0.1)
+    decoded = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    capture.release()
+    assert len(decoded) == 40
+    assert all(float(frame.mean()) > 20.0 for frame in decoded)
+    assert not np.array_equal(decoded[0], decoded[-1])
 
 
 def test_ui_state_changes_are_applied_to_the_next_complete_frame(monkeypatch):

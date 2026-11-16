@@ -1349,7 +1349,7 @@ class ArPathViewerNode(Node):
         debug_overlay = ui_state["_debug_overlay"]
         capture_started_monotonic = time.monotonic()
         capture_started_ros = self._ros_now_sec()
-        image = self._image_source.read()
+        captured_image = self._image_source.read()
         capture_finished_ros = self._ros_now_sec()
         capture_finished_monotonic = time.monotonic()
         previous_timing = getattr(self, "_last_image_frame_timing", None)
@@ -1375,30 +1375,57 @@ class ArPathViewerNode(Node):
                 self._image_source, "frame_timestamp_kind", ""
             ),
         )
+        captured_image_timing = image_timing
         self._last_image_frame_timing = image_timing
+        # The newest successfully acquired image has a separate role from the
+        # delayed image used for exact-time AR.  A missing/untrusted exposure
+        # timestamp must suppress overlays, never replace valid C920 pixels
+        # with a synthetic black frame.
+        preview_image = captured_image
+        if preview_image is not None:
+            source_shape = (
+                self._source_intrinsics.height,
+                self._source_intrinsics.width,
+            )
+            if preview_image.shape[:2] != source_shape:
+                preview_image = cv2.resize(
+                    preview_image,
+                    (
+                        self._source_intrinsics.width,
+                        self._source_intrinsics.height,
+                    ),
+                )
+            if self._undistorter is not None:
+                preview_image = self._undistorter.apply(preview_image)
+        image = preview_image
         waiting_for_delayed_frame = False
+        frame_sync_wait_reason = ""
         delayed_frame = None
         retry_delayed_frame = False
+        camera_pipeline_mode = "direct"
         frame_delay = getattr(self, "_perception_frame_delay", None)
         if frame_delay is not None:
-            if image is not None and not image_timing.usable:
+            camera_pipeline_mode = "preview_sync_wait"
+            if preview_image is None:
+                # Do not replay a buffered old frame when the current camera
+                # acquisition failed.  CAMERA UNAVAILABLE is explicit.
+                frame_delay.clear()
+            elif not image_timing.usable:
                 # An invalid acquired timestamp starts a new unsafe epoch.
                 frame_delay.clear()
-            elif image is not None:
-                frame_delay.add(image, image_timing)
-            delayed_frame = frame_delay.peek(time.monotonic())
-            if delayed_frame is not None:
-                image = delayed_frame.image
-                image_timing = delayed_frame.timing
+                waiting_for_delayed_frame = True
+                frame_sync_wait_reason = image_timing.reason
             else:
-                if frame_delay.pending_count > 0:
+                frame_delay.add(preview_image, image_timing)
+            if preview_image is not None and image_timing.usable:
+                delayed_frame = frame_delay.peek(time.monotonic())
+                if delayed_frame is not None:
+                    image = delayed_frame.image
+                    image_timing = delayed_frame.timing
+                    camera_pipeline_mode = "synchronized"
+                else:
                     waiting_for_delayed_frame = True
-                elif image is not None:
-                    # The frame was rejected above; never render it with a
-                    # fabricated timestamp.
-                    waiting_for_delayed_frame = True
-                if waiting_for_delayed_frame:
-                    image = None
+                    frame_sync_wait_reason = "image_time_tf_buffering"
         state = "NO PATH"
         detail = ""
         guidance = None
@@ -1406,14 +1433,8 @@ class ArPathViewerNode(Node):
         navigation_status = ""
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
-            state = (
-                "FRAME SYNC WAIT" if waiting_for_delayed_frame
-                else "CAMERA UNAVAILABLE"
-            )
-            detail = (
-                "buffering fresh frame for image-time TF"
-                if waiting_for_delayed_frame else "image source returned no frame"
-            )
+            state = "CAMERA UNAVAILABLE"
+            detail = "image source returned no frame"
             frame = render_frame(
                 image, [], state, debug_overlay=debug_overlay
             )
@@ -1431,21 +1452,21 @@ class ArPathViewerNode(Node):
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
             )
-        else:
-            source_shape = (
-                self._source_intrinsics.height,
-                self._source_intrinsics.width,
+        elif waiting_for_delayed_frame:
+            # Show the current camera image while every AR layer remains
+            # fail-closed.  This is a live preview, not a time-aligned frame.
+            state = "FRAME SYNC WAIT"
+            detail = (
+                f"camera_live overlays_hidden reason={frame_sync_wait_reason}; "
+                f"queue={frame_delay.pending_count} "
+                f"discarded={frame_delay.discarded} "
+                f"image_stamp={captured_image_timing.stamp_sec:.6f}"
             )
-            if image.shape[:2] != source_shape:
-                image = cv2.resize(
-                    image,
-                    (
-                        self._source_intrinsics.width,
-                        self._source_intrinsics.height,
-                    ),
-                )
-            if self._undistorter is not None:
-                image = self._undistorter.apply(image)
+            frame = render_frame(
+                image, [], state, detail=detail,
+                debug_overlay=debug_overlay,
+            )
+        else:
             state, snapshot = self._path_store.state()
             segments = []
             reference_segments = []
@@ -2090,6 +2111,14 @@ class ArPathViewerNode(Node):
                     f"{0 if costmap_snapshot is None else costmap_snapshot.sampled_cells} "
                     f"visible={0 if costmap_projection is None else costmap_projection.visible_points}"
                 )
+                if debug_overlay:
+                    costmap_summary += (
+                        f" image_stamp={image_timing.stamp_sec:.6f} "
+                        "costmap_stamp="
+                        f"{0.0 if costmap_snapshot is None else costmap_snapshot.stamp_sec:.6f} "
+                        "path_gen="
+                        f"{0 if snapshot is None else snapshot.generation}"
+                    )
                 detail = (
                     f"{detail}; {costmap_summary}"
                     if detail else costmap_summary
@@ -2118,8 +2147,31 @@ class ArPathViewerNode(Node):
                 costmap_explanation = None
                 costmap_minimap = None
                 costmap_alert = None
+                # Keep the exact image/timestamp pair queued for a later TF
+                # retry, but never freeze that old image on screen.  The live
+                # preview remains visible with every unsynchronized overlay
+                # suppressed.
+                image = preview_image
+                camera_pipeline_mode = "preview_tf_wait"
             elif delayed_frame is not None:
                 frame_delay.consume(delayed_frame)
+            if state == "FRAME SYNC WAIT":
+                # A newer Path or any other image-time mismatch can reach this
+                # state after a delayed candidate was selected.  Keep the
+                # camera live and clear every overlay rather than presenting
+                # an old synchronized image as though it were current.
+                image = preview_image
+                segments = []
+                reference_segments = []
+                guidance = None
+                waypoint_status = ""
+                navigation_status = ""
+                costmap_projection = None
+                costmap_explanation = None
+                costmap_minimap = None
+                costmap_alert = None
+                if camera_pipeline_mode == "synchronized":
+                    camera_pipeline_mode = "preview_path_wait"
             frame = render_frame(
                 image,
                 segments,
@@ -2164,9 +2216,27 @@ class ArPathViewerNode(Node):
                 costmap_alert=costmap_alert,
             )
         self._diagnostics.state_changed(state, detail)
+        recorded = False
         if self._writer is not None:
             self._writer.write(frame)
+            recorded = True
         ArPathViewerNode._publish_display_frame(self, frame)
+        self._diagnostics.camera_pipeline(
+            read_success=captured_image is not None,
+            timestamp_usable=captured_image_timing.usable,
+            timestamp_reason=captured_image_timing.reason,
+            mode=(
+                "unavailable" if captured_image is None
+                else camera_pipeline_mode
+            ),
+            pending_frames=(
+                0 if frame_delay is None else frame_delay.pending_count
+            ),
+            discarded_frames=(
+                0 if frame_delay is None else frame_delay.discarded
+            ),
+            recorded=recorded,
+        )
 
     def _request_shutdown(self, reason: str) -> None:
         if self._shutdown_requested:

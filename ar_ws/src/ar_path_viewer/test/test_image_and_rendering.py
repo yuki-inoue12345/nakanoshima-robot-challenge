@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 
 from ar_path_viewer import display_window
+from ar_path_viewer.costmap_alerts import CostmapAlert
+from ar_path_viewer.costmap_minimap import CostmapMinimap
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.offscreen_guidance import OffscreenGuidance
 from ar_path_viewer.paced_video_writer import PacedVideoWriter
@@ -328,6 +330,48 @@ def test_green_path_alpha_keeps_camera_context_visible():
     assert np.array_equal(translucent[100, 160], image[100, 160])
     with pytest.raises(ValueError):
         render_frame(image, route, "ACTIVE", path_alpha=0.0)
+
+
+def test_costmap_alert_and_robot_view_label_class_and_metric_evidence():
+    image = np.full((480, 640, 3), 70, np.uint8)
+    minimap = CostmapMinimap(
+        points_in_base=np.asarray(((1.0, 0.0, 0.0),), dtype=float),
+        costs=np.asarray((100,), dtype=np.int16),
+        path_points_base=np.asarray(
+            ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0)), dtype=float
+        ),
+        high_cost_min=60,
+        lethal_cost_min=100,
+    )
+    frame = render_frame(
+        image,
+        [],
+        "ACTIVE",
+        costmap_alert=CostmapAlert(
+            "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.234"
+        ),
+        costmap_minimap=minimap,
+    )
+    no_metric_detail = render_frame(
+        image,
+        [],
+        "ACTIVE",
+        costmap_alert=CostmapAlert(
+            "LETHAL COST NEAR PATH", "lethal_path", ""
+        ),
+        costmap_minimap=minimap,
+    )
+
+    # The metric evidence is an actual second line inside the compact alert,
+    # not merely the same card background or a generic danger label.
+    assert np.any(frame[130:145, 20:288] != no_metric_detail[130:145, 20:288])
+    # The compact legend below ROBOT VIEW contains distinct high/lethal class
+    # colors without replacing the live camera outside the right column.
+    high = (frame[:, :, 0] == 20) & (frame[:, :, 1] == 190) & (frame[:, :, 2] == 230)
+    lethal = (frame[:, :, 0] == 205) & (frame[:, :, 1] == 45) & (frame[:, :, 2] == 235)
+    assert np.count_nonzero(high[280:310, 480:]) > 0
+    assert np.count_nonzero(lethal[280:310, 480:]) > 0
+    assert np.array_equal(frame[280:310, :450], image[280:310, :450])
 
 
 def test_replanning_and_navigation_hold_show_status_without_route():
