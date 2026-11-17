@@ -1,5 +1,6 @@
 """Validation and atomically replaced state for incoming nav_msgs/Path data."""
 
+from collections import deque
 from dataclasses import dataclass
 import re
 import threading
@@ -25,13 +26,21 @@ class PathSnapshot:
 class PathStore:
     """Thread-safe whole-Path exchange with monotonic staleness tracking."""
 
-    def __init__(self, timeout_sec: float = 6.5, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        timeout_sec: float = 6.5,
+        clock: Callable[[], float] = time.monotonic,
+        history_size: int = 8,
+    ):
         if timeout_sec <= 0.0 or not np.isfinite(timeout_sec):
             raise ValueError("timeout_sec must be finite and positive")
         self.timeout_sec = float(timeout_sec)
         self._clock = clock
         self._lock = threading.Lock()
         self._snapshot: Optional[PathSnapshot] = None
+        if int(history_size) < 1:
+            raise ValueError("history_size must be positive")
+        self._history = deque(maxlen=int(history_size))
         self._generation = 0
 
     @staticmethod
@@ -68,10 +77,13 @@ class PathStore:
         immutable.setflags(write=False)
         with self._lock:
             self._generation += 1
+            if len(immutable) == 0:
+                self._history.clear()
             self._snapshot = PathSnapshot(
                 immutable, frame, timestamp, self._generation,
                 header_stamp_sec, received_ros_sec,
             )
+            self._history.append(self._snapshot)
             return self._snapshot
 
     def snapshot(self) -> Optional[PathSnapshot]:
@@ -83,6 +95,38 @@ class PathStore:
         with self._lock:
             self._generation += 1
             self._snapshot = None
+            self._history.clear()
+
+    def state_for_ros_time(
+        self, image_stamp_sec: float, now: float | None = None
+    ) -> Tuple[str, Optional[PathSnapshot]]:
+        """Return the newest Path that had arrived by an image exposure time.
+
+        This is deliberately based on the immutable ROS receipt timestamp, not
+        the Path header (which describes plan generation).  It prevents a new
+        plan from being drawn onto an older delayed camera frame.  Invalid or
+        empty updates clear the complete history, so this method cannot revive
+        a route across a fail-closed boundary.
+        """
+        stamp = float(image_stamp_sec)
+        if not np.isfinite(stamp) or stamp <= 0.0:
+            return "NO PATH", None
+        with self._lock:
+            candidates = tuple(self._history)
+        snapshot = next(
+            (
+                item for item in reversed(candidates)
+                if item.received_ros_sec is not None
+                and item.received_ros_sec <= stamp + 1e-9
+            ),
+            None,
+        )
+        if snapshot is None or len(snapshot.points) == 0:
+            return "NO PATH", snapshot
+        timestamp = self._clock() if now is None else float(now)
+        if timestamp - snapshot.received_monotonic > self.timeout_sec:
+            return "PATH STALE", snapshot
+        return "ACTIVE", snapshot
 
     def state(self, now: float | None = None) -> Tuple[str, Optional[PathSnapshot]]:
         snapshot = self.snapshot()

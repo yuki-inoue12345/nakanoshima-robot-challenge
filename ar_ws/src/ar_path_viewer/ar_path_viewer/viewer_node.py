@@ -42,6 +42,7 @@ from .costmap_path_sync import (
 from .costmap_alerts import (
     CostmapAlert,
     CostmapAlertGate,
+    CostmapAlertHistoryGate,
     CostmapAlertSettings,
     evaluate_costmap_alert,
 )
@@ -448,6 +449,9 @@ class ArPathViewerNode(Node):
                 self._costmap_alert_settings.release_sec,
                 clock=self._ros_now_sec,
             )
+            self._costmap_alert_history_gate = CostmapAlertHistoryGate(
+                2.5, clock=self._ros_now_sec
+            )
             if (
                 not math.isfinite(self._costmap_tf_max_age)
                 or self._costmap_tf_max_age <= 0.0
@@ -543,6 +547,7 @@ class ArPathViewerNode(Node):
             self._perception_alert_visible = False
             self._costmap_alert_settings = CostmapAlertSettings()
             self._costmap_alert_gate = CostmapAlertGate(0.0)
+            self._costmap_alert_history_gate = CostmapAlertHistoryGate(2.5)
             self._perception_explanation_enabled = False
             self._perception_explanation_visible = False
             self._costmap_explanation_settings = CostmapExplanationSettings()
@@ -1505,6 +1510,8 @@ class ArPathViewerNode(Node):
         guidance = None
         waypoint_status = ""
         navigation_status = ""
+        render_started_monotonic = time.monotonic()
+        render_duration_sec = 0.0
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
             state = "CAMERA UNAVAILABLE"
@@ -1514,24 +1521,29 @@ class ArPathViewerNode(Node):
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
+            render_duration_sec = time.monotonic() - render_started_monotonic
         elif self._camera_error:
             state = "CAMERA UNAVAILABLE"
             detail = self._camera_error
+            render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
+            render_duration_sec = time.monotonic() - render_started_monotonic
         elif self._config_error:
             state = "INVALID CONFIG"
             detail = self._config_error
+            render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
+            render_duration_sec = time.monotonic() - render_started_monotonic
         elif waiting_for_delayed_frame:
             # Show the current camera image while every AR layer remains
             # fail-closed.  This is a live preview, not a time-aligned frame.
@@ -1542,12 +1554,14 @@ class ArPathViewerNode(Node):
                 f"discarded={frame_delay.discarded} "
                 f"image_stamp={captured_image_timing.stamp_sec:.6f}"
             )
+            render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
+            render_duration_sec = time.monotonic() - render_started_monotonic
         else:
             state, snapshot = self._path_store.state()
             segments = []
@@ -1579,6 +1593,8 @@ class ArPathViewerNode(Node):
             costmap_reference_points_base = None
             costmap_minimap = None
             costmap_alert = None
+            costmap_alert_history = None
+            costmap_alert_evaluation = "unavailable"
             costmap_alert_reason = "disabled_by_configuration"
             alert_gate = getattr(self, "_costmap_alert_gate", None)
             if alert_gate is None:
@@ -1587,6 +1603,8 @@ class ArPathViewerNode(Node):
             costmap_explanation = None
             costmap_explanation_reason = "disabled_by_configuration"
             path_points_base = None
+            real_path_image_history = False
+            reference_path_image_history = False
             if costmap_enabled:
                 if delayed_frame is not None:
                     costmap_state, costmap_snapshot, costmap_reason = (
@@ -1624,22 +1642,42 @@ class ArPathViewerNode(Node):
                     and snapshot.received_ros_sec is not None
                     and snapshot.received_ros_sec > image_timing.stamp_sec
                 ):
-                    state = "FRAME SYNC WAIT"
-                    detail = (
-                        "real_path_newer_than_image offset="
-                        f"{snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s"
+                    historical_state, historical = (
+                        self._path_store.state_for_ros_time(
+                            image_timing.stamp_sec
+                        )
                     )
-                    snapshot = None
-                    segments = []
-                    guidance = None
-                    progress = None
-                elif not localization.stable:
+                    historical_authorized = bool(
+                        historical_state == "ACTIVE"
+                        and historical is not None
+                        and self._waypoint_progress_gate.authorizes_plan(
+                            self._ros_now_sec(), historical.generation
+                        )
+                    )
+                    if historical_authorized:
+                        snapshot = historical
+                        real_path_image_history = True
+                    else:
+                        state = "FRAME SYNC WAIT"
+                        detail = (
+                            "real_path_newer_than_image offset="
+                            f"{snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s "
+                            "image_time_history_unavailable"
+                        )
+                        snapshot = None
+                        segments = []
+                        guidance = None
+                        progress = None
+                if (
+                    state == "ACTIVE" and snapshot is not None
+                    and not localization.stable
+                ):
                     state = localization.state
                     detail = localization.detail
-                elif not tf_available:
+                elif state == "ACTIVE" and snapshot is not None and not tf_available:
                     state = "TF UNAVAILABLE"
                     detail = tf_detail
-                else:
+                elif state == "ACTIVE" and snapshot is not None:
                     try:
                         evaluation = evaluate_path_state(
                             snapshot.points, snapshot.frame_id, self._base_frame,
@@ -1787,6 +1825,8 @@ class ArPathViewerNode(Node):
                                 f"gen={snapshot.generation} frame={snapshot.frame_id} "
                                 f"{projection_stats.compact_detail()}"
                             )
+                            if real_path_image_history:
+                                detail += " path_time=image_history"
                     except ValueError as exc:
                         state = "INVALID CONFIG"
                         detail = str(exc)
@@ -1812,10 +1852,23 @@ class ArPathViewerNode(Node):
                     and reference_snapshot.received_ros_sec
                     > image_timing.stamp_sec
                 ):
-                    reference_reason = (
-                        "reference_path_newer_than_image offset="
-                        f"{reference_snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s"
+                    historical_state, historical = (
+                        reference_gate.path_store.state_for_ros_time(
+                            image_timing.stamp_sec
+                        )
                     )
+                    if historical_state == "ACTIVE" and historical is not None:
+                        reference_snapshot = historical
+                        reference_path_image_history = True
+                    else:
+                        reference_reason = (
+                            "reference_path_newer_than_image offset="
+                            f"{reference_snapshot.received_ros_sec - image_timing.stamp_sec:.3f}s "
+                            "image_time_history_unavailable"
+                        )
+                        reference_snapshot = None
+                if reference_snapshot is None:
+                    reference_segments = []
                 elif localization is None or not localization.stable:
                     reference_reason = (
                         "localization_not_stable"
@@ -1871,6 +1924,8 @@ class ArPathViewerNode(Node):
                             reference_reason = f"out_of_view {out_reason}"
                         else:
                             reference_reason = reference_evaluation.state.lower()
+                        if reference_path_image_history:
+                            reference_reason += " image_time_history"
                         stats_detail = (
                             "stats=unavailable"
                             if reference_stats is None
@@ -2172,6 +2227,7 @@ class ArPathViewerNode(Node):
             minimap_enabled = robot_view_enabled
             if (
                 minimap_enabled
+                and robot_view_expanded
                 and costmap_analysis_points_base is not None
                 and costmap_snapshot is not None
                 and localization is not None
@@ -2227,9 +2283,38 @@ class ArPathViewerNode(Node):
                         lethal_cost_min=self._costmap_settings.lethal_cost_min,
                         settings=self._costmap_alert_settings,
                     )
-                    costmap_alert = alert_gate.update(candidate)
+                    if candidate is None:
+                        # A valid synchronized safe evaluation ends the live
+                        # alert immediately.  Any remaining visibility is the
+                        # explicitly separate historical notice below.
+                        alert_gate.clear()
+                        costmap_alert = None
+                        costmap_alert_evaluation = "cleared"
+                    else:
+                        costmap_alert = alert_gate.update(candidate)
+                        costmap_alert_evaluation = "unconfirmed"
                     if candidate is not None and costmap_alert is None:
                         costmap_alert_reason = "confirmation_pending"
+                    elif costmap_alert is not None:
+                        costmap_alert_evaluation = "active"
+                history_gate = getattr(
+                    self, "_costmap_alert_history_gate", None
+                )
+                if history_gate is None:
+                    history_gate = CostmapAlertHistoryGate(
+                        2.5, clock=self._ros_now_sec
+                    )
+                    self._costmap_alert_history_gate = history_gate
+                costmap_alert_history = history_gate.update(
+                    costmap_alert,
+                    evaluation_status=costmap_alert_evaluation,
+                    goal_identity=follower_goal_identity(
+                        getattr(self, "_waypoint_progress_gate", None),
+                        self._ros_now_sec(),
+                    ),
+                )
+                if costmap_alert is not None:
+                    costmap_alert_history = None
                 self._diagnostics.costmap_alert(
                     costmap_alert is not None,
                     costmap_alert_reason,
@@ -2239,6 +2324,11 @@ class ArPathViewerNode(Node):
                 alert_gate = getattr(self, "_costmap_alert_gate", None)
                 if alert_gate is not None:
                     alert_gate.clear()
+                history_gate = getattr(
+                    self, "_costmap_alert_history_gate", None
+                )
+                if history_gate is not None:
+                    history_gate.clear()
 
             if reference_enabled:
                 metadata = (
@@ -2270,7 +2360,8 @@ class ArPathViewerNode(Node):
                 costmap_summary = (
                     f"costmap={costmap_reason} sampled="
                     f"{0 if costmap_snapshot is None else costmap_snapshot.sampled_cells} "
-                    f"visible={0 if costmap_projection is None else costmap_projection.visible_points}"
+                    "visible="
+                    f"{0 if costmap_projection is None else costmap_projection.visible_points}"
                 )
                 if debug_overlay:
                     costmap_summary += (
@@ -2337,6 +2428,7 @@ class ArPathViewerNode(Node):
                 costmap_alert = None
                 if camera_pipeline_mode == "synchronized":
                     camera_pipeline_mode = "preview_path_wait"
+            render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image,
                 segments,
@@ -2380,13 +2472,18 @@ class ArPathViewerNode(Node):
                     if minimap_enabled and costmap_minimap is None else ""
                 ),
                 costmap_alert=costmap_alert,
+                costmap_alert_history=costmap_alert_history,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
+            render_duration_sec = time.monotonic() - render_started_monotonic
         self._diagnostics.state_changed(state, detail)
         recorded = False
+        writer_duration_sec = 0.0
         if self._writer is not None:
+            writer_started = time.monotonic()
             self._writer.write(frame)
+            writer_duration_sec = time.monotonic() - writer_started
             recorded = True
         ArPathViewerNode._publish_display_frame(self, frame)
         self._diagnostics.camera_pipeline(
@@ -2407,6 +2504,11 @@ class ArPathViewerNode(Node):
             source_metrics=source_read_metrics,
             tick_interval_sec=tick_interval_sec,
             tick_duration_sec=time.monotonic() - capture_started_monotonic,
+            pre_render_duration_sec=max(
+                0.0, render_started_monotonic - capture_finished_monotonic
+            ),
+            render_duration_sec=render_duration_sec,
+            writer_duration_sec=writer_duration_sec,
         )
 
     def _request_shutdown(self, reason: str) -> None:

@@ -9,7 +9,7 @@ import numpy as np
 
 from .costmap_overlay import ProjectedCostmap
 from .costmap_explanation import CostmapExplanation
-from .costmap_alerts import CostmapAlert
+from .costmap_alerts import CostmapAlert, CostmapAlertHistory
 from .costmap_minimap import (
     CostmapMinimap,
     draw_robot_view_panel,
@@ -154,6 +154,45 @@ def draw_costmap_alert(
     )
 
 
+def draw_costmap_alert_history(
+    frame: np.ndarray, history: CostmapAlertHistory | None
+) -> None:
+    """Draw a recent-event notice that cannot be mistaken for a live alert."""
+    if history is None:
+        return
+    left, top = 10, 109
+    width, height = min(370, frame.shape[1] - 20), 68
+    accent = (80, 150, 205)
+    layer = frame.copy()
+    cv2.rectangle(
+        layer, (left, top), (left + width, top + height), (28, 34, 42), -1
+    )
+    cv2.addWeighted(layer, 0.68, frame, 0.32, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (left + width, top + height), accent, 1)
+    draw_localized_label(
+        frame, (left + 12, top + 5, left + width - 8, top + 31),
+        "直前に危険を検出", "RECENT COSTMAP ALERT", accent, 18,
+    )
+    status_ja = (
+        "現在の判定：解除"
+        if history.current_status == "CLEARED"
+        else "現在の判定：未確認"
+    )
+    status_en = (
+        "CURRENT: CLEARED"
+        if history.current_status == "CLEARED"
+        else "CURRENT: UNCONFIRMED"
+    )
+    draw_localized_label(
+        frame, (left + 12, top + 32, left + width - 8, top + 57),
+        status_ja, status_en, (215, 215, 215), 16,
+    )
+    cv2.putText(
+        frame, f"HISTORY {history.age_sec:.1f}s", (left + width - 98, top + 64),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.27, (150, 150, 150), 1, cv2.LINE_AA,
+    )
+
+
 def draw_costmap_overlay(
     image: np.ndarray,
     projection: ProjectedCostmap | None,
@@ -171,32 +210,44 @@ def draw_costmap_overlay(
     frame = image.copy()
     layer = frame.copy()
     outline = (12, 12, 12)
-    for x, y in projection.unknown_pixels:
-        cv2.circle(
-            layer, (int(x), int(y)), radius_px,
-            COSTMAP_UNKNOWN_BGR, -1, cv2.LINE_AA,
+
+    def point_mask(points: np.ndarray) -> np.ndarray:
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        points = np.asarray(points, dtype=np.int64)
+        if points.size == 0:
+            return mask
+        valid = (
+            (points[:, 0] >= 0) & (points[:, 0] < frame.shape[1])
+            & (points[:, 1] >= 0) & (points[:, 1] < frame.shape[0])
         )
-    for x, y in projection.high_cost_pixels:
-        center = (int(x), int(y))
-        cv2.circle(
-            layer, center, radius_px + 4,
-            outline, -1, cv2.LINE_AA,
-        )
-        cv2.circle(
-            layer, center, radius_px + 2,
-            COSTMAP_HIGH_BGR, -1, cv2.LINE_AA,
-        )
-    for x, y in projection.lethal_cost_pixels:
-        center = (int(x), int(y))
-        marker_size = radius_px * 4 + 7
-        cv2.drawMarker(
-            layer, center, outline,
-            cv2.MARKER_DIAMOND, marker_size + 4, 5, cv2.LINE_AA,
-        )
-        cv2.drawMarker(
-            layer, center, COSTMAP_LETHAL_BGR,
-            cv2.MARKER_DIAMOND, marker_size, 3, cv2.LINE_AA,
-        )
+        points = points[valid]
+        mask[points[:, 1], points[:, 0]] = 255
+        return mask
+
+    def ellipse(mask: np.ndarray, radius: int) -> np.ndarray:
+        size = radius * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        return cv2.dilate(mask, kernel)
+
+    def diamond(mask: np.ndarray, radius: int) -> np.ndarray:
+        axis = np.arange(-radius, radius + 1)
+        kernel = (
+            np.abs(axis[:, None]) + np.abs(axis[None, :]) <= radius
+        ).astype(np.uint8)
+        return cv2.dilate(mask, kernel)
+
+    unknown = ellipse(point_mask(projection.unknown_pixels), radius_px)
+    high_points = point_mask(projection.high_cost_pixels)
+    high_outline = ellipse(high_points, radius_px + 4)
+    high_fill = ellipse(high_points, radius_px + 2)
+    lethal_points = point_mask(projection.lethal_cost_pixels)
+    lethal_outline = diamond(lethal_points, radius_px * 2 + 6)
+    lethal_fill = diamond(lethal_points, radius_px * 2 + 4)
+    layer[unknown > 0] = COSTMAP_UNKNOWN_BGR
+    layer[high_outline > 0] = outline
+    layer[high_fill > 0] = COSTMAP_HIGH_BGR
+    layer[lethal_outline > 0] = outline
+    layer[lethal_fill > 0] = COSTMAP_LETHAL_BGR
     cv2.addWeighted(layer, alpha, frame, 1.0 - alpha, 0.0, frame)
     return frame
 
@@ -458,6 +509,7 @@ def render_frame(
     costmap_minimap_range_m: float = 3.0,
     costmap_minimap_status: str = "",
     costmap_alert: CostmapAlert | None = None,
+    costmap_alert_history: CostmapAlertHistory | None = None,
     robot_view_enabled: bool = False,
     robot_view_expanded: bool = False,
 ) -> np.ndarray:
@@ -522,6 +574,8 @@ def render_frame(
         _draw_navigation_status(frame, navigation_status)
     draw_costmap_explanation(frame, costmap_explanation)
     draw_costmap_alert(frame, costmap_alert)
+    if costmap_alert is None:
+        draw_costmap_alert_history(frame, costmap_alert_history)
     if robot_view_enabled:
         if robot_view_expanded:
             draw_robot_view_panel(

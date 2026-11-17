@@ -65,6 +65,7 @@ class ReferencePathGate:
         self.expected_frame = PathStore.validate_frame_id(expected_frame)
         self._follower: FollowerView | None = None
         self._metadata: ReferenceMetadata | None = None
+        self._pending_reference: tuple[object, float] | None = None
         self.reason = "waiting_for_follower_state"
 
     @staticmethod
@@ -97,6 +98,7 @@ class ReferencePathGate:
     def clear(self, reason: str) -> None:
         self.path_store.clear()
         self._metadata = None
+        self._pending_reference = None
         self.reason = str(reason)
 
     def update_follower(self, message, now_ros_sec: float) -> bool:
@@ -133,6 +135,14 @@ class ReferencePathGate:
             self.clear("reference_identity_changed")
         elif self._metadata is None:
             self.reason = "waiting_for_reference_path"
+        pending = self._pending_reference
+        if pending is not None:
+            pending_message, pending_received_sec = pending
+            self._pending_reference = None
+            # A reference result can arrive just before the corresponding
+            # periodic Follower state.  Revalidate the complete message now;
+            # no route is made visible while the identity/stamp is unproven.
+            self.update_reference(pending_message, pending_received_sec)
         return True
 
     def update_reference(self, message, now_ros_sec: float) -> bool:
@@ -166,7 +176,14 @@ class ReferencePathGate:
             if source_stamp <= 0.0:
                 raise ValueError("reference_source_state_zero_timestamp")
             if source_stamp > self._follower.stamp_sec + 1e-6:
-                raise ValueError("reference_source_state_is_newer_than_follower_state")
+                # DDS delivery order between the two topics is not atomic.
+                # Keep one candidate only when its exact route/goal identity
+                # already matches.  It remains invisible until a fresh
+                # Follower message reaches source_stamp and all checks below
+                # are rerun.
+                self._pending_reference = (message, float(now_ros_sec))
+                self.reason = "waiting_for_matching_follower_state"
+                return False
             points, frame = path_message_to_array(message.path)
             if frame != self.expected_frame:
                 raise ValueError(
@@ -218,6 +235,7 @@ class ReferencePathGate:
             source_stamp,
             declared_length,
         )
+        self._pending_reference = None
         self.reason = "valid"
         return True
 

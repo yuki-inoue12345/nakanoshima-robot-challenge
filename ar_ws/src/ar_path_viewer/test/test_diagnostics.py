@@ -161,6 +161,9 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
         ),
         tick_interval_sec=0.05,
         tick_duration_sec=0.012,
+        pre_render_duration_sec=0.006,
+        render_duration_sec=0.004,
+        writer_duration_sec=0.002,
     )
     now[0] = 10.1
     reporter.camera_pipeline(
@@ -177,11 +180,14 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
     assert "timestamp_usable=0" in text
     assert "rendered=1" in text
     assert "recorded=1 pending=0 discarded=2" in text
-    assert "transport_age_ms=p50:35.0,p95:35.0,max:35.0" in text
-    assert "read_ms=p50:8.0,p95:8.0,max:8.0" in text
-    assert "dequeue_ms=p50:1.0,p95:1.0,max:1.0" in text
-    assert "decode_ms=p50:4.0,p95:4.0,max:4.0" in text
-    assert "tick_interval_ms=p50:50.0,p95:50.0,max:50.0" in text
+    assert "transport_age_ms=mean:35.0,p50:35.0,p95:35.0,max:35.0" in text
+    assert "read_ms=mean:8.0,p50:8.0,p95:8.0,max:8.0" in text
+    assert "dequeue_ms=mean:1.0,p50:1.0,p95:1.0,max:1.0" in text
+    assert "decode_ms=mean:4.0,p50:4.0,p95:4.0,max:4.0" in text
+    assert "tick_interval_ms=mean:50.0,p50:50.0,p95:50.0,max:50.0" in text
+    assert "pre_render_ms=mean:6.0,p50:6.0,p95:6.0,max:6.0" in text
+    assert "render_ms=mean:4.0,p50:4.0,p95:4.0,max:4.0" in text
+    assert "writer_ms=mean:2.0,p50:2.0,p95:2.0,max:2.0" in text
     assert "v4l2_sequence=42" in text
     assert "sequence_gap=3 dequeued=4" in text
     assert "v4l2_stamp_mono=123.4 dq_mono=123.435" in text

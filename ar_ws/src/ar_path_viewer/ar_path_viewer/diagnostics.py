@@ -42,6 +42,9 @@ class DiagnosticReporter:
         self._camera_decode_duration_sec = deque(maxlen=200)
         self._camera_tick_interval_sec = deque(maxlen=200)
         self._camera_tick_duration_sec = deque(maxlen=200)
+        self._camera_pre_render_duration_sec = deque(maxlen=200)
+        self._camera_render_duration_sec = deque(maxlen=200)
+        self._camera_writer_duration_sec = deque(maxlen=200)
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -293,6 +296,9 @@ class DiagnosticReporter:
         source_metrics=None,
         tick_interval_sec: float | None = None,
         tick_duration_sec: float | None = None,
+        pre_render_duration_sec: float | None = None,
+        render_duration_sec: float | None = None,
+        writer_duration_sec: float | None = None,
     ) -> None:
         """Expose bounded camera/synchronization progress for field logs."""
         self.camera_read_count += 1
@@ -322,6 +328,15 @@ class DiagnosticReporter:
         )
         self._append_camera_metric(
             self._camera_tick_duration_sec, tick_duration_sec
+        )
+        self._append_camera_metric(
+            self._camera_pre_render_duration_sec, pre_render_duration_sec
+        )
+        self._append_camera_metric(
+            self._camera_render_duration_sec, render_duration_sec
+        )
+        self._append_camera_metric(
+            self._camera_writer_duration_sec, writer_duration_sec
         )
         reason = str(timestamp_reason).split(" ", 1)[0]
         level = "info" if read_success else "warning"
@@ -368,6 +383,10 @@ class DiagnosticReporter:
             f"decode_ms={self._camera_metric_summary(self._camera_decode_duration_sec)} "
             f"tick_interval_ms={self._camera_metric_summary(self._camera_tick_interval_sec)} "
             f"tick_duration_ms={self._camera_metric_summary(self._camera_tick_duration_sec)} "
+            "pre_render_ms="
+            f"{self._camera_metric_summary(self._camera_pre_render_duration_sec)} "
+            f"render_ms={self._camera_metric_summary(self._camera_render_duration_sec)} "
+            f"writer_ms={self._camera_metric_summary(self._camera_writer_duration_sec)} "
             f"mode={mode} timestamp_reason={timestamp_reason}{source_detail}",
             force=self.camera_read_count == 1,
         )
@@ -388,8 +407,9 @@ class DiagnosticReporter:
         count = len(ordered)
         median = ordered[(count - 1) // 2]
         p95 = ordered[max(0, math.ceil(count * 0.95) - 1)]
+        mean = sum(ordered) / count
         return (
-            f"p50:{median * 1000.0:.1f},"
+            f"mean:{mean * 1000.0:.1f},p50:{median * 1000.0:.1f},"
             f"p95:{p95 * 1000.0:.1f},max:{ordered[-1] * 1000.0:.1f}"
         )
 

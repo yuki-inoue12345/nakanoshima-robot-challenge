@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from ar_path_viewer import display_window
-from ar_path_viewer.costmap_alerts import CostmapAlert
+from ar_path_viewer.costmap_alerts import CostmapAlert, CostmapAlertHistory
 from ar_path_viewer.costmap_overlay import ProjectedCostmap
 from ar_path_viewer.costmap_minimap import CostmapMinimap
 from ar_path_viewer.costmap_minimap import robot_view_tab_rectangle
@@ -468,6 +468,27 @@ def test_large_warning_has_ascii_fallback_without_optional_japanese_font(monkeyp
         ),
     )
     assert np.count_nonzero(warned[112:198, 15:405]) > 1000
+
+
+def test_recent_alert_history_is_visually_distinct_from_live_warning():
+    image = np.full((480, 640, 3), 55, np.uint8)
+    alert = CostmapAlert(
+        "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"
+    )
+    live = render_frame(image, [], "ACTIVE", costmap_alert=alert)
+    history = render_frame(
+        image, [], "ACTIVE",
+        costmap_alert_history=CostmapAlertHistory(
+            alert, 1.2, "UNCONFIRMED"
+        ),
+    )
+    region = np.s_[109:202, 10:411]
+    assert not np.array_equal(history[region], image[region])
+    assert not np.array_equal(history[region], live[region])
+    # Historical state is muted and must not reproduce the live red alert.
+    assert np.count_nonzero(history[region][:, :, 2] > 230) < np.count_nonzero(
+        live[region][:, :, 2] > 230
+    )
 
 
 def test_recorded_composite_keeps_fixed_size_panel_and_warning(tmp_path):

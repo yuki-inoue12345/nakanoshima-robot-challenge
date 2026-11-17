@@ -41,9 +41,12 @@ def test_timeout_boundary_is_active_then_stale_after_6_5_seconds():
 
 def test_empty_path_clears_current_path():
     store = PathStore()
-    store.replace(np.array(((1.0, 0.0, 0.0),)), "map")
-    store.replace(np.empty((0, 3)), "map")
+    store.replace(
+        np.array(((1.0, 0.0, 0.0),)), "map", received_ros_sec=10.0
+    )
+    store.replace(np.empty((0, 3)), "map", received_ros_sec=11.0)
     assert store.state()[0] == "NO PATH"
+    assert store.state_for_ros_time(10.5)[0] == "NO PATH"
 
 
 def test_explicit_clear_removes_previous_path_immediately():
@@ -52,6 +55,35 @@ def test_explicit_clear_removes_previous_path_immediately():
     store.clear()
     assert store.state()[0] == "NO PATH"
     assert store.snapshot() is None
+
+
+def test_path_store_selects_generation_that_existed_at_image_time():
+    clock = [10.0]
+    store = PathStore(clock=lambda: clock[0])
+    old = store.replace(
+        np.asarray(((1.0, 0.0, 0.0), (2.0, 0.0, 0.0))),
+        "map", received_ros_sec=100.0,
+    )
+    clock[0] = 10.1
+    new = store.replace(
+        np.asarray(((1.0, 1.0, 0.0), (2.0, 1.0, 0.0))),
+        "map", received_ros_sec=101.0,
+    )
+
+    state, selected = store.state_for_ros_time(100.5)
+    assert state == "ACTIVE"
+    assert selected is old
+    assert selected.generation < new.generation
+
+
+def test_path_store_never_revives_history_after_fail_closed_clear():
+    store = PathStore(clock=lambda: 10.0)
+    store.replace(np.ones((2, 3)), "map", received_ros_sec=100.0)
+    store.clear()
+
+    state, selected = store.state_for_ros_time(100.5)
+    assert state == "NO PATH"
+    assert selected is None
 
 
 @pytest.mark.parametrize("bad", (np.nan, np.inf, -np.inf))

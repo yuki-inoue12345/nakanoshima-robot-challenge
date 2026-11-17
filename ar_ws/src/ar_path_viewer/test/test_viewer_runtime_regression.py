@@ -1130,6 +1130,79 @@ def test_exact_tf_wait_keeps_preview_then_recovers_same_synchronized_frame(monke
     assert fake._perception_frame_delay.consumed
 
 
+def test_delayed_image_uses_only_path_generation_available_at_capture(monkeypatch):
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((
+            state, int(image[0, 0, 0]), list(segments), kwargs.get("detail", "")
+        ))
+        return image.copy()
+
+    class ImageTimeDelay:
+        def __init__(self):
+            timing = SimpleNamespace(
+                usable=True, reason="v4l2_monotonic_soe", stamp_sec=100.5,
+                monotonic_finished_sec=10.0,
+            )
+            self.item = DelayedFrame(
+                image=np.full((480, 640, 3), 30, np.uint8), timing=timing
+            )
+            self.pending_count = 1
+            self.discarded = 0
+
+        def add(self, image, timing):
+            pass
+
+        def peek(self, now):
+            return self.item
+
+        def consume(self, item):
+            self.pending_count = 0
+            return True
+
+        def clear(self):
+            self.pending_count = 0
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    monkeypatch.setattr(
+        viewer_node.ArPathViewerNode, "_points_in_base_at",
+        lambda self, points, frame, stamp: np.asarray(points, np.float64),
+    )
+    fake = make_viewer()
+    ros_now = [100.0]
+    fake._ros_now_sec = lambda: ros_now[0]
+    fake._image_input_kind = "simulation"
+    fake._perception_frame_delay = ImageTimeDelay()
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings()
+    fake._base_frame = "robot/base_footprint"
+    fake._waypoint_progress_gate.update(
+        reference_follower_message(stamp=100.0), 100.0, 0
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 0.0, 0.0), (4.0, 0.0, 0.0)), stamp=99.9)
+    )
+    old = fake._path_store.snapshot()
+    ros_now[0] = 101.0
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 1.0, 0.0), (4.0, 1.0, 0.0)), stamp=100.9)
+    )
+    fake._localization.observe(
+        AmclObservation(
+            0.0, 0.0, 0.0, tuple(np.eye(6).ravel() * 0.01), "map", 101.0
+        ),
+        101.0,
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert fake._path_store.snapshot().generation > old.generation
+    assert rendered[-1][0] == "ACTIVE"
+    assert rendered[-1][1] == 30
+    assert rendered[-1][2], rendered[-1]
+    assert "path_time=image_history" in rendered[-1][3]
+
+
 def test_camera_read_failure_never_replays_a_buffered_delayed_frame(monkeypatch):
     rendered = []
 

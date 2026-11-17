@@ -170,3 +170,24 @@ def test_through_poses_reference_identity_is_supported():
     assert gate.update_follower(active, 100.0)
     assert gate.update_reference(envelope, 100.0)
     assert gate.state(100.0)[0] == "ACTIVE"
+
+
+def test_reference_waits_for_same_identity_follower_delivery_reordering():
+    gate = ReferencePathGate(clock=lambda: 10.0)
+    assert gate.update_follower(follower(now=100.0), 100.0)
+    assert gate.update_reference(reference(now=100.0), 100.0)
+    previous = gate.path_store.snapshot()
+
+    # The planner result is based on a state that DDS has not delivered to
+    # this subscriber yet.  The currently validated route remains visible.
+    assert not gate.update_reference(reference(now=100.5), 100.5)
+    assert gate.reason == "waiting_for_matching_follower_state"
+    assert gate.state(100.5)[1] is previous
+
+    # Matching fresh state activates the pending message after full
+    # revalidation; no timeout relaxation or guessed identity is used.
+    assert gate.update_follower(follower(now=100.6), 100.6)
+    state, current, reason = gate.state(100.6)
+    assert state == "ACTIVE"
+    assert reason == "valid"
+    assert current is not previous

@@ -4,7 +4,9 @@ import cv2
 import numpy as np
 
 from ar_path_viewer.costmap_alerts import (
+    CostmapAlert,
     CostmapAlertGate,
+    CostmapAlertHistoryGate,
     evaluate_costmap_alert,
 )
 from ar_path_viewer.costmap_minimap import CostmapMinimap, draw_costmap_minimap
@@ -71,6 +73,48 @@ def test_nearby_distance_uses_footprint_and_valid_release_hysteresis():
     assert gate.update(None) == alert
     now[0] = 0.41
     assert gate.update(None) is None
+
+
+def test_alert_history_is_distinct_expires_and_clears_on_goal_change():
+    now = [10.0]
+    gate = CostmapAlertHistoryGate(2.5, clock=lambda: now[0])
+    alert = CostmapAlert(
+        "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"
+    )
+    identity = ("a" * 64, 2, 14, "to_pose", 7)
+    assert gate.update(
+        alert, evaluation_status="active", goal_identity=identity
+    ) is None
+
+    now[0] = 10.2
+    history = gate.update(
+        None, evaluation_status="unavailable", goal_identity=identity
+    )
+    assert history.current_status == "UNCONFIRMED"
+    assert history.alert == alert
+    now[0] = 10.4
+    history = gate.update(
+        None, evaluation_status="cleared", goal_identity=identity
+    )
+    assert history.current_status == "CLEARED"
+
+    # A different Follower goal must not inherit the old event.
+    assert gate.update(
+        None, evaluation_status="unavailable",
+        goal_identity=("a" * 64, 3, 15, "to_pose", 8),
+    ) is None
+
+
+def test_alert_history_expires_without_extending_live_danger():
+    now = [0.0]
+    gate = CostmapAlertHistoryGate(2.5, clock=lambda: now[0])
+    alert = CostmapAlert("HIGH COST NEAR PATH", "high_path", "path_distance_m=0.2")
+    identity = ("a" * 64, 2, 14, "to_pose", 7)
+    gate.update(alert, evaluation_status="active", goal_identity=identity)
+    now[0] = 2.51
+    assert gate.update(
+        None, evaluation_status="unavailable", goal_identity=identity
+    ) is None
 
 
 def test_minimap_and_alert_keep_lower_navigation_path_visible():

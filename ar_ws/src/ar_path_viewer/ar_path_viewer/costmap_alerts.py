@@ -48,23 +48,39 @@ def _minimum_polyline_distance(points_xy: np.ndarray, path_xy: np.ndarray) -> np
     if len(path_xy) < 2:
         return np.full(len(points_xy), np.inf, dtype=np.float64)
     result = np.full(len(points_xy), np.inf, dtype=np.float64)
-    # Costmaps contain at most a few thousand cells; chunking avoids a large
-    # cells x path-segments allocation on the 20 fps Viewer thread.
-    for start in range(0, len(points_xy), 1024):
-        chunk = points_xy[start:start + 1024]
-        best = np.full(len(chunk), np.inf, dtype=np.float64)
-        for first, second in zip(path_xy[:-1], path_xy[1:]):
-            vector = second - first
-            denominator = float(vector @ vector)
-            if denominator <= 1e-12:
-                distance = np.linalg.norm(chunk - first, axis=1)
-            else:
-                fraction = np.clip(((chunk - first) @ vector) / denominator, 0.0, 1.0)
-                projected = first + fraction[:, None] * vector
-                distance = np.linalg.norm(chunk - projected, axis=1)
-            best = np.minimum(best, distance)
-        result[start:start + len(chunk)] = best
+    first = np.asarray(path_xy[:-1], dtype=np.float64)
+    vectors = np.asarray(path_xy[1:] - path_xy[:-1], dtype=np.float64)
+    denominator = np.einsum("ij,ij->i", vectors, vectors)
+    valid_segment = denominator > 1e-12
+    safe_denominator = np.where(valid_segment, denominator, 1.0)
+    # Vectorize over Path segments.  The previous Python inner loop made one
+    # complete Costmap alert evaluation proportional to hundreds of Python
+    # calls per frame.  Bounded chunks preserve exact point-to-segment
+    # distances while keeping temporary arrays below a few MiB.
+    for start in range(0, len(points_xy), 512):
+        chunk = np.asarray(points_xy[start:start + 512], dtype=np.float64)
+        delta = chunk[:, None, :] - first[None, :, :]
+        fraction = np.einsum("csi,si->cs", delta, vectors)
+        fraction = np.clip(fraction / safe_denominator[None, :], 0.0, 1.0)
+        projected_delta = delta - fraction[:, :, None] * vectors[None, :, :]
+        distance_sq = np.einsum(
+            "csi,csi->cs", projected_delta, projected_delta
+        )
+        if not np.all(valid_segment):
+            point_distance_sq = np.einsum("csi,csi->cs", delta, delta)
+            distance_sq[:, ~valid_segment] = point_distance_sq[:, ~valid_segment]
+        result[start:start + len(chunk)] = np.sqrt(np.min(distance_sq, axis=1))
     return result
+
+
+def _corridor_candidates(
+    points_xy: np.ndarray, path_xy: np.ndarray, corridor_m: float
+) -> np.ndarray:
+    """Discard only points mathematically unable to reach the corridor."""
+    lower = np.min(path_xy, axis=0) - float(corridor_m)
+    upper = np.max(path_xy, axis=0) + float(corridor_m)
+    selected = np.all((points_xy >= lower) & (points_xy <= upper), axis=1)
+    return points_xy[selected]
 
 
 def evaluate_costmap_alert(
@@ -108,23 +124,31 @@ def evaluate_costmap_alert(
                 f"nearest_lethal_m={minimum:.3f}",
             ), "lethal_cost_near_robot"
     if np.any(lethal):
-        minimum = float(np.min(_minimum_polyline_distance(
-            points[lethal, :2], path[:, :2]
-        )))
-        if minimum <= settings.path_corridor_width_m:
-            return CostmapAlert(
-                "LETHAL COST NEAR PATH", "lethal_path",
-                f"path_distance_m={minimum:.3f}",
-            ), "lethal_cost_near_path"
+        candidates = _corridor_candidates(
+            points[lethal, :2], path[:, :2], settings.path_corridor_width_m
+        )
+        if len(candidates):
+            minimum = float(np.min(_minimum_polyline_distance(
+                candidates, path[:, :2]
+            )))
+            if minimum <= settings.path_corridor_width_m:
+                return CostmapAlert(
+                    "LETHAL COST NEAR PATH", "lethal_path",
+                    f"path_distance_m={minimum:.3f}",
+                ), "lethal_cost_near_path"
     if np.any(high):
-        minimum = float(np.min(_minimum_polyline_distance(
-            points[high, :2], path[:, :2]
-        )))
-        if minimum <= settings.path_corridor_width_m:
-            return CostmapAlert(
-                "HIGH COST NEAR PATH", "high_path",
-                f"path_distance_m={minimum:.3f}",
-            ), "high_cost_near_path"
+        candidates = _corridor_candidates(
+            points[high, :2], path[:, :2], settings.path_corridor_width_m
+        )
+        if len(candidates):
+            minimum = float(np.min(_minimum_polyline_distance(
+                candidates, path[:, :2]
+            )))
+            if minimum <= settings.path_corridor_width_m:
+                return CostmapAlert(
+                    "HIGH COST NEAR PATH", "high_path",
+                    f"path_distance_m={minimum:.3f}",
+                ), "high_cost_near_path"
     return None, "no_cost_near_path"
 
 
@@ -181,3 +205,72 @@ class CostmapAlertGate:
             return None
         self._visible = True
         return self._candidate
+
+
+@dataclass(frozen=True)
+class CostmapAlertHistory:
+    """Display-only record of a recently ended evidence-bound alert."""
+
+    alert: CostmapAlert
+    age_sec: float
+    current_status: str
+
+
+class CostmapAlertHistoryGate:
+    """Keep a short, explicitly historical notice without extending danger.
+
+    This state is never returned as a current ``CostmapAlert`` and must not be
+    used by semantic evaluation or robot control.  Goal identity changes and
+    invalid identities clear it immediately.
+    """
+
+    _HAZARD_KINDS = {"nearby", "lethal_path", "high_path"}
+
+    def __init__(self, duration_sec: float = 2.5, clock=time.monotonic) -> None:
+        self.duration_sec = float(duration_sec)
+        if not math.isfinite(self.duration_sec) or self.duration_sec <= 0.0:
+            raise ValueError("alert history duration must be finite and positive")
+        self.clock = clock
+        self._alert: CostmapAlert | None = None
+        self._last_active = 0.0
+        self._identity: tuple | None = None
+
+    def clear(self) -> None:
+        self._alert = None
+        self._last_active = 0.0
+        self._identity = None
+
+    def update(
+        self,
+        active_alert: CostmapAlert | None,
+        *,
+        evaluation_status: str,
+        goal_identity: tuple | None,
+    ) -> CostmapAlertHistory | None:
+        now = float(self.clock())
+        if goal_identity is None:
+            self.clear()
+            return None
+        identity = tuple(goal_identity)
+        if self._identity is not None and self._identity != identity:
+            self.clear()
+        self._identity = identity
+        if (
+            active_alert is not None
+            and active_alert.kind in self._HAZARD_KINDS
+        ):
+            self._alert = active_alert
+            self._last_active = now
+            return None
+        if self._alert is None:
+            return None
+        age = now - self._last_active
+        if not math.isfinite(age) or age < 0.0 or age > self.duration_sec:
+            self.clear()
+            return None
+        status = (
+            "CLEARED"
+            if evaluation_status == "cleared"
+            else "UNCONFIRMED"
+        )
+        return CostmapAlertHistory(self._alert, age, status)
