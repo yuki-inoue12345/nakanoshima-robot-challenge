@@ -45,6 +45,8 @@ ar_path_viewer:
     perception_camera_frame_max_age_sec: 0.30
     perception_costmap_alpha: 0.42
     perception_costmap_radius_px: 2
+    # Display-only; semantic Costmap decisions remain exact-time/fail-closed.
+    perception_costmap_visual_hold_sec: 0.30
     perception_minimap_enabled: false
     perception_minimap_size_px: 142
     perception_minimap_range_m: 3.0

@@ -11,6 +11,7 @@ from ar_path_viewer.costmap_overlay import (
     CostmapOverlaySettings,
     CostmapStore,
     CostmapTransformQueue,
+    CostmapVisualHold,
     HIGH_COST_CLASS,
     LETHAL_COST_CLASS,
     UNKNOWN_CLASS,
@@ -610,6 +611,77 @@ def test_sparse_rendering_keeps_cost_classes_visually_distinct():
     assert np.any(frame[35:46, 115:126] != 0)
     assert not np.array_equal(frame[40, 40], frame[40, 80])
     assert cv2.countNonZero(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)) > 10
+
+
+def test_visual_hold_is_bounded_replaced_by_live_and_context_scoped():
+    now = [10.0]
+    first = ProjectedCostmap(
+        unknown_pixels=np.empty((0, 2), dtype=np.int32),
+        high_cost_pixels=np.asarray(((80, 40),), dtype=np.int32),
+        lethal_cost_pixels=np.empty((0, 2), dtype=np.int32),
+        input_points=1,
+        visible_points=1,
+    )
+    second = ProjectedCostmap(
+        unknown_pixels=np.empty((0, 2), dtype=np.int32),
+        high_cost_pixels=np.empty((0, 2), dtype=np.int32),
+        lethal_cost_pixels=np.asarray(((120, 40),), dtype=np.int32),
+        input_points=1,
+        visible_points=1,
+    )
+    hold = CostmapVisualHold(0.30, clock=lambda: now[0])
+
+    live = hold.confirm(first, "odom")
+    assert live.mode == "live"
+    assert live.projection is first
+
+    now[0] = 10.20
+    retained = hold.held("odom")
+    assert retained.mode == "hold"
+    assert retained.projection is first
+    assert retained.age_sec == pytest.approx(0.20)
+
+    # A new exact-time result immediately replaces the visual hold.
+    now[0] = 10.21
+    replacement = hold.confirm(second, "odom")
+    assert replacement.mode == "live"
+    assert replacement.projection is second
+
+    # Frame/epoch mismatch is fail-closed and clears the old pixels.
+    assert hold.held("map").projection is None
+    assert hold.held("odom").projection is None
+
+    hold.confirm(first, "odom")
+    now[0] = 10.52
+    expired = hold.held("odom")
+    assert expired.mode == "unavailable"
+    assert expired.projection is None
+
+
+def test_high_and_lethal_ground_markers_are_large_outlined_and_distinct():
+    projection = ProjectedCostmap(
+        unknown_pixels=np.empty((0, 2), dtype=np.int32),
+        high_cost_pixels=np.asarray(((50, 50),), dtype=np.int32),
+        lethal_cost_pixels=np.asarray(((110, 50),), dtype=np.int32),
+        input_points=2,
+        visible_points=2,
+    )
+    image = np.full((100, 160, 3), 180, dtype=np.uint8)
+    frame = draw_costmap_overlay(image, projection, alpha=1.0, radius_px=2)
+
+    high_patch = frame[40:61, 40:61]
+    lethal_patch = frame[35:66, 95:126]
+    high_color = np.all(high_patch == (20, 190, 230), axis=2)
+    lethal_color = np.all(lethal_patch == (205, 45, 235), axis=2)
+    dark_high_outline = np.all(high_patch == (12, 12, 12), axis=2)
+    dark_lethal_outline = np.all(lethal_patch == (12, 12, 12), axis=2)
+
+    # Old high-cost points occupied only a radius-3 dot.  The new grounded
+    # patch and lethal diamond deliberately cover substantially more pixels.
+    assert np.count_nonzero(high_color) >= 45
+    assert np.count_nonzero(lethal_color) >= 35
+    assert np.count_nonzero(dark_high_outline) >= 20
+    assert np.count_nonzero(dark_lethal_outline) >= 25
 
 
 def test_exact_tf_queue_waits_recovers_and_never_uses_untransformed_data():

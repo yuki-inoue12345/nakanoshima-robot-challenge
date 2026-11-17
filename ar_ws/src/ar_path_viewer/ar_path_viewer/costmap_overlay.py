@@ -428,6 +428,80 @@ class ProjectedCostmap:
 
 
 @dataclass(frozen=True)
+class CostmapVisualDisplay:
+    """Display-only selection of one exact-time Costmap projection.
+
+    ``mode == "hold"`` never authorizes alerts, explanations, or any other
+    semantic decision.  It only lets rendering identify a short, explicitly
+    labelled visual continuation of a previously confirmed projection.
+    """
+
+    projection: ProjectedCostmap | None
+    mode: str
+    age_sec: float
+
+
+class CostmapVisualHold:
+    """Short monotonic-time hold for already projected image pixels.
+
+    The class intentionally stores image pixels, not Costmap geometry.  It
+    cannot reproject with latest TF and therefore cannot weaken exact-time
+    synchronization.  Callers must clear it on frame/epoch or localization
+    invalidation and must never feed a held value into safety decisions.
+    """
+
+    def __init__(
+        self,
+        max_age_sec: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not math.isfinite(max_age_sec) or max_age_sec < 0.0:
+            raise ValueError("costmap visual hold must be finite and non-negative")
+        self.max_age_sec = float(max_age_sec)
+        self.clock = clock
+        self._projection: ProjectedCostmap | None = None
+        self._context: str | None = None
+        self._confirmed_at: float | None = None
+
+    def clear(self) -> None:
+        self._projection = None
+        self._context = None
+        self._confirmed_at = None
+
+    def confirm(
+        self, projection: ProjectedCostmap, context: str
+    ) -> CostmapVisualDisplay:
+        """Replace any held pixels with a newly exact-time-confirmed result."""
+        now = float(self.clock())
+        if not math.isfinite(now) or not context:
+            self.clear()
+            return CostmapVisualDisplay(None, "unavailable", 0.0)
+        self._projection = projection
+        self._context = str(context)
+        self._confirmed_at = now
+        return CostmapVisualDisplay(projection, "live", 0.0)
+
+    def held(self, context: str) -> CostmapVisualDisplay:
+        """Return a labelled visual hold, or fail closed after its deadline."""
+        if (
+            self._projection is None
+            or self._confirmed_at is None
+            or not context
+            or context != self._context
+            or self.max_age_sec <= 0.0
+        ):
+            if context and self._context is not None and context != self._context:
+                self.clear()
+            return CostmapVisualDisplay(None, "unavailable", 0.0)
+        now = float(self.clock())
+        age = now - self._confirmed_at
+        if not math.isfinite(age) or age < 0.0 or age > self.max_age_sec:
+            self.clear()
+            return CostmapVisualDisplay(None, "unavailable", max(0.0, age))
+        return CostmapVisualDisplay(self._projection, "hold", float(age))
+
+
+@dataclass(frozen=True)
 class SynchronizedCostmap:
     """One Costmap transformed by TF at its exact header timestamp."""
 

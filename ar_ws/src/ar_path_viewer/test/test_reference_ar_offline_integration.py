@@ -17,11 +17,13 @@ from nav_msgs.msg import OccupancyGrid, Path
 from robotbase_waypoint_interfaces.msg import ReferencePathState, WaypointFollowerState
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
+from ar_path_viewer.costmap_alerts import CostmapAlertGate, CostmapAlertSettings
 from ar_path_viewer.costmap_explanation import CostmapExplanationSettings
 from ar_path_viewer.costmap_overlay import (
     CostmapCameraSyncSettings,
     CostmapOverlaySettings,
     CostmapStore,
+    CostmapVisualHold,
 )
 from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.image_source import SimulationSource
@@ -657,6 +659,77 @@ def test_local_costmap_paths_guidance_and_recording_are_independent():
     assert np.count_nonzero(no_tf_magenta) == 0
     assert _cyan_pixels(no_tf) > 100
     assert _green_pixels(no_tf) > 100
+
+
+def test_exact_costmap_visual_hold_bridges_only_short_publish_gap():
+    """Held pixels stay visible briefly without becoming live evidence."""
+    clock = MutableClock()
+    fake = _make_viewer(clock)
+    fake._perception_costmap_enabled = True
+    fake._costmap_settings = CostmapOverlaySettings(
+        timeout_sec=1.5,
+        stamp_max_age_sec=1.5,
+        max_points_per_class=30,
+    )
+    fake._costmap_store = CostmapStore(fake._costmap_settings, clock=clock)
+    fake._costmap_camera_sync_settings = CostmapCameraSyncSettings(
+        max_costmap_age_sec=0.10
+    )
+    fake._costmap_visual_hold = CostmapVisualHold(0.30, clock=clock)
+    fake._last_costmap_visual_context = ""
+    fake._costmap_alpha = 0.55
+    fake._costmap_radius = 2
+    fake._perception_alert_enabled = True
+    fake._costmap_alert_settings = CostmapAlertSettings(
+        confirm_sec=0.0, release_sec=0.0
+    )
+    fake._costmap_alert_gate = CostmapAlertGate(0.0, 0.0, clock=clock)
+    fake._costmap_arrays_in_base = lambda snapshot: (
+        snapshot.points.copy(), snapshot.analysis_points.copy()
+    )
+    _send_good_localization(fake, clock)
+    viewer_node.ArPathViewerNode._on_path(fake, _path(PLAN_POINTS, clock.now))
+    viewer_node.ArPathViewerNode._on_local_costmap(fake, _costmap(clock.now))
+
+    # Establish one exact-time synchronized projection.
+    live = _tick_frame(fake)
+    assert np.count_nonzero(
+        (live[:, :, 0] > 120) & (live[:, :, 1] < 130)
+        & (live[:, :, 2] > 140)
+    ) > 10
+    projected = fake._costmap_visual_hold._projection
+    assert projected is not None and len(projected.lethal_cost_pixels) > 0
+    marker_x, marker_y = projected.lethal_cost_pixels[0]
+
+    # At age 0.20 s, the stricter test semantic limit has expired but the last
+    # exact projection is a dim, explicitly labelled display-only hold.
+    clock.now += 0.20
+    # The synthetic ROS clock advances independently of real monotonic time;
+    # reset only this test harness' cross-clock sample before the next frame.
+    fake._last_image_frame_timing = None
+    held = _tick_frame(fake)
+    assert np.count_nonzero(
+        (held[:, :, 0] > 90) & (held[:, :, 1] < 150)
+        & (held[:, :, 2] > 105)
+    ) > 10
+    assert fake._diagnostics.costmap_hold_display_count == 1
+    assert any(
+        "perception_costmap_alert visible=false "
+        "reason=synchronized_inputs_unavailable" in message
+        for _, message in fake.logger.records
+    )
+
+    # The display-only deadline is independent of the Costmap store timeout.
+    clock.now += 0.11
+    fake._last_image_frame_timing = None
+    expired = _tick_frame(fake)
+    x0, x1 = max(0, marker_x - 12), min(expired.shape[1], marker_x + 13)
+    y0, y1 = max(0, marker_y - 12), min(expired.shape[0], marker_y + 13)
+    assert np.sum(np.abs(
+        held[y0:y1, x0:x1].astype(np.int16)
+        - expired[y0:y1, x0:x1].astype(np.int16)
+    )) > 500
+    assert fake._diagnostics.costmap_hidden_display_count >= 1
 
 
 def test_untrusted_camera_time_hides_costmap_then_recovers():

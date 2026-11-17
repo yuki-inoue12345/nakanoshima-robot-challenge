@@ -132,7 +132,7 @@ def draw_costmap_overlay(
     alpha: float = 0.42,
     radius_px: int = 2,
 ) -> np.ndarray:
-    """Draw sparse semantic markers below every navigation overlay layer."""
+    """Draw outlined ground patches below every navigation overlay layer."""
     if projection is None or projection.visible_points == 0:
         return image.copy()
     if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
@@ -141,20 +141,32 @@ def draw_costmap_overlay(
         raise ValueError("costmap marker radius must be positive")
     frame = image.copy()
     layer = frame.copy()
+    outline = (12, 12, 12)
     for x, y in projection.unknown_pixels:
         cv2.circle(
             layer, (int(x), int(y)), radius_px,
             COSTMAP_UNKNOWN_BGR, -1, cv2.LINE_AA,
         )
     for x, y in projection.high_cost_pixels:
+        center = (int(x), int(y))
         cv2.circle(
-            layer, (int(x), int(y)), radius_px + 1,
+            layer, center, radius_px + 4,
+            outline, -1, cv2.LINE_AA,
+        )
+        cv2.circle(
+            layer, center, radius_px + 2,
             COSTMAP_HIGH_BGR, -1, cv2.LINE_AA,
         )
     for x, y in projection.lethal_cost_pixels:
+        center = (int(x), int(y))
+        marker_size = radius_px * 4 + 7
         cv2.drawMarker(
-            layer, (int(x), int(y)), COSTMAP_LETHAL_BGR,
-            cv2.MARKER_DIAMOND, radius_px * 3 + 1, 2, cv2.LINE_AA,
+            layer, center, outline,
+            cv2.MARKER_DIAMOND, marker_size + 4, 5, cv2.LINE_AA,
+        )
+        cv2.drawMarker(
+            layer, center, COSTMAP_LETHAL_BGR,
+            cv2.MARKER_DIAMOND, marker_size, 3, cv2.LINE_AA,
         )
     cv2.addWeighted(layer, alpha, frame, 1.0 - alpha, 0.0, frame)
     return frame
@@ -410,6 +422,7 @@ def render_frame(
     costmap_projection: ProjectedCostmap | None = None,
     costmap_alpha: float = 0.42,
     costmap_radius_px: int = 2,
+    costmap_sync_hold_age_sec: float | None = None,
     costmap_explanation: CostmapExplanation | None = None,
     costmap_minimap: CostmapMinimap | None = None,
     costmap_minimap_size_px: int = 142,
@@ -421,10 +434,15 @@ def render_frame(
         raise ValueError(f"unsupported viewer state: {state}")
     if not math.isfinite(path_alpha) or not 0.0 < path_alpha <= 1.0:
         raise ValueError("path_alpha must be finite and in (0, 1]")
+    hold_visible = costmap_sync_hold_age_sec is not None
+    effective_costmap_alpha = (
+        min(costmap_alpha * 0.46, 0.24)
+        if hold_visible else costmap_alpha
+    )
     frame = draw_costmap_overlay(
         image,
         costmap_projection,
-        alpha=costmap_alpha,
+        alpha=effective_costmap_alpha,
         radius_px=costmap_radius_px,
     )
     segment_list = list(segments)
@@ -532,7 +550,11 @@ def render_frame(
         )
         right_edge -= label_width + 18
     if costmap_projection is not None:
-        label = "LOCAL COSTMAP"
+        if hold_visible:
+            hold_age = max(0.0, float(costmap_sync_hold_age_sec))
+            label = f"SYNC HOLD | LAST SYNC {hold_age:.2f} s"
+        else:
+            label = "LOCAL COSTMAP | LIVE SYNC"
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.43
         label_thickness = 1

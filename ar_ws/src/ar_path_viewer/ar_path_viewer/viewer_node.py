@@ -28,6 +28,7 @@ from .costmap_overlay import (
     CostmapOverlaySettings,
     CostmapStore,
     CostmapTransformQueue,
+    CostmapVisualHold,
     SynchronizedCostmap,
     align_costmap_to_image_time,
     estimate_image_frame_timing,
@@ -133,6 +134,9 @@ class ArPathViewerNode(Node):
             "perception_camera_frame_max_age_sec": 0.30,
             "perception_costmap_alpha": 0.42,
             "perception_costmap_radius_px": 2,
+            # Display-only continuation of a previously exact-time projection.
+            # It never feeds alerts, explanations, or top-down analysis.
+            "perception_costmap_visual_hold_sec": 0.30,
             "perception_minimap_enabled": False,
             "perception_minimap_size_px": 142,
             "perception_minimap_range_m": 3.0,
@@ -399,6 +403,9 @@ class ArPathViewerNode(Node):
             )
             self._costmap_alpha = self._float("perception_costmap_alpha")
             self._costmap_radius = self._int("perception_costmap_radius_px")
+            self._costmap_visual_hold_sec = self._float(
+                "perception_costmap_visual_hold_sec"
+            )
             self._perception_minimap_enabled = self._bool(
                 "perception_minimap_enabled"
             )
@@ -446,8 +453,12 @@ class ArPathViewerNode(Node):
                 not math.isfinite(self._costmap_alpha)
                 or not 0.0 < self._costmap_alpha <= 1.0
                 or self._costmap_radius < 1
+                or not math.isfinite(self._costmap_visual_hold_sec)
+                or self._costmap_visual_hold_sec < 0.0
             ):
-                raise ValueError("invalid costmap overlay alpha or radius")
+                raise ValueError(
+                    "invalid costmap overlay alpha, radius, or visual hold"
+                )
             if (
                 self._costmap_minimap_size < 80
                 or not math.isfinite(self._costmap_minimap_range)
@@ -517,6 +528,7 @@ class ArPathViewerNode(Node):
             self._costmap_tf_max_age = 1.5
             self._costmap_alpha = 0.42
             self._costmap_radius = 2
+            self._costmap_visual_hold_sec = 0.0
             self._perception_minimap_enabled = False
             self._perception_minimap_visible = False
             self._costmap_minimap_size = 142
@@ -533,6 +545,10 @@ class ArPathViewerNode(Node):
         self._costmap_transform_queue = CostmapTransformQueue(
             self._costmap_settings
         )
+        self._costmap_visual_hold = CostmapVisualHold(
+            self._costmap_visual_hold_sec
+        )
+        self._last_costmap_visual_context = ""
         self._last_image_frame_timing = None
         self._perception_frame_delay = None
         # Delay is deliberately unavailable for the default OpenCV and
@@ -1101,11 +1117,20 @@ class ArPathViewerNode(Node):
                 clock=self._costmap_store.clock,
             )
             self._costmap_transform_queue = transform_queue
+        previous_snapshot = self._costmap_store.snapshot
         accepted = self._costmap_store.update(message, self._ros_now_sec())
         queued = False
         snapshot = self._costmap_store.snapshot
         detail = self._costmap_store.reason
         if accepted and snapshot is not None:
+            if (
+                previous_snapshot is not None
+                and previous_snapshot.frame_id != snapshot.frame_id
+            ):
+                visual_hold = getattr(self, "_costmap_visual_hold", None)
+                if visual_hold is not None:
+                    visual_hold.clear()
+                self._last_costmap_visual_context = ""
             queued = transform_queue.submit(snapshot)
             if queued:
                 # Freeze the real /plan epoch at Costmap *receipt*, not at
@@ -1143,6 +1168,10 @@ class ArPathViewerNode(Node):
         else:
             transform_queue.clear(detail)
             getattr(self, "_costmap_path_bindings", {}).clear()
+            visual_hold = getattr(self, "_costmap_visual_hold", None)
+            if visual_hold is not None:
+                visual_hold.clear()
+            self._last_costmap_visual_context = ""
             alert_gate = getattr(self, "_costmap_alert_gate", None)
             if alert_gate is not None:
                 alert_gate.clear()
@@ -1498,6 +1527,9 @@ class ArPathViewerNode(Node):
             costmap_snapshot = None
             costmap_reason = "disabled_by_configuration"
             costmap_projection = None
+            costmap_display_projection = None
+            costmap_display_hold_age = None
+            costmap_display_mode = "hidden"
             costmap_analysis_points_base = None
             costmap_path_points_base = None
             costmap_reference_points_base = None
@@ -1972,6 +2004,85 @@ class ArPathViewerNode(Node):
                     self._costmap_transform_queue.clear(costmap_reason)
                 alert_gate.clear()
 
+            # Rendering may briefly retain only the image pixels from the
+            # last exact-time-confirmed projection. Semantic consumers below
+            # continue to use the live variables above and therefore remain
+            # fail-closed whenever current synchronization is unavailable.
+            visual_hold = getattr(self, "_costmap_visual_hold", None)
+            if visual_hold is None:
+                # Preserve composed/test construction paths which predate the
+                # display-only cache. A zero-second cache still passes a live
+                # projection through and can never retain it as stale output.
+                visual_hold = CostmapVisualHold(
+                    getattr(self, "_costmap_visual_hold_sec", 0.0)
+                )
+                self._costmap_visual_hold = visual_hold
+            live_visual_context = (
+                "" if costmap_snapshot is None else costmap_snapshot.frame_id
+            )
+            visual_safe = bool(
+                costmap_enabled
+                and localization is not None
+                and localization.stable
+                and not retry_delayed_frame
+                and state not in (
+                    "TF UNAVAILABLE", "LOCALIZING",
+                    "LOCALIZATION UNSTABLE", "INVALID CONFIG",
+                )
+            )
+            # Only bridge the expected gap created by Costmap publication
+            # cadence/freshness. Motion-limit, clock, frame, or TF failures
+            # invalidate the old pixels instead of turning them into a hold.
+            hold_reason_allowed = any(
+                token in costmap_reason
+                for token in (
+                    "costmap_camera_age_exceeded",
+                    "local_costmap_receive_stale",
+                    "local_costmap_stamp_stale",
+                    "costmap_history_receive_stale",
+                    "costmap_history_stale_for_image",
+                )
+            )
+            if visual_hold is not None and costmap_projection is not None:
+                display = visual_hold.confirm(
+                    costmap_projection, live_visual_context
+                )
+                self._last_costmap_visual_context = live_visual_context
+            elif (
+                visual_hold is not None
+                and visual_safe
+                and hold_reason_allowed
+            ):
+                display = visual_hold.held(
+                    getattr(self, "_last_costmap_visual_context", "")
+                )
+            else:
+                if visual_hold is not None:
+                    visual_hold.clear()
+                    self._last_costmap_visual_context = ""
+                display = None
+            if display is not None and display.projection is not None:
+                costmap_display_projection = display.projection
+                costmap_display_mode = display.mode
+                if display.mode == "hold":
+                    costmap_display_hold_age = display.age_sec
+            display_reason = (
+                costmap_reason
+                if costmap_display_mode == "hidden"
+                else (
+                    "exact_time_synchronized"
+                    if costmap_display_mode == "live"
+                    else "last_exact_time_projection_visual_only"
+                )
+            )
+            if costmap_enabled:
+                self._diagnostics.costmap_visual_display(
+                    costmap_display_mode,
+                    0.0 if costmap_display_hold_age is None
+                    else costmap_display_hold_age,
+                    display_reason,
+                )
+
             explanation_enabled = bool(
                 getattr(self, "_perception_explanation_enabled", False)
                 and ui_state["_perception_explanation_visible"]
@@ -2153,6 +2264,8 @@ class ArPathViewerNode(Node):
                 waypoint_status = ""
                 navigation_status = ""
                 costmap_projection = None
+                costmap_display_projection = None
+                costmap_display_hold_age = None
                 costmap_explanation = None
                 costmap_minimap = None
                 costmap_alert = None
@@ -2176,6 +2289,8 @@ class ArPathViewerNode(Node):
                 waypoint_status = ""
                 navigation_status = ""
                 costmap_projection = None
+                costmap_display_projection = None
+                costmap_display_hold_age = None
                 costmap_explanation = None
                 costmap_minimap = None
                 costmap_alert = None
@@ -2207,9 +2322,10 @@ class ArPathViewerNode(Node):
                 navigation_status=navigation_status,
                 debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
-                costmap_projection=costmap_projection,
+                costmap_projection=costmap_display_projection,
                 costmap_alpha=getattr(self, "_costmap_alpha", 0.42),
                 costmap_radius_px=getattr(self, "_costmap_radius", 2),
+                costmap_sync_hold_age_sec=costmap_display_hold_age,
                 costmap_explanation=costmap_explanation,
                 costmap_minimap=costmap_minimap,
                 costmap_minimap_size_px=getattr(

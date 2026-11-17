@@ -33,6 +33,9 @@ class DiagnosticReporter:
         self.camera_display_frame_count = 0
         self.camera_synchronized_frame_count = 0
         self.camera_recorded_frame_count = 0
+        self.costmap_live_display_count = 0
+        self.costmap_hold_display_count = 0
+        self.costmap_hidden_display_count = 0
         self._camera_transport_age_sec = deque(maxlen=200)
         self._camera_read_duration_sec = deque(maxlen=200)
         self._camera_dequeue_duration_sec = deque(maxlen=200)
@@ -219,6 +222,30 @@ class DiagnosticReporter:
             "perception_costmap_sync "
             f"state={state} pending={int(pending)} resolved={int(resolved)} "
             f"expired={int(expired)} reason={reason}",
+        )
+
+    def costmap_visual_display(
+        self, mode: str, hold_age_sec: float, reason: str
+    ) -> None:
+        """Count live, display-only hold, and hidden perception frames."""
+        if mode == "live":
+            self.costmap_live_display_count += 1
+        elif mode == "hold":
+            self.costmap_hold_display_count += 1
+        else:
+            mode = "hidden"
+            self.costmap_hidden_display_count += 1
+        level = "info" if mode in ("live", "hold") else "warning"
+        category = str(reason).split(" ", 1)[0]
+        self._emit(
+            level,
+            f"costmap_visual:{mode}:{category}",
+            "perception_costmap_visual "
+            f"mode={mode} hold_age_sec={max(0.0, float(hold_age_sec)):.3f} "
+            f"live_frames={self.costmap_live_display_count} "
+            f"hold_frames={self.costmap_hold_display_count} "
+            f"hidden_frames={self.costmap_hidden_display_count} "
+            f"reason={reason}",
         )
 
     def costmap_alert(self, visible: bool, reason: str, detail: str = "") -> None:

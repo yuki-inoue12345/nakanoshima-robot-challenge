@@ -6,6 +6,7 @@ import pytest
 
 from ar_path_viewer import display_window
 from ar_path_viewer.costmap_alerts import CostmapAlert
+from ar_path_viewer.costmap_overlay import ProjectedCostmap
 from ar_path_viewer.costmap_minimap import CostmapMinimap
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.offscreen_guidance import OffscreenGuidance
@@ -372,6 +373,38 @@ def test_costmap_alert_and_robot_view_label_class_and_metric_evidence():
     assert np.count_nonzero(high[280:310, 480:]) > 0
     assert np.count_nonzero(lethal[280:310, 480:]) > 0
     assert np.array_equal(frame[280:310, :450], image[280:310, :450])
+
+
+def test_costmap_sync_hold_is_dimmed_labelled_and_does_not_create_alert():
+    image = np.full((480, 640, 3), 80, np.uint8)
+    projection = ProjectedCostmap(
+        unknown_pixels=np.empty((0, 2), dtype=np.int32),
+        high_cost_pixels=np.asarray(((320, 300),), dtype=np.int32),
+        lethal_cost_pixels=np.asarray(((380, 300),), dtype=np.int32),
+        input_points=2,
+        visible_points=2,
+    )
+    live = render_frame(
+        image, [], "ACTIVE", costmap_projection=projection,
+        costmap_alpha=0.8, costmap_radius_px=2,
+    )
+    held = render_frame(
+        image, [], "ACTIVE", costmap_projection=projection,
+        costmap_alpha=0.8, costmap_radius_px=2,
+        costmap_sync_hold_age_sec=0.18,
+    )
+    baseline = render_frame(image, [], "ACTIVE")
+
+    # Held pixels are visibly weaker than a live synchronized projection.
+    assert np.linalg.norm(
+        held[300, 320].astype(float) - image[300, 320].astype(float)
+    ) < np.linalg.norm(
+        live[300, 320].astype(float) - image[300, 320].astype(float)
+    )
+    # The top status differs because the held layer is explicitly labelled.
+    assert not np.array_equal(held[8:42], live[8:42])
+    # No warning card is synthesized from a visual-only hold.
+    assert np.array_equal(held[109:147, 10:380], baseline[109:147, 10:380])
 
 
 def test_replanning_and_navigation_hold_show_status_without_route():

@@ -51,6 +51,9 @@ ar_path_viewer:
     perception_camera_frame_max_age_sec: 0.30
     perception_costmap_alpha: 0.42
     perception_costmap_radius_px: 2
+    # Visual-only bridge between exact-time Costmap updates. Held pixels are
+    # dimmed/labeled and never feed alerts, explanations, or minimap analysis.
+    perception_costmap_visual_hold_sec: 0.30
     # Optional top-down review aid and neutral evidence alerts. Production OFF.
     perception_minimap_enabled: false
     perception_minimap_size_px: 142

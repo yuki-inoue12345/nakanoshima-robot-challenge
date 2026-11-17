@@ -194,6 +194,29 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
     assert reporter.camera_recorded_frame_count == 2
 
 
+def test_costmap_visual_diagnostics_separate_live_hold_and_hidden_counts():
+    now = [1.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 0.01, clock=lambda: now[0])
+    reporter.costmap_visual_display("live", 0.0, "exact_time_synchronized")
+    now[0] += 0.02
+    reporter.costmap_visual_display(
+        "hold", 0.18, "last_exact_time_projection_visual_only"
+    )
+    now[0] += 0.02
+    reporter.costmap_visual_display(
+        "hidden", 0.0, "costmap_history_stale_for_image"
+    )
+
+    text = "\n".join(message for _, message in logger.records)
+    assert "mode=live" in text
+    assert "mode=hold hold_age_sec=0.180" in text
+    assert "mode=hidden" in text
+    assert reporter.costmap_live_display_count == 1
+    assert reporter.costmap_hold_display_count == 1
+    assert reporter.costmap_hidden_display_count == 1
+
+
 def test_emitted_diagnostics_are_forwarded_to_session_sink():
     logger = RecordingLogger()
     saved = []
