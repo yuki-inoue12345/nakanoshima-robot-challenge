@@ -8,12 +8,15 @@ from ar_path_viewer import display_window
 from ar_path_viewer.costmap_alerts import CostmapAlert
 from ar_path_viewer.costmap_overlay import ProjectedCostmap
 from ar_path_viewer.costmap_minimap import CostmapMinimap
+from ar_path_viewer.costmap_minimap import robot_view_tab_rectangle
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
 from ar_path_viewer.offscreen_guidance import OffscreenGuidance
 from ar_path_viewer.paced_video_writer import PacedVideoWriter
 from ar_path_viewer.display_window import (
     ACTION_COPY_LOG,
+    ACTION_TOGGLE_ROBOT_VIEW,
     ACTION_VIEW_LOG,
+    CONTROL_BAR_HEIGHT,
     DisplayWindow,
     compose_display_frame,
     fit_frame_to_window,
@@ -352,6 +355,8 @@ def test_costmap_alert_and_robot_view_label_class_and_metric_evidence():
             "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.234"
         ),
         costmap_minimap=minimap,
+        robot_view_enabled=True,
+        robot_view_expanded=True,
     )
     no_metric_detail = render_frame(
         image,
@@ -361,18 +366,19 @@ def test_costmap_alert_and_robot_view_label_class_and_metric_evidence():
             "LETHAL COST NEAR PATH", "lethal_path", ""
         ),
         costmap_minimap=minimap,
+        robot_view_enabled=True,
+        robot_view_expanded=True,
     )
 
-    # The metric evidence is an actual second line inside the compact alert,
-    # not merely the same card background or a generic danger label.
-    assert np.any(frame[130:145, 20:288] != no_metric_detail[130:145, 20:288])
-    # The compact legend below ROBOT VIEW contains distinct high/lethal class
-    # colors without replacing the live camera outside the right column.
+    # Metric evidence remains a distinct line inside the prominent alert.
+    assert np.any(frame[178:197, 20:288] != no_metric_detail[178:197, 20:288])
+    # The expanded ROBOT VIEW legend contains distinct high/lethal classes
+    # without resizing or reprojecting the camera.
     high = (frame[:, :, 0] == 20) & (frame[:, :, 1] == 190) & (frame[:, :, 2] == 230)
     lethal = (frame[:, :, 0] == 205) & (frame[:, :, 1] == 45) & (frame[:, :, 2] == 235)
-    assert np.count_nonzero(high[280:310, 480:]) > 0
-    assert np.count_nonzero(lethal[280:310, 480:]) > 0
-    assert np.array_equal(frame[280:310, :450], image[280:310, :450])
+    assert np.count_nonzero(high[330:355, 440:]) > 0
+    assert np.count_nonzero(lethal[330:355, 440:]) > 0
+    assert np.array_equal(frame[280:310, :410], image[280:310, :410])
 
 
 def test_costmap_sync_hold_is_dimmed_labelled_and_does_not_create_alert():
@@ -407,6 +413,97 @@ def test_costmap_sync_hold_is_dimmed_labelled_and_does_not_create_alert():
     assert np.array_equal(held[109:147, 10:380], baseline[109:147, 10:380])
 
 
+def test_robot_view_is_collapsed_by_default_and_expands_without_reprojection():
+    image = np.full((480, 640, 3), (45, 65, 85), np.uint8)
+    route = [((80, 390), (560, 280))]
+    minimap = CostmapMinimap(
+        np.asarray(((0.8, -0.3, 0.0), (1.5, 0.2, 0.0))),
+        np.asarray((70, 100), dtype=np.int16),
+        np.asarray(((0.0, 0.0, 0.0), (2.0, 0.0, 0.0))),
+        60, 100,
+    )
+    collapsed = render_frame(
+        image, route, "ACTIVE", costmap_minimap=minimap,
+        robot_view_enabled=True, robot_view_expanded=False,
+    )
+    expanded = render_frame(
+        image, route, "ACTIVE", costmap_minimap=minimap,
+        robot_view_enabled=True, robot_view_expanded=True,
+    )
+    tab_left, tab_top, _, tab_bottom = robot_view_tab_rectangle(640, 480)
+    assert np.any(collapsed[tab_top:tab_bottom + 1, tab_left:] != image[
+        tab_top:tab_bottom + 1, tab_left:
+    ])
+    # Closed mode leaves the former right-column minimap area as live camera.
+    assert np.array_equal(collapsed[140:210, 450:600], image[140:210, 450:600])
+    assert np.any(expanded[140:350, 425:615] != image[140:350, 425:615])
+    # The panel overlays rather than rescaling; the left-side real Path is exact.
+    assert np.array_equal(collapsed[360:400, 70:220], expanded[360:400, 70:220])
+
+
+@pytest.mark.parametrize(
+    "alert,color_channel",
+    (
+        (CostmapAlert("HIGH COST NEAR PATH", "high_path", "path_distance_m=0.2"), 1),
+        (CostmapAlert("LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"), 2),
+    ),
+)
+def test_large_costmap_warning_is_prominent_and_clears(alert, color_channel):
+    image = np.full((480, 640, 3), 55, np.uint8)
+    warned = render_frame(image, [], "ACTIVE", costmap_alert=alert)
+    cleared = render_frame(image, [], "ACTIVE", costmap_alert=None)
+    region = warned[109:202, 10:411]
+    assert np.count_nonzero(region[:, :, color_channel] > 120) > 1000
+    assert not np.array_equal(region, cleared[109:202, 10:411])
+    assert np.array_equal(cleared[109:202, 10:411], image[109:202, 10:411])
+
+
+def test_large_warning_has_ascii_fallback_without_optional_japanese_font(monkeypatch):
+    monkeypatch.setattr(display_window, "_japanese_font", lambda: None)
+    image = np.zeros((480, 640, 3), np.uint8)
+    warned = render_frame(
+        image, [], "ACTIVE",
+        costmap_alert=CostmapAlert(
+            "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"
+        ),
+    )
+    assert np.count_nonzero(warned[112:198, 15:405]) > 1000
+
+
+def test_recorded_composite_keeps_fixed_size_panel_and_warning(tmp_path):
+    output = tmp_path / "composite.avi"
+    writer = cv2.VideoWriter(
+        str(output), cv2.VideoWriter_fourcc(*"MJPG"), 5.0, (640, 480)
+    )
+    assert writer.isOpened()
+    image = np.full((480, 640, 3), 64, np.uint8)
+    minimap = CostmapMinimap(
+        np.asarray(((1.0, 0.0, 0.0),)), np.asarray((100,), np.int16),
+        np.asarray(((0.0, 0.0, 0.0), (2.0, 0.0, 0.0))), 60, 100,
+    )
+    collapsed = render_frame(
+        image, [], "ACTIVE", robot_view_enabled=True,
+        robot_view_expanded=False,
+    )
+    expanded = render_frame(
+        image, [], "ACTIVE", robot_view_enabled=True,
+        robot_view_expanded=True, costmap_minimap=minimap,
+        costmap_alert=CostmapAlert(
+            "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"
+        ),
+    )
+    writer.write(collapsed)
+    writer.write(expanded)
+    writer.release()
+    capture = cv2.VideoCapture(str(output))
+    ok1, decoded_collapsed = capture.read()
+    ok2, decoded_expanded = capture.read()
+    capture.release()
+    assert ok1 and ok2
+    assert decoded_collapsed.shape == decoded_expanded.shape == (480, 640, 3)
+    assert np.mean(cv2.absdiff(decoded_collapsed, decoded_expanded)) > 4.0
+
+
 def test_replanning_and_navigation_hold_show_status_without_route():
     image = np.zeros((480, 640, 3), np.uint8)
     route = [((100, 350), (540, 240))]
@@ -438,11 +535,14 @@ def test_display_control_bar_is_below_video_and_does_not_change_source():
     display, rectangles = compose_display_frame(frame, 1000, 700)
     assert display.shape == (700, 1000, 3)
     assert np.array_equal(frame, original)
-    assert set(rectangles) == {ACTION_VIEW_LOG, ACTION_COPY_LOG}
+    assert set(rectangles) == {
+        ACTION_VIEW_LOG, ACTION_COPY_LOG, ACTION_TOGGLE_ROBOT_VIEW
+    }
     source_mask = np.all(display[:636] == 127, axis=2)
     ys, xs = np.nonzero(source_mask)
     assert (xs.max() - xs.min() + 1, ys.max() - ys.min() + 1) == (848, 636)
-    for x1, y1, x2, y2 in rectangles.values():
+    for action in (ACTION_VIEW_LOG, ACTION_COPY_LOG):
+        x1, y1, x2, y2 = rectangles[action]
         assert 0 <= x1 < x2 < display.shape[1]
         assert 480 < y1 < y2 < display.shape[0]
     assert np.any(display[650:] != 0)
@@ -476,7 +576,8 @@ def test_log_button_text_is_centered_and_not_clipped(window_size):
     display, rectangles = compose_display_frame(
         np.zeros((480, 640, 3), np.uint8), *window_size
     )
-    for x1, y1, x2, y2 in rectangles.values():
+    for action in (ACTION_VIEW_LOG, ACTION_COPY_LOG):
+        x1, y1, x2, y2 = rectangles[action]
         assert y2 - y1 == 52
         # The button fill and border remain below 200; this isolates label ink.
         region = display[y1 + 1:y2, x1 + 1:x2]
@@ -495,7 +596,8 @@ def test_ascii_fallback_text_is_also_centered(monkeypatch):
     display, rectangles = compose_display_frame(
         np.zeros((480, 640, 3), np.uint8), 960, 720
     )
-    for x1, y1, x2, y2 in rectangles.values():
+    for action in (ACTION_VIEW_LOG, ACTION_COPY_LOG):
+        x1, y1, x2, y2 = rectangles[action]
         region = display[y1 + 1:y2, x1 + 1:x2]
         rows, columns = np.nonzero(np.min(region, axis=2) > 200)
         assert rows.size > 0
@@ -634,6 +736,23 @@ def test_log_buttons_emit_mouse_actions_without_affecting_keys():
         gui.mouse_callback(gui.EVENT_LBUTTONUP, (x1 + x2) // 2, (y1 + y2) // 2, 0, None)
         assert window.consume_actions() == [expected]
     assert window.show_and_poll(frame) == ord("q")
+
+
+@pytest.mark.parametrize("image_rect", ((0, 0, 1000, 600), (0, 0, 1920, 1080)))
+def test_robot_view_tab_mouse_hitbox_tracks_resized_and_fullscreen(image_rect):
+    gui = FakeHighGui((-1,))
+    gui.image_rect = image_rect
+    window = DisplayWindow(960, 720, cv_module=gui)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    window.show_and_poll(frame)
+    x1, y1, x2, y2 = window._button_rectangles[ACTION_TOGGLE_ROBOT_VIEW]
+    gui.mouse_callback(
+        gui.EVENT_LBUTTONUP, (x1 + x2) // 2, (y1 + y2) // 2, 0, None
+    )
+    assert window.consume_actions() == [ACTION_TOGGLE_ROBOT_VIEW]
+    assert 0 <= x1 < x2 < image_rect[2]
+    assert 0 <= y1 < y2 < image_rect[3] - CONTROL_BAR_HEIGHT
+    window.close()
 
 
 def test_f11_backend_codes_are_recognized():

@@ -956,6 +956,34 @@ def test_log_view_copy_failure_and_control_bar_never_enter_recording(monkeypatch
     )
 
 
+def test_robot_view_action_toggles_recorded_composite_without_affecting_control():
+    fake = make_viewer()
+    fake._perception_minimap_enabled = True
+    fake._perception_minimap_visible = True
+    fake._robot_view_expanded = False
+    fake._display = True
+    fake._display_window = RecordingDisplayWindow(
+        actions=(viewer_node.ACTION_TOGGLE_ROBOT_VIEW,)
+    )
+    fake._session_log = MemorySessionLog()
+    fake._log_gui = RecordingLogGui()
+    fake._handle_display_action = lambda action: (
+        viewer_node.ArPathViewerNode._handle_display_action(fake, action)
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+    process_latest_display_frame(fake)
+    assert fake._robot_view_expanded
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert len(fake._writer.frames) == 2
+    # The second recorded frame contains the expanded right overlay; source
+    # geometry and control topics are not touched by this display-only action.
+    assert np.any(fake._writer.frames[1][130:460, 420:] !=
+                  fake._writer.frames[0][130:460, 420:])
+    assert not fake._shutdown_requested
+
+
 def test_worker_tick_never_calls_highgui_and_main_thread_consumes_frame():
     fake = make_viewer()
     fake._display = True

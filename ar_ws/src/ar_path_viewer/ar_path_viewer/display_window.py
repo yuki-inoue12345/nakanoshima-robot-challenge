@@ -14,6 +14,7 @@ WINDOW_NAME = "AR Path Viewer"
 F11_KEY_CODES = {0x007A0000, 0x0000FFC8, 0x0100003A}
 ACTION_VIEW_LOG = "view_log"
 ACTION_COPY_LOG = "copy_log"
+ACTION_TOGGLE_ROBOT_VIEW = "toggle_robot_view"
 CONTROL_BAR_HEIGHT = 64
 _JAPANESE_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -47,6 +48,25 @@ def fit_frame_to_window(
     y = (height - resized_height) // 2
     canvas[y:y + resized_height, x:x + resized_width] = resized
     return canvas
+
+
+def _fit_frame_geometry(
+    source_width: int,
+    source_height: int,
+    window_width: int,
+    window_height: int,
+) -> tuple[float, int, int, int, int]:
+    """Return scale, offset and fitted size used by ``fit_frame_to_window``."""
+    scale = min(window_width / source_width, window_height / source_height)
+    fitted_width = max(1, min(window_width, int(round(source_width * scale))))
+    fitted_height = max(1, min(window_height, int(round(source_height * scale))))
+    return (
+        scale,
+        (window_width - fitted_width) // 2,
+        (window_height - fitted_height) // 2,
+        fitted_width,
+        fitted_height,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -92,6 +112,38 @@ def _draw_button_label(
         canvas, (x1, top, x1 + button_width, top + button_height),
         mask, (245, 245, 245),
     )
+
+
+def draw_localized_label(
+    canvas: np.ndarray,
+    rectangle: tuple[int, int, int, int],
+    japanese: str,
+    fallback: str,
+    color: tuple[int, int, int],
+    font_height: int,
+) -> bool:
+    """Draw centered Japanese text when available, otherwise an ASCII fallback.
+
+    Returns ``True`` only when the Japanese FreeType path was used.  Rendering
+    remains dependency-free on systems whose OpenCV lacks ``cv2.freetype``.
+    """
+    font = _japanese_font()
+    if font is not None:
+        try:
+            _paint_centered_mask(
+                canvas, rectangle,
+                _freetype_text_mask(japanese, max(8, int(font_height))),
+                color,
+            )
+            return True
+        except (AttributeError, RuntimeError, cv2.error):
+            pass
+    _paint_centered_mask(
+        canvas, rectangle,
+        _hershey_text_mask(fallback, max(8, int(font_height))),
+        color,
+    )
+    return False
 
 
 @lru_cache(maxsize=16)
@@ -217,11 +269,29 @@ def compose_display_frame(
             y2,
         ),
     }
+    # The ROBOT VIEW tab is part of the recorded 640x480 image.  Convert its
+    # source rectangle through the same letterbox geometry so mouse clicks are
+    # correct in normal, resized, and fullscreen windows.
+    from .costmap_minimap import robot_view_tab_rectangle
+    _, offset_x, offset_y, fitted_width, fitted_height = _fit_frame_geometry(
+        frame.shape[1], frame.shape[0], width, video_height
+    )
+    source_tab = robot_view_tab_rectangle(frame.shape[1], frame.shape[0])
+    scale_x = fitted_width / frame.shape[1]
+    scale_y = fitted_height / frame.shape[0]
+    rectangles[ACTION_TOGGLE_ROBOT_VIEW] = (
+        offset_x + int(round(source_tab[0] * scale_x)),
+        offset_y + int(round(source_tab[1] * scale_y)),
+        offset_x + int(round(source_tab[2] * scale_x)),
+        offset_y + int(round(source_tab[3] * scale_y)),
+    )
     labels = {
         ACTION_VIEW_LOG: ("ログを見る", "LOG VIEW"),
         ACTION_COPY_LOG: ("ログをコピー", "LOG COPY"),
     }
     for action, (x1, top, x2, bottom) in rectangles.items():
+        if action == ACTION_TOGGLE_ROBOT_VIEW:
+            continue
         cv2.rectangle(canvas, (x1, top), (x2, bottom), (76, 76, 76), -1)
         cv2.rectangle(canvas, (x1, top), (x2, bottom), (150, 150, 150), 1)
         _draw_button_label(canvas, (x1, top, x2, bottom), *labels[action])

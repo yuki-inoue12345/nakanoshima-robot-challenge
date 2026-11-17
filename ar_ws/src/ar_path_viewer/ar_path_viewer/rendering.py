@@ -12,9 +12,10 @@ from .costmap_explanation import CostmapExplanation
 from .costmap_alerts import CostmapAlert
 from .costmap_minimap import (
     CostmapMinimap,
-    draw_costmap_minimap,
-    draw_costmap_minimap_status,
+    draw_robot_view_panel,
+    draw_robot_view_tab,
 )
+from .display_window import draw_localized_label
 from .offscreen_guidance import OffscreenGuidance
 
 
@@ -82,14 +83,22 @@ def draw_costmap_alert(
     frame: np.ndarray,
     alert: CostmapAlert | None,
 ) -> None:
-    """Draw a neutral Costmap observation, never a generic danger claim."""
+    """Draw prominent, evidence-bound Nav2 Costmap information."""
     if alert is None:
         return
     accent = (
-        COSTMAP_LETHAL_BGR
+        (30, 30, 245)
         if alert.kind in ("nearby", "lethal_path")
         else COSTMAP_HIGH_BGR
     )
+    if alert.kind == "path_updated":
+        # This is an event, not Costmap danger evidence.  Keep it compact.
+        label = alert.label[:38]
+        cv2.rectangle(frame, (10, 109), (265, 145), (18, 18, 18), -1)
+        cv2.rectangle(frame, (10, 109), (15, 145), COSTMAP_HIGH_BGR, -1)
+        cv2.putText(frame, label, (24, 133), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48, COSTMAP_HIGH_BGR, 1, cv2.LINE_AA)
+        return
     label = alert.label[:38]
     font = cv2.FONT_HERSHEY_SIMPLEX
     (text_width, text_height), baseline = cv2.getTextSize(label, font, 0.48, 1)
@@ -106,23 +115,43 @@ def draw_costmap_alert(
             break
     if alert.detail == "confirmed_real_plan_generation_change":
         detail_label = "REAL /plan GENERATION CHANGED"
-    left, top = 10, 109
-    width = min(370, max(230, text_width + 22))
-    if detail_label:
-        width = min(370, max(width, 278))
-    height = 38
+    left, top, width, height = 10, 109, min(400, frame.shape[1] - 20), 92
     layer = frame.copy()
-    cv2.rectangle(layer, (left, top), (left + width, top + height), (18, 18, 18), -1)
-    cv2.addWeighted(layer, 0.86, frame, 0.14, 0.0, frame)
-    cv2.rectangle(frame, (left, top), (left + 5, top + height), accent, -1)
-    label_y = top + (15 if detail_label else 24) + baseline // 2
-    cv2.putText(frame, label, (left + 14, label_y),
-                font, 0.48, accent, 1, cv2.LINE_AA)
-    if detail_label:
-        cv2.putText(
-            frame, detail_label, (left + 14, top + 32), font,
-            0.31, (205, 205, 205), 1, cv2.LINE_AA,
-        )
+    background = (20, 20, 95) if alert.kind in ("nearby", "lethal_path") else (10, 65, 85)
+    cv2.rectangle(layer, (left, top), (left + width, top + height), background, -1)
+    cv2.addWeighted(layer, 0.76, frame, 0.24, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (left + width, top + height), accent, 3)
+    cv2.rectangle(frame, (left, top), (left + 8, top + height), accent, -1)
+    # The triangle is font-independent; Japanese text has a safe ASCII fallback.
+    triangle = np.asarray(((left + 22, top + 41), (left + 42, top + 8),
+                           (left + 62, top + 41)), np.int32)
+    cv2.fillConvexPoly(frame, triangle, accent, cv2.LINE_AA)
+    cv2.putText(frame, "!", (left + 37, top + 35), font, 0.58,
+                (20, 20, 20), 2, cv2.LINE_AA)
+    lethal = alert.kind in ("nearby", "lethal_path")
+    draw_localized_label(
+        frame, (left + 70, top + 6, left + width - 8, top + 42),
+        "危険！" if lethal else "注意",
+        "COSTMAP ALERT" if lethal else "CAUTION",
+        accent, 28,
+    )
+    reason_japanese = {
+        "lethal_path": "経路付近に通行不可領域",
+        "nearby": "ロボット近傍に通行不可領域",
+        "high_path": "経路付近に高コスト領域",
+    }.get(alert.kind, "Nav2 Costmapによる判定")
+    draw_localized_label(
+        frame, (left + 12, top + 44, left + width - 8, top + 70),
+        reason_japanese, label, (245, 245, 245), 17,
+    )
+    evidence_label = (
+        f"NAV2 COSTMAP | {detail_label}"
+        if detail_label else "NAV2 COSTMAP EVIDENCE"
+    )
+    cv2.putText(
+        frame, evidence_label, (left + 14, top + 84), font,
+        0.30, (220, 220, 220), 1, cv2.LINE_AA,
+    )
 
 
 def draw_costmap_overlay(
@@ -429,6 +458,8 @@ def render_frame(
     costmap_minimap_range_m: float = 3.0,
     costmap_minimap_status: str = "",
     costmap_alert: CostmapAlert | None = None,
+    robot_view_enabled: bool = False,
+    robot_view_expanded: bool = False,
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -491,15 +522,13 @@ def render_frame(
         _draw_navigation_status(frame, navigation_status)
     draw_costmap_explanation(frame, costmap_explanation)
     draw_costmap_alert(frame, costmap_alert)
-    draw_costmap_minimap(
-        frame, costmap_minimap,
-        size_px=costmap_minimap_size_px,
-        range_m=costmap_minimap_range_m,
-    )
-    if costmap_minimap is None:
-        draw_costmap_minimap_status(
-            frame, costmap_minimap_status, size_px=costmap_minimap_size_px
-        )
+    if robot_view_enabled:
+        if robot_view_expanded:
+            draw_robot_view_panel(
+                frame, costmap_minimap, range_m=costmap_minimap_range_m,
+                status=costmap_minimap_status,
+            )
+        draw_robot_view_tab(frame, robot_view_expanded)
     label_color = (0, 220, 0) if state == "ACTIVE" else (0, 180, 255)
     detail_lines = (
         textwrap.wrap(detail, width=68)[:2]

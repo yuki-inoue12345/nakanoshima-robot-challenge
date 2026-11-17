@@ -18,6 +18,79 @@ class CostmapMinimap:
 
 
 MINIMAP_MAX_DRAWN_CELLS = 2500
+ROBOT_VIEW_PANEL_WIDTH = 220
+ROBOT_VIEW_TAB_WIDTH = 24
+
+
+def robot_view_tab_rectangle(
+    frame_width: int, frame_height: int
+) -> tuple[int, int, int, int]:
+    """Stable source-pixel hit target shared by rendering and HighGUI."""
+    center_y = int(frame_height) // 2
+    return (
+        max(0, int(frame_width) - ROBOT_VIEW_TAB_WIDTH),
+        max(0, center_y - 42),
+        max(0, int(frame_width) - 1),
+        min(int(frame_height) - 1, center_y + 42),
+    )
+
+
+def draw_robot_view_tab(frame: np.ndarray, expanded: bool) -> None:
+    """Draw the recorded, right-edge disclosure tab without changing geometry."""
+    left, top, right, bottom = robot_view_tab_rectangle(
+        frame.shape[1], frame.shape[0]
+    )
+    layer = frame.copy()
+    cv2.rectangle(layer, (left, top), (right, bottom), (20, 20, 20), -1)
+    cv2.addWeighted(layer, 0.88, frame, 0.12, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (right, bottom), (190, 190, 190), 1)
+    middle_y = (top + bottom) // 2
+    if expanded:
+        points = np.asarray(
+            ((left + 7, middle_y), (right - 6, middle_y - 10),
+             (right - 6, middle_y + 10)), np.int32,
+        )
+    else:
+        points = np.asarray(
+            ((right - 7, middle_y), (left + 6, middle_y - 10),
+             (left + 6, middle_y + 10)), np.int32,
+        )
+    cv2.polylines(frame, [points], False, (245, 245, 245), 2, cv2.LINE_AA)
+
+
+def draw_robot_view_panel(
+    frame: np.ndarray,
+    minimap: CostmapMinimap | None,
+    *,
+    range_m: float = 3.0,
+    status: str = "",
+) -> None:
+    """Overlay an expanded review panel; never resize or reproject the camera."""
+    width = min(ROBOT_VIEW_PANEL_WIDTH, max(100, frame.shape[1] - 40))
+    left = frame.shape[1] - width
+    top = min(126, max(44, frame.shape[0] // 4))
+    bottom = frame.shape[0] - 8
+    layer = frame.copy()
+    cv2.rectangle(layer, (left, top), (frame.shape[1] - 1, bottom),
+                  (10, 10, 10), -1)
+    cv2.addWeighted(layer, 0.90, frame, 0.10, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (frame.shape[1] - 1, bottom),
+                  (135, 135, 135), 1)
+    if minimap is not None:
+        size = min(190, bottom - top - 62, width - 20)
+        draw_costmap_minimap(frame, minimap, size_px=max(80, size),
+                             range_m=range_m)
+    else:
+        cv2.putText(frame, "ROBOT VIEW", (left + 12, top + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (230, 230, 230), 1,
+                    cv2.LINE_AA)
+        cv2.putText(frame, "PERCEPTION UNAVAILABLE", (left + 12, top + 55),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.31, (0, 180, 255), 1,
+                    cv2.LINE_AA)
+        if status:
+            cv2.putText(frame, str(status)[:28], (left + 12, top + 76),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (180, 180, 180), 1,
+                        cv2.LINE_AA)
 
 
 def select_minimap_class_indices(

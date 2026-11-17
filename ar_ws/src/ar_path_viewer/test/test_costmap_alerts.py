@@ -84,6 +84,7 @@ def test_minimap_and_alert_keep_lower_navigation_path_visible():
     frame = render_frame(
         image, [((100, 420), (500, 300))], "ACTIVE",
         costmap_minimap=minimap, costmap_alert=alert,
+        robot_view_enabled=True, robot_view_expanded=True,
     )
     assert cv2.countNonZero(cv2.cvtColor(frame[109:147, 10:380], cv2.COLOR_BGR2GRAY)) > 100
     assert cv2.countNonZero(cv2.cvtColor(frame[132:274, 488:630], cv2.COLOR_BGR2GRAY)) > 100

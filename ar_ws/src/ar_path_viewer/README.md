@@ -391,11 +391,17 @@ ROS時刻との対応がないため、Costmap ARの時刻としては採用し�
 
 レビュー用overlayでは次も個別に有効になります。
 
-- `perception_minimap_enabled`: ロボット前方を上にした小型俯瞰図。unknown、高コスト、
-  lethal-cost、実`/plan`、任意の参考Path、設定済みfootprintを区別します。
+- `perception_minimap_enabled`: ロボット前方を上にした俯瞰図。通常は映像右端の`<`タブ
+  だけを表示し、クリック時のみ半透明の`ROBOT VIEW`パネルを右側へ重ねます。再クリック
+  (`>`タブ)で収納します。パネルは映像を縮小・再投影せず、unknown、高コスト、
+  lethal-cost、実`/plan`、任意の参考Path、設定済みfootprintを区別します。開閉状態を含む
+  640×480の最終合成結果はMP4にも記録されます。
 - `perception_alert_enabled`: exact-time Costmapと有効な実`/plan`だけから
   `HIGH COST NEAR PATH`、`LETHAL COST NEAR PATH`、
-  `COSTMAP ALERT: NEARBY`を判定します。一般的な「危険」や物体種別は断定しません。
+  `COSTMAP ALERT: NEARBY`を判定します。high-costは橙色の「注意」、lethal-costは赤色の
+  「危険！」として大きく表示しますが、理由には必ずNav2 Costmapの分類と距離根拠を
+  併記し、カメラ物体種別や衝突を断定しません。日本語フォントが利用できない環境では
+  英語へフォールバックします。
 - `PATH UPDATED`: 既存のPath遷移ゲートが再計画を確定した事実だけを1秒表示します。
 
 警告は設定済みfootprintからの距離とPath corridorを使い、confirmation/releaseの

@@ -52,7 +52,12 @@ from .costmap_explanation import (
 from .costmap_minimap import CostmapMinimap
 from .diagnostics import DiagnosticReporter
 from .display_dispatch import LatestDisplayFrame
-from .display_window import ACTION_COPY_LOG, ACTION_VIEW_LOG, DisplayWindow
+from .display_window import (
+    ACTION_COPY_LOG,
+    ACTION_TOGGLE_ROBOT_VIEW,
+    ACTION_VIEW_LOG,
+    DisplayWindow,
+)
 from .image_source import SimulationSource, make_image_source
 from .guidance_stability import GuidanceStabilityGate
 from .log_gui import LogGui
@@ -87,6 +92,7 @@ class ArPathViewerNode(Node):
         self._resources_released = False
         self._main_thread_id = threading.get_ident()
         self._ui_state_lock = threading.Lock()
+        self._robot_view_expanded = False
         self._display_frames = LatestDisplayFrame()
         defaults = {
             "path_topic": "/plan",
@@ -897,6 +903,30 @@ class ArPathViewerNode(Node):
 
     def _handle_display_action(self, action: str) -> None:
         ArPathViewerNode._require_main_thread(self)
+        if action == ACTION_TOGGLE_ROBOT_VIEW:
+            configured = bool(getattr(self, "_perception_minimap_enabled", False))
+            if not configured:
+                if self._display_window is not None:
+                    self._display_window.set_status("ROBOT VIEW not configured", False)
+                return
+            lock = getattr(self, "_ui_state_lock", None)
+            if lock is None:
+                self._robot_view_expanded = not bool(getattr(
+                    self, "_robot_view_expanded", False
+                ))
+                expanded = self._robot_view_expanded
+            else:
+                with lock:
+                    self._robot_view_expanded = not bool(getattr(
+                        self, "_robot_view_expanded", False
+                    ))
+                    expanded = self._robot_view_expanded
+            self._log_info(f"robot_view expanded={expanded}")
+            if self._display_window is not None:
+                self._display_window.set_status(
+                    f"ROBOT VIEW {'OPEN' if expanded else 'CLOSED'}", True
+                )
+            return
         if action == ACTION_VIEW_LOG:
             success, message = self._log_gui.show(
                 self._session_log.text(), refresh_source=self._session_log.text
@@ -932,6 +962,7 @@ class ArPathViewerNode(Node):
             "_perception_explanation_visible": True,
             "_perception_minimap_visible": True,
             "_perception_alert_visible": True,
+            "_robot_view_expanded": False,
         }
         lock = getattr(self, "_ui_state_lock", None)
         if lock is None:
@@ -1376,6 +1407,11 @@ class ArPathViewerNode(Node):
         # those booleans repeatedly while the main thread can change them.
         ui_state = ArPathViewerNode._ui_state_snapshot(self)
         debug_overlay = ui_state["_debug_overlay"]
+        robot_view_enabled = bool(
+            getattr(self, "_perception_minimap_enabled", False)
+            and ui_state["_perception_minimap_visible"]
+        )
+        robot_view_expanded = ui_state["_robot_view_expanded"]
         capture_started_monotonic = time.monotonic()
         previous_tick_started = getattr(self, "_last_tick_started_monotonic", None)
         tick_interval_sec = (
@@ -1474,7 +1510,9 @@ class ArPathViewerNode(Node):
             state = "CAMERA UNAVAILABLE"
             detail = "image source returned no frame"
             frame = render_frame(
-                image, [], state, debug_overlay=debug_overlay
+                image, [], state, debug_overlay=debug_overlay,
+                robot_view_enabled=robot_view_enabled,
+                robot_view_expanded=robot_view_expanded,
             )
         elif self._camera_error:
             state = "CAMERA UNAVAILABLE"
@@ -1482,6 +1520,8 @@ class ArPathViewerNode(Node):
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                robot_view_enabled=robot_view_enabled,
+                robot_view_expanded=robot_view_expanded,
             )
         elif self._config_error:
             state = "INVALID CONFIG"
@@ -1489,6 +1529,8 @@ class ArPathViewerNode(Node):
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                robot_view_enabled=robot_view_enabled,
+                robot_view_expanded=robot_view_expanded,
             )
         elif waiting_for_delayed_frame:
             # Show the current camera image while every AR layer remains
@@ -1503,6 +1545,8 @@ class ArPathViewerNode(Node):
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                robot_view_enabled=robot_view_enabled,
+                robot_view_expanded=robot_view_expanded,
             )
         else:
             state, snapshot = self._path_store.state()
@@ -2125,10 +2169,7 @@ class ArPathViewerNode(Node):
                     explanation_detail,
                 )
 
-            minimap_enabled = bool(
-                getattr(self, "_perception_minimap_enabled", False)
-                and ui_state["_perception_minimap_visible"]
-            )
+            minimap_enabled = robot_view_enabled
             if (
                 minimap_enabled
                 and costmap_analysis_points_base is not None
@@ -2339,6 +2380,8 @@ class ArPathViewerNode(Node):
                     if minimap_enabled and costmap_minimap is None else ""
                 ),
                 costmap_alert=costmap_alert,
+                robot_view_enabled=robot_view_enabled,
+                robot_view_expanded=robot_view_expanded,
             )
         self._diagnostics.state_changed(state, detail)
         recorded = False
