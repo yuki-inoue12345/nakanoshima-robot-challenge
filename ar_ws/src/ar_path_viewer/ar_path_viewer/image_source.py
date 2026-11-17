@@ -61,12 +61,17 @@ class StaticImageSource(ImageSource):
 
 
 class CaptureSource(ImageSource):
-    def __init__(self, source: str | int, width: int, height: int, loop: bool = False):
+    def __init__(
+        self, source: str | int, width: int, height: int,
+        loop: bool = False, fps: float | None = None,
+    ):
         self._source = source
         self._loop = loop
         self._capture = cv2.VideoCapture(source)
         self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if fps is not None:
+            self._capture.set(cv2.CAP_PROP_FPS, float(fps))
         if not self._capture.isOpened():
             self._capture.release()
             raise OSError(f"cannot open capture source: {source}")
@@ -86,7 +91,9 @@ class CaptureSource(ImageSource):
         self._capture.release()
 
 
-def make_image_source(kind: str, uri: str, width: int, height: int) -> ImageSource:
+def make_image_source(
+    kind: str, uri: str, width: int, height: int, fps: float | None = None
+) -> ImageSource:
     normalized = kind.strip().lower()
     if normalized == "simulation":
         return SimulationSource(width, height)
@@ -96,8 +103,10 @@ def make_image_source(kind: str, uri: str, width: int, height: int) -> ImageSour
         return CaptureSource(uri, width, height, loop=True)
     if normalized == "camera":
         source: str | int = int(uri) if uri.strip().isdigit() else uri
-        return CaptureSource(source, width, height)
+        return CaptureSource(source, width, height, fps=fps)
     if normalized == "camera_timestamped":
         from .v4l2_timestamp_source import V4L2TimestampCameraSource
-        return V4L2TimestampCameraSource(uri, width, height)
+        if fps is None:
+            return V4L2TimestampCameraSource(uri, width, height)
+        return V4L2TimestampCameraSource(uri, width, height, fps=fps)
     raise ValueError(f"unsupported image input type: {kind}")

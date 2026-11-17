@@ -103,6 +103,30 @@ def test_paced_video_writer_rejects_invalid_fps():
         PacedVideoWriter(object(), 0.0)
 
 
+def test_thirty_fps_writer_counts_real_and_duplicate_output_separately():
+    class Writer:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame.copy())
+
+        def release(self):
+            pass
+
+    now = [0.0]
+    output = Writer()
+    writer = PacedVideoWriter(output, 30.0, clock=lambda: now[0])
+    writer.write(np.full((2, 2, 3), 10, np.uint8))
+    now[0] = 0.1
+    writer.write(np.full((2, 2, 3), 20, np.uint8))
+
+    assert writer.frames_written == 4
+    assert writer.real_frames_written == 2
+    assert writer.duplicate_frames_written == 2
+    assert [int(frame[0, 0, 0]) for frame in output.frames] == [10, 10, 10, 20]
+
+
 def test_all_required_states_render_and_only_active_draws_route():
     image = np.zeros((100, 160, 3), np.uint8)
     segment = [((20, 80), (140, 50))]

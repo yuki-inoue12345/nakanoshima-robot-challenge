@@ -1349,13 +1349,17 @@ def test_resource_release_is_rejected_off_main_thread():
     assert fake._display_window.close_count == 1
 
 
-def test_main_thread_ui_pumps_twenty_frames_while_worker_produces(monkeypatch):
+@pytest.mark.parametrize(("target_fps", "frame_count"), ((20.0, 20), (30.0, 30)))
+def test_main_thread_ui_pumps_each_new_frame_while_worker_produces(
+    monkeypatch, target_fps, frame_count
+):
     fake = make_viewer()
     fake.context = object()
     fake._display = True
     fake._display_window = RecordingDisplayWindow()
     fake._log_gui = RecordingLogGui()
-    fake._display_period_sec = 0.01
+    fake._target_fps = target_fps
+    fake._display_period_sec = 1.0 / target_fps
     executor_done = threading.Event()
     producer_errors = []
 
@@ -1363,7 +1367,7 @@ def test_main_thread_ui_pumps_twenty_frames_while_worker_produces(monkeypatch):
 
     def produce():
         try:
-            for value in range(20):
+            for value in range(frame_count):
                 fake._display_frames.publish(
                     np.full((480, 640, 3), value, np.uint8)
                 )
@@ -1389,9 +1393,9 @@ def test_main_thread_ui_pumps_twenty_frames_while_worker_produces(monkeypatch):
     assert producer_errors == []
     # A timeout may intentionally repaint the most recent frame to keep the
     # HighGUI event loop responsive even when the producer has a small gap.
-    assert len(fake._display_window.frames) >= 20
+    assert len(fake._display_window.frames) >= frame_count
     assert set(fake._display_window.thread_ids) == {threading.get_ident()}
-    assert int(fake._display_window.frames[-1][0, 0, 0]) == 19
+    assert int(fake._display_window.frames[-1][0, 0, 0]) == frame_count - 1
 
 
 def test_localization_tf_requires_a_fresh_timestamp():

@@ -32,6 +32,11 @@ fi
 
 viewer_config="${KOKO_NAVI_VIEWER_CONFIG:-${default_config}}"
 output_dir="${KOKO_NAVI_OUTPUT_DIR:-${HOME}/ar_navigation_project/outputs}"
+comparison_fps="${KOKO_NAVI_FPS:-}"
+if [[ -n "${comparison_fps}" && "${comparison_fps}" != "20" && "${comparison_fps}" != "30" ]]; then
+    notify_failure "KOKO_NAVI_FPS must be 20 or 30 (received: ${comparison_fps})"
+    exit 2
+fi
 camera_device="${KOKO_NAVI_CAMERA_DEVICE:-}"
 if [[ -z "${camera_device}" ]]; then
     for candidate in /dev/v4l/by-id/*C920*video-index0; do
@@ -107,6 +112,9 @@ fi
 
 stamp="$(date +%Y%m%d_%H%M%S)"
 session_base="${output_dir}/kokochan_navi_${stamp}"
+if [[ -n "${comparison_fps}" ]]; then
+    session_base="${session_base}_${comparison_fps}fps"
+fi
 if [[ -e "${session_base}.mp4" || -e "${session_base}.log" || -e "${session_base}.launch.log" ]]; then
     session_base="${session_base}_$$"
 fi
@@ -123,9 +131,16 @@ ar_path_viewer:
     output_video: "${session_base}.mp4"
     log_output: "${session_base}.log"
 EOF
+if [[ -n "${comparison_fps}" ]]; then
+    cat >>"${runtime_overlay}" <<EOF
+    image_input_type: camera_timestamped
+    fps: ${comparison_fps}.0
+EOF
+fi
 
 echo "Koko-chan Navi session: ${session_base}"
 echo "Viewer config: ${viewer_config}"
+echo "FPS mode: ${comparison_fps:-viewer-config} (camera request/display/MP4)"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID} TF_PREFIX=${ROBOTBASE_TF_PREFIX}"
 
 launch_arguments=(

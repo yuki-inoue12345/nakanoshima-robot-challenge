@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from rclpy.logging import get_logger
 
 from ar_path_viewer.diagnostics import DiagnosticReporter
@@ -198,6 +199,99 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
     assert reporter.camera_display_frame_count == 2
     assert reporter.camera_synchronized_frame_count == 1
     assert reporter.camera_recorded_frame_count == 2
+
+
+def test_camera_pipeline_separates_source_gui_and_recording_cadence():
+    now = [100.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 0.01, clock=lambda: now[0])
+    source = SimpleNamespace(
+        frame_timestamp_monotonic_sec=99.97,
+        transport_age_sec=0.03,
+        read_duration_sec=0.002,
+        dequeue_duration_sec=0.0001,
+        decode_duration_sec=0.0018,
+        sequence=10,
+        sequence_gap=0,
+        dequeued_buffers=1,
+        discarded_buffers=0,
+        total_discarded_buffers=0,
+        requested_capture_fps=30.0,
+        effective_capture_fps=30.0,
+        capture_rate_reason='matched',
+        error_reason='',
+    )
+    reporter.camera_pipeline(
+        read_success=True, timestamp_usable=True,
+        timestamp_reason='v4l2_monotonic_soe', mode='synchronized',
+        pending_frames=4, discarded_frames=0, recorded=True,
+        source_metrics=source, target_fps=30.0,
+        recording_output_frames=1, recording_duplicate_frames=0,
+    )
+    reporter.camera_frame_presented(
+        new_frame=True, source_timestamp_monotonic_sec=99.97,
+        target_fps=30.0, now_monotonic_sec=100.00,
+    )
+    reporter.camera_frame_presented(
+        new_frame=False, source_timestamp_monotonic_sec=99.97,
+        target_fps=30.0, now_monotonic_sec=100.01,
+    )
+    now[0] = 100.04
+    source.frame_timestamp_monotonic_sec = 100.003333333
+    source.sequence = 11
+    reporter.camera_frame_presented(
+        new_frame=True, source_timestamp_monotonic_sec=100.003333333,
+        target_fps=30.0, now_monotonic_sec=100.04,
+    )
+    reporter.camera_pipeline(
+        read_success=True, timestamp_usable=True,
+        timestamp_reason='v4l2_monotonic_soe', mode='synchronized',
+        pending_frames=4, discarded_frames=0, recorded=True,
+        source_metrics=source, target_fps=30.0,
+        recording_output_frames=2, recording_duplicate_frames=0,
+    )
+
+    text = "\n".join(message for _, message in logger.records)
+    assert "source_interval_ms=mean:33.3" in text
+    assert "gui_new_interval_ms=mean:40.0" in text
+    assert "display_age_ms=mean:33.3" in text
+    assert "gui_presents=3 gui_new_frames=2 gui_duplicates=1" in text
+    assert "gui_deadline_misses=1" in text
+    assert "requested_capture_fps=30.0 effective_capture_fps=30.0" in text
+
+
+@pytest.mark.parametrize(
+    ("fps", "expected_interval"), ((20.0, "50.0"), (30.0, "33.3"))
+)
+def test_camera_source_cadence_is_measured_from_soe_sequence(
+    fps, expected_interval
+):
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 0.001)
+    source = SimpleNamespace(
+        frame_timestamp_monotonic_sec=200.0,
+        sequence=1,
+        sequence_gap=0,
+        requested_capture_fps=fps,
+        effective_capture_fps=fps,
+        capture_rate_reason='matched',
+    )
+    common = dict(
+        read_success=True, timestamp_usable=True,
+        timestamp_reason='v4l2_monotonic_soe', mode='synchronized',
+        pending_frames=0, discarded_frames=0, recorded=False,
+        target_fps=fps,
+    )
+    reporter.camera_pipeline(source_metrics=source, **common)
+    source.frame_timestamp_monotonic_sec += 1.0 / fps
+    source.sequence += 1
+    reporter.camera_pipeline(source_metrics=source, **common)
+
+    assert reporter._camera_source_interval_sec[-1] == pytest.approx(1.0 / fps)
+    assert expected_interval in reporter._camera_metric_summary(
+        reporter._camera_source_interval_sec
+    )
+    assert reporter.camera_source_gap_frames == 0
 
 
 def test_costmap_visual_diagnostics_separate_live_hold_and_hidden_counts():

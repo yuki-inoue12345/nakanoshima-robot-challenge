@@ -2,6 +2,7 @@
 
 from collections import deque
 import math
+import threading
 import time
 from typing import Callable, Optional
 
@@ -45,6 +46,19 @@ class DiagnosticReporter:
         self._camera_pre_render_duration_sec = deque(maxlen=200)
         self._camera_render_duration_sec = deque(maxlen=200)
         self._camera_writer_duration_sec = deque(maxlen=200)
+        self._camera_source_interval_sec = deque(maxlen=200)
+        self._camera_gui_interval_sec = deque(maxlen=200)
+        self._camera_gui_new_interval_sec = deque(maxlen=200)
+        self._camera_display_age_sec = deque(maxlen=200)
+        self._camera_previous_source_stamp = None
+        self._camera_previous_gui_time = None
+        self._camera_previous_gui_new_time = None
+        self.camera_source_gap_frames = 0
+        self.camera_gui_present_count = 0
+        self.camera_gui_new_frame_count = 0
+        self.camera_gui_duplicate_count = 0
+        self.camera_gui_deadline_miss_count = 0
+        self._camera_gui_lock = threading.Lock()
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -299,6 +313,9 @@ class DiagnosticReporter:
         pre_render_duration_sec: float | None = None,
         render_duration_sec: float | None = None,
         writer_duration_sec: float | None = None,
+        target_fps: float | None = None,
+        recording_output_frames: int = 0,
+        recording_duplicate_frames: int = 0,
     ) -> None:
         """Expose bounded camera/synchronization progress for field logs."""
         self.camera_read_count += 1
@@ -338,6 +355,25 @@ class DiagnosticReporter:
         self._append_camera_metric(
             self._camera_writer_duration_sec, writer_duration_sec
         )
+        source_stamp = getattr(
+            source_metrics, "frame_timestamp_monotonic_sec", None
+        )
+        sequence_gap = max(
+            0, int(getattr(source_metrics, "sequence_gap", 0) or 0)
+        )
+        if source_stamp is not None and math.isfinite(float(source_stamp)):
+            source_stamp = float(source_stamp)
+            if (
+                self._camera_previous_source_stamp is not None
+                and source_stamp > self._camera_previous_source_stamp
+            ):
+                self._append_camera_metric(
+                    self._camera_source_interval_sec,
+                    (source_stamp - self._camera_previous_source_stamp)
+                    / (sequence_gap + 1),
+                )
+            self._camera_previous_source_stamp = source_stamp
+        self.camera_source_gap_frames += sequence_gap
         reason = str(timestamp_reason).split(" ", 1)[0]
         level = "info" if read_success else "warning"
         usable_rate = (
@@ -361,8 +397,25 @@ class DiagnosticReporter:
                 f" source_discarded={getattr(source_metrics, 'discarded_buffers', 0)}"
                 " source_discarded_total="
                 f"{getattr(source_metrics, 'total_discarded_buffers', 0)}"
+                " requested_capture_fps="
+                f"{getattr(source_metrics, 'requested_capture_fps', None)}"
+                " effective_capture_fps="
+                f"{getattr(source_metrics, 'effective_capture_fps', None)}"
+                " capture_rate_reason="
+                f"{getattr(source_metrics, 'capture_rate_reason', '') or 'unknown'}"
                 f" source_error={getattr(source_metrics, 'error_reason', '') or 'none'}"
             )
+        with self._camera_gui_lock:
+            gui_present_count = self.camera_gui_present_count
+            gui_new_count = self.camera_gui_new_frame_count
+            gui_duplicate_count = self.camera_gui_duplicate_count
+            gui_deadline_miss_count = self.camera_gui_deadline_miss_count
+            gui_intervals = tuple(self._camera_gui_interval_sec)
+            gui_new_intervals = tuple(self._camera_gui_new_interval_sec)
+            display_ages = tuple(self._camera_display_age_sec)
+        deadline_pct = (
+            100.0 * gui_deadline_miss_count / max(1, gui_new_count - 1)
+        )
         self._emit(
             level,
             f"camera_pipeline:{mode}:{reason}",
@@ -387,9 +440,64 @@ class DiagnosticReporter:
             f"{self._camera_metric_summary(self._camera_pre_render_duration_sec)} "
             f"render_ms={self._camera_metric_summary(self._camera_render_duration_sec)} "
             f"writer_ms={self._camera_metric_summary(self._camera_writer_duration_sec)} "
+            f"source_interval_ms={self._camera_metric_summary(self._camera_source_interval_sec)} "
+            f"gui_interval_ms={self._camera_metric_summary(gui_intervals)} "
+            f"gui_new_interval_ms={self._camera_metric_summary(gui_new_intervals)} "
+            f"display_age_ms={self._camera_metric_summary(display_ages)} "
+            f"source_gap_frames={self.camera_source_gap_frames} "
+            f"gui_presents={gui_present_count} gui_new_frames={gui_new_count} "
+            f"gui_duplicates={gui_duplicate_count} "
+            f"gui_deadline_misses={gui_deadline_miss_count} "
+            f"gui_deadline_miss_pct={deadline_pct:.1f} "
+            f"target_fps={target_fps} "
+            f"recording_output_frames={int(recording_output_frames)} "
+            f"recording_duplicates={int(recording_duplicate_frames)} "
             f"mode={mode} timestamp_reason={timestamp_reason}{source_detail}",
             force=self.camera_read_count == 1,
         )
+
+    def camera_frame_presented(
+        self,
+        *,
+        new_frame: bool,
+        source_timestamp_monotonic_sec: float | None,
+        target_fps: float,
+        now_monotonic_sec: float | None = None,
+    ) -> None:
+        """Record calls through HighGUI; this is not monitor scanout time."""
+        now = self.clock() if now_monotonic_sec is None else float(
+            now_monotonic_sec
+        )
+        if not math.isfinite(now):
+            return
+        target_interval = 1.0 / max(1.0, float(target_fps))
+        with self._camera_gui_lock:
+            if self._camera_previous_gui_time is not None:
+                self._append_camera_metric(
+                    self._camera_gui_interval_sec,
+                    now - self._camera_previous_gui_time,
+                )
+            self._camera_previous_gui_time = now
+            self.camera_gui_present_count += 1
+            if not new_frame:
+                self.camera_gui_duplicate_count += 1
+                return
+            if self._camera_previous_gui_new_time is not None:
+                interval = now - self._camera_previous_gui_new_time
+                self._append_camera_metric(
+                    self._camera_gui_new_interval_sec, interval
+                )
+                if interval > target_interval + 0.002:
+                    self.camera_gui_deadline_miss_count += 1
+            self._camera_previous_gui_new_time = now
+            self.camera_gui_new_frame_count += 1
+            stamp = source_timestamp_monotonic_sec
+            if stamp is not None and math.isfinite(float(stamp)):
+                age = now - float(stamp)
+                if age >= 0.0:
+                    self._append_camera_metric(
+                        self._camera_display_age_sec, age
+                    )
 
     @staticmethod
     def _append_camera_metric(values, value) -> None:

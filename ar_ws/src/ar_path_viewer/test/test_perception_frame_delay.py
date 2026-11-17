@@ -63,6 +63,22 @@ def test_20fps_frames_wait_for_30hz_tf_without_timestamp_replacement():
                for i in range(len(released) - 1))
 
 
+def test_30fps_queue_holds_four_frames_for_120ms_without_overflow():
+    queue = PerceptionFrameDelay(delay_sec=0.12, max_age_sec=0.30)
+    frames = []
+    for index in range(5):
+        timing = _timing(100.0 + index / 30.0)
+        image = object()
+        frames.append((image, timing))
+        queue.add(image, timing)
+
+    assert queue.pending_count == 5
+    released = queue.peek(100.12)
+    assert released.image is frames[0][0]
+    assert released.timing is frames[0][1]
+    assert queue.discarded == 0
+
+
 def test_retry_still_expires_when_tf_never_arrives():
     queue = PerceptionFrameDelay(delay_sec=0.12, max_age_sec=0.30)
     queue.add('frame0', _timing(100.0))

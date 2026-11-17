@@ -495,6 +495,11 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     assert 'viewer_perception_overlay_file:=' in runner
     assert 'image_input_uri:' in runner
     assert 'C920 video device was not found' in runner
+    assert 'KOKO_NAVI_FPS' in runner
+    assert 'KOKO_NAVI_FPS must be 20 or 30' in runner
+    assert 'fps: ${comparison_fps}.0' in runner
+    assert 'image_input_type: camera_timestamped' in runner
+    assert '${comparison_fps}fps' in runner
     assert "'viewer_perception_overlay_file', default_value=''" in launch
 
 

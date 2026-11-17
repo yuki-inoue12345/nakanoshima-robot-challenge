@@ -137,6 +137,7 @@ class ImageFrameTiming:
     source_kind: str
     usable: bool
     reason: str
+    source_timestamp_monotonic_sec: float | None = None
 
     @property
     def capture_duration_sec(self) -> float:
@@ -286,6 +287,10 @@ def estimate_image_frame_timing(
         source_kind=normalized_source,
         usable=usable,
         reason=reason,
+        source_timestamp_monotonic_sec=(
+            None if source_timestamp_monotonic_sec is None
+            else float(source_timestamp_monotonic_sec)
+        ),
     )
 
 

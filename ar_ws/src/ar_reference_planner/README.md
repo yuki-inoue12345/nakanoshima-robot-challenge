@@ -286,6 +286,30 @@ runnerは`ros2 launch`を前景で実行するため、SIGINTをAR子プロセ�
 終了後に一時overlayを削除します。Viewerログには判定したraw `key_code`も残るため、
 意図したキーとGUI backend由来の値を次回検証で区別できます。
 
+本番YAMLを編集せず20/30 fpsを比較する場合は、runnerだけに次の環境変数を渡します。
+比較モードは`camera_timestamped`を明示し、Viewer timer、V4L2の要求fps、MP4の固定fpsを
+同じ値にします。通常起動では設定ファイルの値をそのまま使用します。
+
+```bash
+# 20 fps基準
+KOKO_NAVI_FPS=20 KOKO_NAVI_PERCEPTION_REVIEW=1 \
+  ar_ws/install/ar_reference_planner/lib/ar_reference_planner/\
+run_kokochan_navi_launcher2
+
+# 30 fps比較（20 fps試験終了後、同じ条件で別セッションとして実行）
+KOKO_NAVI_FPS=30 KOKO_NAVI_PERCEPTION_REVIEW=1 \
+  ar_ws/install/ar_reference_planner/lib/ar_reference_planner/\
+run_kokochan_navi_launcher2
+```
+
+出力名には`_20fps`または`_30fps`が付きます。ログの
+`camera_rate_configuration`で`requested_capture_fps`と`effective_capture_fps`、
+`camera_pipeline`でSOE由来の`source_interval_ms`、HighGUI API呼出しまでの
+`gui_new_interval_ms`/`display_age_ms`、間引き、GUI重複、録画補間数を比較します。
+`display_age_ms`はモニターのscanout完了時刻ではありません。ドライバが要求fpsを
+受理しない場合は`capture_rate_reason=negotiated_mismatch`等を警告し、30 fps達成とは
+扱いません。120 msのexact-time TF待機は両モードで維持します。
+
 同梱の`desktop/kokochan_navi_launcher2.desktop`は、インストール済みrunnerだけを
 呼ぶテンプレートです。NUC反映時は既存Desktopファイルを時刻付きでバックアップし、
 このテンプレートをコピーしてから内容を確認します。現在の実機ファイルを開発PCから

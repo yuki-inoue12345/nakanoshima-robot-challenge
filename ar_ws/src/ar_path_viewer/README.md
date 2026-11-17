@@ -413,8 +413,13 @@ ROS/Nav2設定を変更せず、設定で有効になっていないレイヤー
 `config/perception_costmap_review_overlay.yaml`だけが明示的にONです。
 
 MP4はOpenCVの固定fps形式で個別frame timestampを持たないため、Viewer callbackが遅れた
-場合は最後に実際に描画したframeで欠けた20fps slotを補います。これにより録画の再生時間
+場合は最後に実際に描画したframeで欠けた設定fps slotを補います。これにより録画の再生時間
 が実セッションより短くなることを防ぎます。補間画像や架空経路は生成しません。
+`camera_timestamped`入力では設定fpsを`VIDIOC_S_PARM`で要求し、`VIDIOC_G_PARM`の
+実効値とSOE sequence間隔を別々に記録します。OpenCVの設定値だけで取得fpsを判定しません。
+診断は物理入力間隔、Viewer callback、HighGUIへ渡した新規frame間隔、撮影からHighGUI
+API呼出しまでの推定age、V4L2間引き、GUI再表示、MP4補間frameを区別します。HighGUIの
+値は表示API呼出しまでで、モニターscanout完了を測定した値ではありません。
 
 ## ビルドとテスト
 

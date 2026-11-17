@@ -578,6 +578,7 @@ class ArPathViewerNode(Node):
             self._image_source = make_image_source(
                 self._image_input_kind, self._str("image_input_uri"),
                 self._intrinsics.width, self._intrinsics.height,
+                fps=self._float("fps"),
             )
         except OSError as exc:
             self._camera_error = str(exc)
@@ -605,6 +606,28 @@ class ArPathViewerNode(Node):
             self._config_error = str(exc)
             self._log_error(f"Invalid diagnostic configuration: {exc}")
             self._diagnostics = DiagnosticReporter(False, self.get_logger())
+        capture_rate_reason = str(getattr(
+            self._image_source, 'capture_rate_reason', 'unverified'
+        ))
+        rate_message = (
+            "camera_rate_configuration "
+            f"viewer_target_fps={self._float('fps'):.3f} "
+            f"input_type={self._image_input_kind!r} "
+            "requested_capture_fps="
+            f"{getattr(self._image_source, 'requested_capture_fps', None)} "
+            "effective_capture_fps="
+            f"{getattr(self._image_source, 'effective_capture_fps', None)} "
+            "capture_rate_reason="
+            f"{capture_rate_reason} "
+            "display_api_timing_not_monitor_scanout=true"
+        )
+        if (
+            self._image_input_kind == 'camera_timestamped'
+            and capture_rate_reason != 'matched'
+        ):
+            self._log_warning(rate_message)
+        else:
+            self._log_info(rate_message)
         ground_view = ground_plane_view(self._mount, self._intrinsics)
 
         def geometry_value(value: float | None) -> str:
@@ -721,7 +744,8 @@ class ArPathViewerNode(Node):
         )
         self._thickness = self._int("line_thickness")
         self._display = self._bool("display")
-        self._display_period_sec = 1.0 / max(1.0, self._float("fps"))
+        self._target_fps = self._float("fps")
+        self._display_period_sec = 1.0 / max(1.0, self._target_fps)
         self._debug_overlay = self._bool("debug_overlay_default")
         self._guidance_require_follower = self._bool(
             "guidance_require_follower_state"
@@ -793,7 +817,7 @@ class ArPathViewerNode(Node):
         output_video = "" if self._session_paths.video is None else str(
             self._session_paths.video
         )
-        self._writer = self._make_writer(output_video, self._float("fps"))
+        self._writer = self._make_writer(output_video, self._target_fps)
         self._timer = self.create_timer(self._display_period_sec, self._tick)
         self._log_info("AR Path Viewer started in read-only/subscriber-only mode")
         self._log_info(
@@ -981,12 +1005,15 @@ class ArPathViewerNode(Node):
                 for name, default in defaults.items()
             }
 
-    def _publish_display_frame(self, frame: np.ndarray) -> None:
+    def _publish_display_frame(
+        self, frame: np.ndarray,
+        source_timestamp_monotonic_sec: float | None = None,
+    ) -> None:
         if not ArPathViewerNode._ui_state_snapshot(self)["_display"]:
             return
         exchange = getattr(self, "_display_frames", None)
         if exchange is not None:
-            exchange.publish(frame)
+            exchange.publish(frame, source_timestamp_monotonic_sec)
 
     def _poll_log_gui(self) -> None:
         ArPathViewerNode._require_main_thread(self)
@@ -994,7 +1021,7 @@ class ArPathViewerNode(Node):
         if log_gui is not None:
             log_gui.poll()
 
-    def _process_display_frame(self, frame: np.ndarray) -> None:
+    def _process_display_frame(self, frame: np.ndarray) -> bool:
         """Run every OpenCV/Tk GUI operation on the creating main thread."""
         ArPathViewerNode._require_main_thread(self)
         with getattr(self, "_ui_state_lock", threading.Lock()):
@@ -1002,7 +1029,7 @@ class ArPathViewerNode(Node):
             display_window = getattr(self, "_display_window", None)
         if not display_enabled or display_window is None:
             ArPathViewerNode._poll_log_gui(self)
-            return
+            return False
         try:
             key_code = display_window.show_and_poll(frame)
         except (AttributeError, RuntimeError, cv2.error) as exc:
@@ -1021,7 +1048,7 @@ class ArPathViewerNode(Node):
                         self._display = False
                         self._display_window = None
             ArPathViewerNode._poll_log_gui(self)
-            return
+            return False
 
         consume_actions = getattr(
             display_window, "consume_actions", lambda: []
@@ -1072,6 +1099,7 @@ class ArPathViewerNode(Node):
                 f"keyboard q/Q/F10 key_code={int(key_code)}"
             )
         ArPathViewerNode._poll_log_gui(self)
+        return True
 
     def run_main_thread_ui(self, executor_done: threading.Event) -> None:
         """Pump HighGUI on the main thread while ROS callbacks run elsewhere."""
@@ -1080,6 +1108,7 @@ class ArPathViewerNode(Node):
         last_frame = np.zeros(
             (self._intrinsics.height, self._intrinsics.width, 3), np.uint8
         )
+        last_metadata = None
         period = float(getattr(self, "_display_period_sec", 0.05))
         exchange = getattr(self, "_display_frames", None)
         while (
@@ -1088,13 +1117,30 @@ class ArPathViewerNode(Node):
             and rclpy.ok(context=self.context)
         ):
             if exchange is not None:
-                sequence, frame = exchange.wait_for_new(sequence, period)
+                next_sequence, frame, metadata = (
+                    exchange.wait_for_new_with_metadata(sequence, period)
+                )
+                new_frame = frame is not None
+                sequence = next_sequence
                 if frame is not None:
                     last_frame = frame
+                    last_metadata = metadata
             else:
                 executor_done.wait(period)
+                new_frame = False
             if ArPathViewerNode._ui_state_snapshot(self)["_display"]:
-                ArPathViewerNode._process_display_frame(self, last_frame)
+                shown = ArPathViewerNode._process_display_frame(
+                    self, last_frame
+                )
+                if shown:
+                    self._diagnostics.camera_frame_presented(
+                        new_frame=new_frame,
+                        source_timestamp_monotonic_sec=(
+                            None if last_metadata is None else
+                            last_metadata.source_timestamp_monotonic_sec
+                        ),
+                        target_fps=getattr(self, "_target_fps", 20.0),
+                    )
             else:
                 ArPathViewerNode._poll_log_gui(self)
 
@@ -1477,6 +1523,7 @@ class ArPathViewerNode(Node):
             if self._undistorter is not None:
                 preview_image = self._undistorter.apply(preview_image)
         image = preview_image
+        display_image_timing = image_timing
         waiting_for_delayed_frame = False
         frame_sync_wait_reason = ""
         delayed_frame = None
@@ -1501,6 +1548,7 @@ class ArPathViewerNode(Node):
                 if delayed_frame is not None:
                     image = delayed_frame.image
                     image_timing = delayed_frame.timing
+                    display_image_timing = image_timing
                     camera_pipeline_mode = "synchronized"
                 else:
                     waiting_for_delayed_frame = True
@@ -2406,6 +2454,7 @@ class ArPathViewerNode(Node):
                 # preview remains visible with every unsynchronized overlay
                 # suppressed.
                 image = preview_image
+                display_image_timing = captured_image_timing
                 camera_pipeline_mode = "preview_tf_wait"
             elif delayed_frame is not None:
                 frame_delay.consume(delayed_frame)
@@ -2415,6 +2464,7 @@ class ArPathViewerNode(Node):
                 # camera live and clear every overlay rather than presenting
                 # an old synchronized image as though it were current.
                 image = preview_image
+                display_image_timing = captured_image_timing
                 segments = []
                 reference_segments = []
                 guidance = None
@@ -2485,7 +2535,15 @@ class ArPathViewerNode(Node):
             self._writer.write(frame)
             writer_duration_sec = time.monotonic() - writer_started
             recorded = True
-        ArPathViewerNode._publish_display_frame(self, frame)
+        ArPathViewerNode._publish_display_frame(
+            self,
+            frame,
+            getattr(
+                display_image_timing,
+                "source_timestamp_monotonic_sec",
+                None,
+            ),
+        )
         self._diagnostics.camera_pipeline(
             read_success=captured_image is not None,
             timestamp_usable=captured_image_timing.usable,
@@ -2509,6 +2567,15 @@ class ArPathViewerNode(Node):
             ),
             render_duration_sec=render_duration_sec,
             writer_duration_sec=writer_duration_sec,
+            target_fps=getattr(self, "_target_fps", 20.0),
+            recording_output_frames=(
+                0 if self._writer is None
+                else getattr(self._writer, "frames_written", 0)
+            ),
+            recording_duplicate_frames=(
+                0 if self._writer is None
+                else getattr(self._writer, "duplicate_frames_written", 0)
+            ),
         )
 
     def _request_shutdown(self, reason: str) -> None:

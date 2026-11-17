@@ -77,3 +77,15 @@ def test_publish_copies_frame_before_handoff():
 
     assert received is not None
     assert np.all(received == 4)
+
+
+def test_display_metadata_stays_with_the_exact_latest_pixels():
+    exchange = LatestDisplayFrame()
+    exchange.publish(_frame(3), 100.01)
+    exchange.publish(_frame(8), 100.04)
+
+    sequence, frame, metadata = exchange.wait_for_new_with_metadata(0, 0.0)
+
+    assert sequence == 2
+    assert np.all(frame == 8)
+    assert metadata.source_timestamp_monotonic_sec == 100.04

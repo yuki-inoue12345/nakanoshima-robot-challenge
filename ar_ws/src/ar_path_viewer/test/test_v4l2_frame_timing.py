@@ -10,7 +10,7 @@ from ar_path_viewer.costmap_overlay import (
 )
 from ar_path_viewer.image_source import make_image_source
 from ar_path_viewer.v4l2_timestamp_source import (
-    _Buffer, _Format, _RequestBuffers, _S_FMT,
+    _Buffer, _Format, _RequestBuffers, _StreamParm, _G_PARM, _S_FMT, _S_PARM,
     _TIMESTAMP_MONOTONIC, _TIMESTAMP_SOURCE_SOE,
     timestamp_from_v4l2_buffer,
 )
@@ -99,7 +99,10 @@ def test_v4l2_abi_matches_linux_x86_64_headers():
     assert ctypes.sizeof(_Buffer) == 88
     assert ctypes.sizeof(_Format) == 208
     assert ctypes.sizeof(_RequestBuffers) == 20
+    assert ctypes.sizeof(_StreamParm) == 208
     assert _S_FMT == 0xC0D05605
+    assert _G_PARM == 0xC0D05615
+    assert _S_PARM == 0xC0D05616
 
 
 def test_v4l2_buffer_monotonic_provenance_is_required():
@@ -130,6 +133,57 @@ def test_timestamped_camera_uses_dedicated_source_only(monkeypatch):
         lambda *args: marker,
     )
     assert make_image_source("camera_timestamped", "/dev/video0", 640, 480) is marker
+
+
+@pytest.mark.parametrize("requested", (20.0, 30.0))
+def test_v4l2_capture_rate_is_requested_and_read_back(monkeypatch, requested):
+    from ar_path_viewer import v4l2_timestamp_source as v
+
+    camera = object.__new__(v.V4L2TimestampCameraSource)
+    camera._fd = 123
+    camera.requested_capture_fps = requested
+    camera.effective_capture_fps = None
+    camera.capture_rate_reason = 'not_requested'
+    calls = []
+
+    def ioctl(_fd, request, payload, mutate=True):
+        calls.append(request)
+        if request == v._S_PARM:
+            assert payload.parm.capture.timeperframe.numerator == 1
+            assert payload.parm.capture.timeperframe.denominator == requested
+        elif request == v._G_PARM:
+            payload.parm.capture.timeperframe.numerator = 1
+            payload.parm.capture.timeperframe.denominator = int(requested)
+        return 0
+
+    monkeypatch.setattr(v.fcntl, 'ioctl', ioctl)
+    camera._configure_capture_rate()
+
+    assert calls == [v._S_PARM, v._G_PARM]
+    assert camera.effective_capture_fps == requested
+    assert camera.capture_rate_reason == 'matched'
+
+
+def test_v4l2_capture_rate_mismatch_is_explicit_not_faked(monkeypatch):
+    from ar_path_viewer import v4l2_timestamp_source as v
+
+    camera = object.__new__(v.V4L2TimestampCameraSource)
+    camera._fd = 123
+    camera.requested_capture_fps = 30.0
+    camera.effective_capture_fps = None
+    camera.capture_rate_reason = 'not_requested'
+
+    def ioctl(_fd, request, payload, mutate=True):
+        if request == v._G_PARM:
+            payload.parm.capture.timeperframe.numerator = 1
+            payload.parm.capture.timeperframe.denominator = 20
+        return 0
+
+    monkeypatch.setattr(v.fcntl, 'ioctl', ioctl)
+    camera._configure_capture_rate()
+
+    assert camera.effective_capture_fps == 20.0
+    assert camera.capture_rate_reason == 'negotiated_mismatch'
 
 
 def test_v4l2_mock_dequeue_keeps_image_and_stamp_from_same_buffer(monkeypatch):

@@ -21,6 +21,8 @@ class PacedVideoWriter:
         self.clock = clock
         self.started_at = None
         self.frames_written = 0
+        self.real_frames_written = 0
+        self.duplicate_frames_written = 0
         self._last_frame = None
 
     def write(self, frame) -> None:
@@ -29,6 +31,7 @@ class PacedVideoWriter:
             self.started_at = now
             self.writer.write(frame)
             self.frames_written = 1
+            self.real_frames_written = 1
             self._last_frame = frame.copy()
             return
         target_count = max(
@@ -39,8 +42,10 @@ class PacedVideoWriter:
         if missing > 0:
             for _ in range(max(0, missing - 1)):
                 self.writer.write(self._last_frame)
+                self.duplicate_frames_written += 1
             self.writer.write(frame)
             self.frames_written = target_count
+            self.real_frames_written += 1
         # Retain the newest real rendering even when this callback arrived
         # before the next output slot.
         self._last_frame = frame.copy()

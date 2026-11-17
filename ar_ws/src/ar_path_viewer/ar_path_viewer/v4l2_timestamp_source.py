@@ -15,6 +15,7 @@ import os
 import select
 import sys
 import time
+from fractions import Fraction
 
 import cv2
 import numpy as np
@@ -78,6 +79,27 @@ class _RequestBuffers(C.Structure):
     ]
 
 
+class _Fract(C.Structure):
+    _fields_ = [("numerator", C.c_uint32), ("denominator", C.c_uint32)]
+
+
+class _CaptureParm(C.Structure):
+    _fields_ = [
+        ("capability", C.c_uint32), ("capturemode", C.c_uint32),
+        ("timeperframe", _Fract), ("extendedmode", C.c_uint32),
+        ("readbuffers", C.c_uint32), ("reserved", C.c_uint32 * 4),
+    ]
+
+
+class _StreamParmUnion(C.Union):
+    _fields_ = [("capture", _CaptureParm), ("raw_data", C.c_uint8 * 200),
+                ("alignment", C.c_uint64)]
+
+
+class _StreamParm(C.Structure):
+    _fields_ = [("type", C.c_uint32), ("parm", _StreamParmUnion)]
+
+
 def _ioctl(direction, number, struct_type):
     # Linux generic _IOC layout, supported here on x86_64 Linux (NUC).
     return ((direction << 30) | (C.sizeof(struct_type) << 16) |
@@ -94,6 +116,8 @@ _QBUF = _ioctl(3, 15, _Buffer)
 _DQBUF = _ioctl(3, 17, _Buffer)
 _STREAMON = _ioctl(1, 18, C.c_int)
 _STREAMOFF = _ioctl(1, 19, C.c_int)
+_G_PARM = _ioctl(3, 21, _StreamParm)
+_S_PARM = _ioctl(3, 22, _StreamParm)
 _TIMESTAMP_MASK = 0x0000E000
 _TIMESTAMP_MONOTONIC = 0x00002000
 _TIMESTAMP_SOURCE_MASK = 0x00070000
@@ -116,6 +140,9 @@ class V4L2ReadMetrics:
     dequeued_buffers: int = 0
     discarded_buffers: int = 0
     total_discarded_buffers: int = 0
+    requested_capture_fps: float | None = None
+    effective_capture_fps: float | None = None
+    capture_rate_reason: str = ""
     error_reason: str = ""
 
 
@@ -146,7 +173,7 @@ class V4L2TimestampCameraSource:
     kernel is an explicit startup error: do not fall back to stale OpenCV input.
     """
 
-    def __init__(self, device, width, height):
+    def __init__(self, device, width, height, fps=None):
         if sys.platform != 'linux' or C.sizeof(C.c_void_p) != 8:
             raise OSError('V4L2 timestamp capture requires 64-bit Linux')
         if not isinstance(device, str) or not device.startswith('/dev/'):
@@ -158,6 +185,9 @@ class V4L2TimestampCameraSource:
         self.frame_timestamp_kind = ''
         self._last_sequence = None
         self._discarded_buffer_total = 0
+        self.requested_capture_fps = self._validate_requested_fps(fps)
+        self.effective_capture_fps = None
+        self.capture_rate_reason = 'not_requested'
         self.last_read_metrics = V4L2ReadMetrics()
         try:
             self._fd = os.open(device, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -172,6 +202,7 @@ class V4L2TimestampCameraSource:
                 raise OSError('V4L2 camera did not accept requested resolution')
             if fmt.fmt.pix.pixelformat != _MJPEG:
                 raise OSError('V4L2 camera does not support MJPEG at this resolution')
+            self._configure_capture_rate()
             req = _RequestBuffers()
             req.count = 4
             req.type = _VIDEO_CAPTURE
@@ -196,6 +227,71 @@ class V4L2TimestampCameraSource:
             raise
 
     @staticmethod
+    def _validate_requested_fps(value):
+        if value is None:
+            return None
+        numeric = float(value)
+        if not np.isfinite(numeric) or not 1.0 <= numeric <= 120.0:
+            raise ValueError('V4L2 capture FPS must be finite and in [1, 120]')
+        return numeric
+
+    @staticmethod
+    def _fps_from_streamparm(parm):
+        numerator = int(parm.parm.capture.timeperframe.numerator)
+        denominator = int(parm.parm.capture.timeperframe.denominator)
+        if numerator <= 0 or denominator <= 0:
+            return None
+        value = denominator / numerator
+        return value if np.isfinite(value) and value > 0.0 else None
+
+    def _configure_capture_rate(self):
+        """Request and read back the kernel capture rate before STREAMON.
+
+        Failure to negotiate a rate is diagnostic, not a timestamp fallback.
+        The Viewer still measures actual SOE intervals and reports a mismatch.
+        """
+        requested = self.requested_capture_fps
+        if requested is None:
+            self.capture_rate_reason = 'not_requested'
+        else:
+            fraction = Fraction(1.0 / requested).limit_denominator(1_000_000)
+            parm = _StreamParm()
+            parm.type = _VIDEO_CAPTURE
+            parm.parm.capture.timeperframe.numerator = fraction.numerator
+            parm.parm.capture.timeperframe.denominator = fraction.denominator
+            try:
+                fcntl.ioctl(self._fd, _S_PARM, parm, True)
+            except OSError as exc:
+                self.capture_rate_reason = (
+                    f'set_failed_errno_{exc.errno}'
+                )
+            else:
+                self.capture_rate_reason = 'requested'
+
+        observed = _StreamParm()
+        observed.type = _VIDEO_CAPTURE
+        try:
+            fcntl.ioctl(self._fd, _G_PARM, observed, True)
+        except OSError as exc:
+            suffix = f'get_failed_errno_{exc.errno}'
+            self.capture_rate_reason = (
+                suffix if self.capture_rate_reason == 'not_requested'
+                else f'{self.capture_rate_reason},{suffix}'
+            )
+            return
+        self.effective_capture_fps = self._fps_from_streamparm(observed)
+        if self.effective_capture_fps is None:
+            self.capture_rate_reason = f'{self.capture_rate_reason},not_reported'
+        elif requested is None:
+            self.capture_rate_reason = 'driver_reported'
+        elif abs(self.effective_capture_fps - requested) <= max(
+            0.1, requested * 0.01
+        ):
+            self.capture_rate_reason = 'matched'
+        else:
+            self.capture_rate_reason = 'negotiated_mismatch'
+
+    @staticmethod
     def _new_buffer(index=0):
         buf = _Buffer()
         buf.type = _VIDEO_CAPTURE
@@ -208,7 +304,16 @@ class V4L2TimestampCameraSource:
         self.frame_timestamp_monotonic = None
         self.frame_timestamp_kind = ''
         self.last_read_metrics = V4L2ReadMetrics(
-            total_discarded_buffers=self._discarded_buffer_total
+            total_discarded_buffers=self._discarded_buffer_total,
+            requested_capture_fps=getattr(
+                self, 'requested_capture_fps', None
+            ),
+            effective_capture_fps=getattr(
+                self, 'effective_capture_fps', None
+            ),
+            capture_rate_reason=getattr(
+                self, 'capture_rate_reason', 'unavailable'
+            ),
         )
         if self._fd < 0:
             self._record_read_metrics(
@@ -389,6 +494,15 @@ class V4L2TimestampCameraSource:
             dequeued_buffers=max(0, int(dequeued_buffers)),
             discarded_buffers=max(0, int(discarded_buffers)),
             total_discarded_buffers=self._discarded_buffer_total,
+            requested_capture_fps=getattr(
+                self, 'requested_capture_fps', None
+            ),
+            effective_capture_fps=getattr(
+                self, 'effective_capture_fps', None
+            ),
+            capture_rate_reason=getattr(
+                self, 'capture_rate_reason', 'unavailable'
+            ),
             error_reason=str(error_reason),
         )
 
