@@ -269,6 +269,10 @@ class LocalizationMonitor:
         self._stable = False
         self._ever_stable = False
         self._last_metrics = ""
+        # Continuous, fresh and position-consistent TF must have been
+        # observed BEFORE AMCL reception becomes stale. A late TF
+        # sighting cannot revalidate an unchecked 50-second gap.
+        self._last_tf_hold_verified_at: float | None = None
 
     def reject(self, reason: str, received_at: float | None = None) -> LocalizationStatus:
         now = self._now(received_at)
@@ -292,6 +296,7 @@ class LocalizationMonitor:
             return self.status(now)
 
         self._last_error = ""
+        self._last_tf_hold_verified_at = None
         self._last_metrics = metrics
         self._last_pose = (observation.x, observation.y, observation.yaw)
         if self._good_samples == 0:
@@ -320,15 +325,34 @@ class LocalizationMonitor:
                 LOCALIZING, "no /amcl_pose received since startup", False, self.receive_count
             )
         age = max(0.0, timestamp - self._last_received_at)
-        held_by_fresh_tf = self._can_hold_with_tf(freshness_confirmed, tf_pose)
+        tf_matches = self._can_hold_with_tf(freshness_confirmed, tf_pose)
+        # A fresh TF sample alone is NOT evidence that the robot remained
+        # correctly localized through an arbitrary silent interval. Only
+        # maintain a hold when samples have been observed continuously since
+        # the last accepted AMCL (up to a brief 0.5-second scheduling gap).
+        # In particular, status() is called both before and after TF checks
+        # by the Viewer: an early, unchecked call must not permanently poison
+        # the last valid AMCL observation with a latched 'stale' error.
+        held_by_fresh_tf = False
+        if tf_matches and self._stable:
+            previous_check = self._last_tf_hold_verified_at
+            if age <= self.thresholds.pose_timeout_sec or (
+                previous_check is not None
+                and 0.0 <= timestamp - previous_check <= 0.5
+            ):
+                self._last_tf_hold_verified_at = timestamp
+                held_by_fresh_tf = True
         if age > self.thresholds.pose_timeout_sec and not held_by_fresh_tf:
-            if not self._last_error.startswith("AMCL reception stale"):
-                self._mark_bad(
+            # Fail closed immediately, but do not erase the validated sample.
+            # A short TF scheduling gap can recover when continuity is still
+            # provable; a longer gap requires a fresh AMCL observation.
+            return LocalizationStatus(
+                LOCALIZATION_UNSTABLE,
+                self._last_error or (
                     f"AMCL reception stale: age={age:.3f}s "
                     f"timeout={self.thresholds.pose_timeout_sec:.3f}s"
-                )
-            return LocalizationStatus(
-                LOCALIZATION_UNSTABLE, self._last_error, False, self.receive_count
+                ),
+                False, self.receive_count,
             )
         if not self._stable and not self._last_error and self._good_since is not None:
             stable_for = max(0.0, timestamp - self._good_since)
@@ -458,6 +482,7 @@ class LocalizationMonitor:
         self._stable = False
         self._good_samples = 0
         self._good_since = None
+        self._last_tf_hold_verified_at = None
         self._last_error = reason
 
     def _can_hold_with_tf(

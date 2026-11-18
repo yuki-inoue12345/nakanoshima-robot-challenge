@@ -9,6 +9,7 @@ from ar_path_viewer.costmap_alerts import (
     CostmapAlertHistoryGate,
     evaluate_costmap_alert,
     evaluate_path_cost_alert,
+    evaluate_forward_cost_alert,
     evaluate_robot_proximity_alert,
 )
 from ar_path_viewer.costmap_minimap import CostmapMinimap, draw_costmap_minimap
@@ -221,3 +222,38 @@ def test_minimap_budget_prefers_lethal_over_plentiful_high_cells():
     assert len(set(selected)) == 2500
     assert 1 in selected
     assert np.count_nonzero(costs[selected] >= 100) == 1
+
+
+def test_forward_costmap_caution_precedes_nearby_lethal_without_side_wall():
+    points = np.asarray(((1.5, 0.05, 0.0), (1.3, 1.2, 0.0)))
+    alert, reason = evaluate_forward_cost_alert(
+        points, np.asarray((100, 100)),
+        high_cost_min=60, lethal_cost_min=100,
+    )
+    assert alert is not None
+    assert alert.kind == "forward"
+    assert "forward_cost_m=" in alert.detail
+    assert reason == "costmap_cost_in_forward_corridor"
+
+    alert, reason = evaluate_forward_cost_alert(
+        points[1:], np.asarray((100,)),
+        high_cost_min=60, lethal_cost_min=100,
+    )
+    assert alert is None
+    assert reason == "no_forward_costmap_evidence"
+
+    alert, reason = evaluate_forward_cost_alert(
+        points[:1], np.asarray((65,)),
+        high_cost_min=60, lethal_cost_min=100,
+    )
+    assert alert is not None and alert.kind == "forward"
+
+
+def test_forward_caution_never_claims_person_or_live_danger():
+    points = np.asarray(((1.2, 0.0, 0.0),))
+    alert, _ = evaluate_forward_cost_alert(
+        points, np.asarray((100,)),
+        high_cost_min=60, lethal_cost_min=100,
+    )
+    assert "PERSON" not in alert.label
+    assert alert.kind != "nearby"

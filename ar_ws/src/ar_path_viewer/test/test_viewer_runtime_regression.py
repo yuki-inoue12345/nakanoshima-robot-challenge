@@ -1149,6 +1149,11 @@ def test_exact_tf_wait_keeps_preview_then_recovers_same_synchronized_frame(monke
         def peek(self, now):
             return self.item
 
+        def peek_latest_eligible(self, now):
+            # A one-frame test double has no older frames to skip.
+            # Preserve the original frame and timestamp.
+            return self.peek(now)
+
         def consume(self, item):
             assert item is self.item
             self.consumed = True
@@ -1220,6 +1225,11 @@ def test_delayed_image_uses_only_path_generation_available_at_capture(monkeypatc
 
         def peek(self, now):
             return self.item
+
+        def peek_latest_eligible(self, now):
+            # A one-frame test double has no older frames to skip.
+            # Preserve the original frame and timestamp.
+            return self.peek(now)
 
         def consume(self, item):
             self.pending_count = 0

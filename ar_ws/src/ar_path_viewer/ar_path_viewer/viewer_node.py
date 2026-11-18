@@ -48,6 +48,7 @@ from .costmap_alerts import (
     CostmapAlertHistoryGate,
     CostmapAlertSettings,
     evaluate_path_cost_alert,
+    evaluate_forward_cost_alert,
     evaluate_robot_proximity_alert,
 )
 from .costmap_explanation import (
@@ -821,11 +822,14 @@ class ArPathViewerNode(Node):
                 self._on_reference_follower_state,
                 reference_state_qos,
             )
+        # The robot AMCL publisher is RELIABLE + TRANSIENT_LOCAL.
+        # Request its latest retained sample on Viewer startup; the monitor
+        # still rejects latched samples with stale header timestamps.
         self._amcl_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
             self._str("amcl_pose_topic"),
             self._on_amcl_pose,
-            qos,
+            reference_state_qos,
         )
         output_video = "" if self._session_paths.video is None else str(
             self._session_paths.video
@@ -1424,11 +1428,13 @@ class ArPathViewerNode(Node):
         if global_frame == self._base_frame:
             return True, "", None
         try:
+            # Never block the ROS render timer for an optional TF sample.
+            # A missing transform fails closed and will be checked next tick.
             transform = self._tf_buffer.lookup_transform(
                 global_frame,
                 self._base_frame,
                 Time(),
-                timeout=Duration(seconds=0.05),
+                timeout=Duration(seconds=0.0),
             )
         except Exception as exc:
             self._diagnostics.tf_failure(self._base_frame, global_frame, exc)
@@ -1609,7 +1615,7 @@ class ArPathViewerNode(Node):
             else:
                 frame_delay.add(preview_image, image_timing)
             if preview_image is not None and image_timing.usable:
-                delayed_frame = frame_delay.peek(time.monotonic())
+                delayed_frame = frame_delay.peek_latest_eligible(time.monotonic())
                 if delayed_frame is not None:
                     image = delayed_frame.image
                     image_timing = delayed_frame.timing
@@ -2479,6 +2485,18 @@ class ArPathViewerNode(Node):
                             settings=self._costmap_alert_settings,
                         )
                     )
+                    if candidate is None:
+                        # Earlier amber notice, from the SAME exact-time,
+                        # fresh Costmap used above. Never infer a person.
+                        candidate, costmap_alert_reason = (
+                            evaluate_forward_cost_alert(
+                                costmap_analysis_points_base,
+                                costmap_snapshot.analysis_costs,
+                                high_cost_min=self._costmap_settings.high_cost_min,
+                                lethal_cost_min=self._costmap_settings.lethal_cost_min,
+                                settings=self._costmap_alert_settings,
+                            )
+                        )
                 if candidate is not None:
                     costmap_alert = alert_gate.update(candidate)
                     costmap_alert_evaluation = "unconfirmed"

@@ -145,3 +145,27 @@ def test_bounded_queue_memory_and_expiration():
 def test_invalid_delay_configuration_rejected(delay, maxage, limit):
     with pytest.raises(ValueError):
         PerceptionFrameDelay(delay, maxage, limit)
+
+
+def test_latest_eligible_favors_fresh_exposure_without_timestamp_rewrite():
+    queue = PerceptionFrameDelay(0.12, 0.30)
+    for index in range(6):
+        queue.add(index, _timing(100.0 + index * 0.03))
+    selected = queue.peek_latest_eligible(100.25)
+    assert selected.image == 4
+    assert selected.timing is not None
+    assert selected.timing.monotonic_finished_sec == pytest.approx(100.12)
+    assert queue.discarded == 4
+    assert queue.consume(selected)
+    assert queue.peek_latest_eligible(100.25) is None
+
+
+def test_latest_eligible_never_uses_unmatured_or_expired_frame():
+    queue = PerceptionFrameDelay(0.12, 0.30)
+    queue.add("old", _timing(100.0))
+    queue.add("new", _timing(100.20))
+    selected = queue.peek_latest_eligible(100.25)
+    assert selected.image == "old"
+    assert queue.consume(selected)
+    assert queue.peek_latest_eligible(100.25) is None
+    assert queue.peek_latest_eligible(100.51) is None

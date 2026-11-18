@@ -107,6 +107,7 @@ def draw_costmap_alert(
     for prefix, title in (
         ("nearest_lethal_m=", "LETHAL CELL GAP"),
         ("path_distance_m=", "PATH GAP"),
+        ("forward_cost_m=", "FRONT RANGE"),
     ):
         if alert.detail.startswith(prefix):
             try:
@@ -116,7 +117,7 @@ def draw_costmap_alert(
             break
     if alert.detail == "confirmed_real_plan_generation_change":
         detail_label = "REAL /plan GENERATION CHANGED"
-    left, top, width, height = 10, 109, min(400, frame.shape[1] - 20), 92
+    left, top, width, height = 10, 104, min(465, frame.shape[1] - 20), 99
     layer = frame.copy()
     background = (20, 20, 95) if alert.kind in ("nearby", "lethal_path") else (10, 65, 85)
     cv2.rectangle(layer, (left, top), (left + width, top + height), background, -1)
@@ -124,34 +125,35 @@ def draw_costmap_alert(
     cv2.rectangle(frame, (left, top), (left + width, top + height), accent, 3)
     cv2.rectangle(frame, (left, top), (left + 8, top + height), accent, -1)
     # The triangle is font-independent; Japanese text has a safe ASCII fallback.
-    triangle = np.asarray(((left + 22, top + 41), (left + 42, top + 8),
-                           (left + 62, top + 41)), np.int32)
+    triangle = np.asarray(((left + 19, top + 55), (left + 45, top + 9),
+                           (left + 71, top + 55)), np.int32)
     cv2.fillConvexPoly(frame, triangle, accent, cv2.LINE_AA)
-    cv2.putText(frame, "!", (left + 37, top + 35), font, 0.58,
+    cv2.putText(frame, "!", (left + 40, top + 46), font, 0.78,
                 (20, 20, 20), 2, cv2.LINE_AA)
     lethal = alert.kind in ("nearby", "lethal_path")
     draw_localized_label(
-        frame, (left + 70, top + 6, left + width - 8, top + 42),
+        frame, (left + 82, top + 4, left + width - 8, top + 51),
         "危険！" if lethal else "注意",
-        "COSTMAP ALERT" if lethal else "CAUTION",
-        accent, 28,
+        "LETHAL COSTMAP CELL" if lethal else "COSTMAP CAUTION",
+        accent, 37,
     )
     reason_japanese = {
         "lethal_path": "経路付近に通行不可領域",
         "nearby": "ロボット近傍に通行不可領域",
         "high_path": "経路付近に高コスト領域",
+        "forward": "ロボット前方に高コスト領域",
     }.get(alert.kind, "Nav2 Costmapによる判定")
     draw_localized_label(
-        frame, (left + 12, top + 44, left + width - 8, top + 70),
-        reason_japanese, label, (245, 245, 245), 17,
+        frame, (left + 12, top + 55, left + width - 8, top + 78),
+        reason_japanese, label, (245, 245, 245), 19,
     )
     evidence_label = (
-        f"NAV2 COSTMAP | {detail_label}"
-        if detail_label else "NAV2 COSTMAP EVIDENCE"
+        f"NAV2 LOCAL COSTMAP | {detail_label} | NOT CAMERA DETECTION"
+        if detail_label else "NAV2 LOCAL COSTMAP | NOT CAMERA DETECTION"
     )
     cv2.putText(
-        frame, evidence_label, (left + 14, top + 84), font,
-        0.30, (220, 220, 220), 1, cv2.LINE_AA,
+        frame, evidence_label, (left + 14, top + 93), font,
+        0.29, (230, 230, 230), 1, cv2.LINE_AA,
     )
 
 
@@ -172,7 +174,9 @@ def draw_costmap_alert_history(
     cv2.rectangle(frame, (left, top), (left + width, top + height), accent, 1)
     draw_localized_label(
         frame, (left + 12, top + 5, left + width - 8, top + 31),
-        "直前に危険を検出", "RECENT COSTMAP ALERT", accent, 18,
+        ("直前に注意を検出" if history.alert.kind in ("high_path", "forward")
+         else "直前に危険を検出"),
+        "PREVIOUS COSTMAP NOTICE", accent, 18,
     )
     status_ja = (
         "現在の判定：解除"

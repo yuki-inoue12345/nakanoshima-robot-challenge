@@ -163,6 +163,45 @@ def evaluate_robot_proximity_alert(
     return None, "no_lethal_cost_near_robot"
 
 
+def evaluate_forward_cost_alert(
+    points_in_base: np.ndarray,
+    costs: np.ndarray,
+    *,
+    high_cost_min: int,
+    lethal_cost_min: int,
+    settings: CostmapAlertSettings = CostmapAlertSettings(),
+) -> tuple[CostmapAlert | None, str]:
+    """Amber-only notice for a fresh Costmap cell in the forward corridor.
+
+    This is neither camera person detection nor a collision prediction.
+    The caller MUST enforce exact-time TF, AMCL and Costmap freshness. The
+    front region deliberately excludes the near-footprint red danger band
+    and side-wall cells to avoid calling all nearby inflation a hazard.
+    """
+    settings.validate()
+    points, values, reason = _validated_costmap_arrays(points_in_base, costs)
+    if points is None or values is None:
+        return None, reason
+    x = points[:, 0]
+    y = points[:, 1]
+    start = settings.robot_half_length_m + settings.nearby_lethal_distance_m
+    within = (
+        (x >= start) & (x <= 2.0)
+        & (np.abs(y) <= settings.robot_half_width_m + 0.25)
+        & (values >= high_cost_min)
+    )
+    if not np.any(within):
+        return None, "no_forward_costmap_evidence"
+    distances = x[within]
+    classes = values[within]
+    index = int(np.argmin(distances))
+    classification = "lethal" if classes[index] >= lethal_cost_min else "high"
+    return CostmapAlert(
+        "FORWARD COSTMAP CAUTION", "forward",
+        f"forward_cost_m={distances[index]:.3f} class={classification}",
+    ), "costmap_cost_in_forward_corridor"
+
+
 def evaluate_path_cost_alert(
     points_in_base: np.ndarray,
     costs: np.ndarray,
@@ -286,7 +325,7 @@ class CostmapAlertHistoryGate:
     invalid identities clear it immediately.
     """
 
-    _HAZARD_KINDS = {"nearby", "lethal_path", "high_path"}
+    _HAZARD_KINDS = {"nearby", "lethal_path", "high_path", "forward"}
 
     def __init__(self, duration_sec: float = 2.5, clock=time.monotonic) -> None:
         self.duration_sec = float(duration_sec)

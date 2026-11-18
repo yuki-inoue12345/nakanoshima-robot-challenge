@@ -125,7 +125,12 @@ def test_fresh_tf_holds_last_good_pose_during_stationary_amcl_behavior():
     assert not monitor.observe(observation(stamp=100.0), 100.0).stable
     now[0] = 2.0
     assert monitor.status(freshness_confirmed=True, tf_pose=(0.1, 0.0, 0.0)).stable
-    now[0] = 20.0
+    # A continuously observed, fresh map->base TF is a valid hold.
+    for index in range(1, 91):
+        now[0] = 2.0 + 0.2 * index
+        assert monitor.status(
+            freshness_confirmed=True, tf_pose=(0.1, 0.0, 0.0)
+        ).stable
     status = monitor.status(freshness_confirmed=True, tf_pose=(0.1, 0.0, 0.0))
     assert status.stable
     assert "held with fresh TF" in status.detail
@@ -282,3 +287,61 @@ def test_localization_warning_reports_jumps_stale_updates_and_clock_reversal():
     )
     assert reversed_warning.active
     assert reversed_warning.reason == "LOCALIZATION CLOCK RESET"
+
+
+def test_amcl_stale_without_tf_does_not_poison_continuous_tf_hold():
+    now = [0.0]
+    monitor = LocalizationMonitor(
+        thresholds(recovery_samples=1, recovery_sec=0.0), clock=lambda: now[0]
+    )
+    assert monitor.observe(observation(), 100.0).stable
+    for tick in range(1, 280):
+        now[0] = tick * 0.2
+        # The Viewer reads state once before and once after its TF check.
+        if now[0] > 3.0:
+            assert not monitor.status().stable
+        assert monitor.status(
+            freshness_confirmed=True, tf_pose=(0.0, 0.0, 0.0)
+        ).stable
+
+
+def test_lost_tf_continuity_cannot_be_revalidated_with_late_tf():
+    now = [0.0]
+    monitor = LocalizationMonitor(
+        thresholds(recovery_samples=1, recovery_sec=0.0), clock=lambda: now[0]
+    )
+    assert monitor.observe(observation(), 100.0).stable
+    now[0] = 2.9
+    assert monitor.status(
+        freshness_confirmed=True, tf_pose=(0.0, 0.0, 0.0)
+    ).stable
+    now[0] = 3.1
+    assert not monitor.status(freshness_confirmed=False).stable
+    now[0] = 4.0
+    assert not monitor.status(
+        freshness_confirmed=True, tf_pose=(0.0, 0.0, 0.0)
+    ).stable
+    now[0] = 4.1
+    assert monitor.observe(observation(stamp=104.1), 104.1).stable
+    assert monitor.status().stable
+
+
+def test_stale_tf_hold_is_cancelled_by_motion_and_bad_amcl():
+    now = [0.0]
+    monitor = LocalizationMonitor(
+        thresholds(recovery_samples=1, recovery_sec=0.0), clock=lambda: now[0]
+    )
+    assert monitor.observe(observation(), 100.0).stable
+    for tick in range(1, 20):
+        now[0] = 0.2 * tick
+        monitor.status(freshness_confirmed=True, tf_pose=(0.0, 0.0, 0.0))
+    assert not monitor.status(
+        freshness_confirmed=True, tf_pose=(1.0, 0.0, 0.0)
+    ).stable
+    now[0] += 0.1
+    assert not monitor.observe(
+        observation(stamp=10.0), 104.0
+    ).stable
+    assert not monitor.status(
+        freshness_confirmed=True, tf_pose=(0.0, 0.0, 0.0)
+    ).stable

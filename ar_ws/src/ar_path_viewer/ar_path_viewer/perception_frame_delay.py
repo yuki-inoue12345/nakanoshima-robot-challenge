@@ -84,6 +84,29 @@ class PerceptionFrameDelay:
             break
         return None
 
+    def peek_latest_eligible(self, now_monotonic):
+        """Keep the freshest matured image/timestamp pair on a slow GUI.
+
+        An overloaded 30 Hz Viewer must not spend multiple ticks draining
+        already obsolete frames. Dropping a pair is safe; synthesizing a
+        timestamp or reprojecting it with a newer TF is not. ``consume``
+        still removes only the exact candidate returned here.
+        """
+        candidate = self.peek(now_monotonic)
+        if candidate is None:
+            return None
+        while len(self._pending) > 1:
+            following = self._pending[1]
+            age = now_monotonic - following.timing.monotonic_finished_sec
+            if age < self.delay_sec:
+                break
+            if age < 0.0 or age > self.max_age_sec:
+                break
+            self._pending.popleft()
+            self.discarded += 1
+            candidate = self._pending[0]
+        return candidate
+
     def consume(self, item):
         """Remove exactly the frame returned by ``peek``."""
         if not self._pending or self._pending[0] is not item:
