@@ -92,8 +92,10 @@ class _CaptureParm(C.Structure):
 
 
 class _StreamParmUnion(C.Union):
-    _fields_ = [("capture", _CaptureParm), ("raw_data", C.c_uint8 * 200),
-                ("alignment", C.c_uint64)]
+    # v4l2_streamparm has four-byte alignment.  Forcing uint64 alignment made
+    # the structure 208 rather than 204 bytes and generated an unknown ioctl
+    # number, which UVC rejected with ENOTTY (errno 25).
+    _fields_ = [("capture", _CaptureParm), ("raw_data", C.c_uint8 * 200)]
 
 
 class _StreamParm(C.Structure):
@@ -140,6 +142,10 @@ class V4L2ReadMetrics:
     dequeued_buffers: int = 0
     discarded_buffers: int = 0
     total_discarded_buffers: int = 0
+    capture_total: int = 0
+    handoff_discarded_total: int = 0
+    source_interval_sec: float | None = None
+    source_gap_total: int = 0
     requested_capture_fps: float | None = None
     effective_capture_fps: float | None = None
     capture_rate_reason: str = ""

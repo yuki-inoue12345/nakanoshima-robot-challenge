@@ -316,6 +316,7 @@ class DiagnosticReporter:
         target_fps: float | None = None,
         recording_output_frames: int = 0,
         recording_duplicate_frames: int = 0,
+        recording_writer_metrics=None,
     ) -> None:
         """Expose bounded camera/synchronization progress for field logs."""
         self.camera_read_count += 1
@@ -358,10 +359,22 @@ class DiagnosticReporter:
         source_stamp = getattr(
             source_metrics, "frame_timestamp_monotonic_sec", None
         )
+        explicit_source_interval = getattr(
+            source_metrics, "source_interval_sec", None
+        )
         sequence_gap = max(
             0, int(getattr(source_metrics, "sequence_gap", 0) or 0)
         )
-        if source_stamp is not None and math.isfinite(float(source_stamp)):
+        if (
+            explicit_source_interval is not None
+            and math.isfinite(float(explicit_source_interval))
+            and float(explicit_source_interval) > 0.0
+        ):
+            self._append_camera_metric(
+                self._camera_source_interval_sec,
+                float(explicit_source_interval),
+            )
+        elif source_stamp is not None and math.isfinite(float(source_stamp)):
             source_stamp = float(source_stamp)
             if (
                 self._camera_previous_source_stamp is not None
@@ -397,6 +410,12 @@ class DiagnosticReporter:
                 f" source_discarded={getattr(source_metrics, 'discarded_buffers', 0)}"
                 " source_discarded_total="
                 f"{getattr(source_metrics, 'total_discarded_buffers', 0)}"
+                " source_captured_total="
+                f"{getattr(source_metrics, 'capture_total', 0)}"
+                " handoff_discarded_total="
+                f"{getattr(source_metrics, 'handoff_discarded_total', 0)}"
+                " source_gap_total="
+                f"{getattr(source_metrics, 'source_gap_total', 0)}"
                 " requested_capture_fps="
                 f"{getattr(source_metrics, 'requested_capture_fps', None)}"
                 " effective_capture_fps="
@@ -416,6 +435,20 @@ class DiagnosticReporter:
         deadline_pct = (
             100.0 * gui_deadline_miss_count / max(1, gui_new_count - 1)
         )
+        writer_detail = ""
+        if recording_writer_metrics is not None:
+            writer_detail = (
+                " recording_submitted="
+                f"{getattr(recording_writer_metrics, 'submitted_frames', 0)}"
+                " recording_replaced="
+                f"{getattr(recording_writer_metrics, 'replaced_frames', 0)}"
+                " encoder_write_ms="
+                f"{1000.0 * float(getattr(recording_writer_metrics, 'encode_duration_sec', 0.0)):.1f}"
+                " encoder_write_max_ms="
+                f"{1000.0 * float(getattr(recording_writer_metrics, 'max_encode_duration_sec', 0.0)):.1f}"
+                " recording_error="
+                f"{getattr(recording_writer_metrics, 'error_reason', '') or 'none'}"
+            )
         self._emit(
             level,
             f"camera_pipeline:{mode}:{reason}",
@@ -452,7 +485,8 @@ class DiagnosticReporter:
             f"target_fps={target_fps} "
             f"recording_output_frames={int(recording_output_frames)} "
             f"recording_duplicates={int(recording_duplicate_frames)} "
-            f"mode={mode} timestamp_reason={timestamp_reason}{source_detail}",
+            f"mode={mode} timestamp_reason={timestamp_reason}"
+            f"{source_detail}{writer_detail}",
             force=self.camera_read_count == 1,
         )
 

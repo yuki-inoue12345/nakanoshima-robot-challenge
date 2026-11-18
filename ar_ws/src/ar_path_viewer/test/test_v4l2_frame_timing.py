@@ -99,10 +99,10 @@ def test_v4l2_abi_matches_linux_x86_64_headers():
     assert ctypes.sizeof(_Buffer) == 88
     assert ctypes.sizeof(_Format) == 208
     assert ctypes.sizeof(_RequestBuffers) == 20
-    assert ctypes.sizeof(_StreamParm) == 208
+    assert ctypes.sizeof(_StreamParm) == 204
     assert _S_FMT == 0xC0D05605
-    assert _G_PARM == 0xC0D05615
-    assert _S_PARM == 0xC0D05616
+    assert _G_PARM == 0xC0CC5615
+    assert _S_PARM == 0xC0CC5616
 
 
 def test_v4l2_buffer_monotonic_provenance_is_required():

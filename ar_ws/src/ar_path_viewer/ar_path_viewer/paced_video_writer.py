@@ -50,5 +50,19 @@ class PacedVideoWriter:
         # before the next output slot.
         self._last_frame = frame.copy()
 
+    def fill_until_now(self) -> None:
+        """Fill elapsed fixed-rate slots with the last real rendering."""
+        if self.started_at is None or self._last_frame is None:
+            return
+        now = float(self.clock())
+        target_count = max(
+            1,
+            int(math.floor(max(0.0, now - self.started_at) * self.fps)) + 1,
+        )
+        while self.frames_written < target_count:
+            self.writer.write(self._last_frame)
+            self.frames_written += 1
+            self.duplicate_frames_written += 1
+
     def release(self) -> None:
         self.writer.release()

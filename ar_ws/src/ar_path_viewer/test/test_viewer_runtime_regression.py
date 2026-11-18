@@ -1054,6 +1054,28 @@ def test_frame_sync_wait_keeps_fresh_camera_visible_for_thirty_seconds(monkeypat
     assert fake._perception_frame_delay.pending_count == 0
 
 
+def test_async_camera_gap_keeps_last_gui_frame_without_faking_timestamp():
+    class PendingSource(ImageSource):
+        temporary_empty = True
+        last_read_metrics = None
+        frame_timestamp_monotonic = None
+        frame_timestamp_kind = ""
+
+        def read(self):
+            return None
+
+    fake = make_viewer()
+    fake._image_source = PendingSource()
+    fake._last_image_frame_timing = object()
+    previous_timing = fake._last_image_frame_timing
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert fake._last_image_frame_timing is previous_timing
+    assert fake._writer.frames == []
+    assert fake._display_frames.wait_for_new(0, 0.0)[1] is None
+
+
 def test_exact_tf_wait_keeps_preview_then_recovers_same_synchronized_frame(monkeypatch):
     """A retained candidate cannot freeze preview and is used only after TF."""
     rendered = []

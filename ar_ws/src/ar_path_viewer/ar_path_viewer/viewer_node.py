@@ -39,6 +39,7 @@ from .costmap_path_sync import (
     check_costmap_path_pair,
     follower_goal_identity,
 )
+from .async_video_writer import AsyncPacedVideoWriter
 from .costmap_alerts import (
     CostmapAlert,
     CostmapAlertGate,
@@ -61,6 +62,7 @@ from .display_window import (
 )
 from .image_source import SimulationSource, make_image_source
 from .guidance_stability import GuidanceStabilityGate
+from .latest_image_source import LatestImageSource
 from .log_gui import LogGui
 from .localization_monitor import (
     LocalizationMonitor,
@@ -70,7 +72,6 @@ from .localization_monitor import (
 from .offscreen_guidance import GuidanceSettings
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
-from .paced_video_writer import PacedVideoWriter
 from .perception_frame_delay import PerceptionFrameDelay
 from .projection import (
     DEFAULT_CAMERA_Y_M,
@@ -580,6 +581,8 @@ class ArPathViewerNode(Node):
                 self._intrinsics.width, self._intrinsics.height,
                 fps=self._float("fps"),
             )
+            if self._image_input_kind == "camera_timestamped":
+                self._image_source = LatestImageSource(self._image_source)
         except OSError as exc:
             self._camera_error = str(exc)
             self._log_error(f"Camera unavailable: {exc}")
@@ -928,7 +931,7 @@ class ArPathViewerNode(Node):
             self._log_error(f"Cannot open output video: {destination}")
             writer.release()
             return None
-        return PacedVideoWriter(writer, fps)
+        return AsyncPacedVideoWriter(writer, fps)
 
     def _handle_display_action(self, action: str) -> None:
         ArPathViewerNode._require_main_thread(self)
@@ -1475,6 +1478,15 @@ class ArPathViewerNode(Node):
         source_read_metrics = getattr(
             self._image_source, "last_read_metrics", None
         )
+        # The timestamped camera is captured continuously by a bounded worker.
+        # A timer firing between two physical frames is not a disconnect and
+        # must not replay pixels with a fabricated new timestamp.  Keep the
+        # already-presented GUI frame while TF and other ROS callbacks run.
+        if (
+            captured_image is None
+            and bool(getattr(self._image_source, "temporary_empty", False))
+        ):
+            return
         capture_finished_ros = self._ros_now_sec()
         capture_finished_monotonic = time.monotonic()
         previous_timing = getattr(self, "_last_image_frame_timing", None)
@@ -2532,9 +2544,11 @@ class ArPathViewerNode(Node):
         writer_duration_sec = 0.0
         if self._writer is not None:
             writer_started = time.monotonic()
-            self._writer.write(frame)
+            write_result = self._writer.write(frame)
+            # Existing test/custom writers follow cv2 and return None; only an
+            # explicit False from the bounded async writer means rejection.
+            recorded = write_result is not False
             writer_duration_sec = time.monotonic() - writer_started
-            recorded = True
         ArPathViewerNode._publish_display_frame(
             self,
             frame,
@@ -2576,6 +2590,7 @@ class ArPathViewerNode(Node):
                 0 if self._writer is None
                 else getattr(self._writer, "duplicate_frames_written", 0)
             ),
+            recording_writer_metrics=self._writer,
         )
 
     def _request_shutdown(self, reason: str) -> None:
@@ -2597,8 +2612,17 @@ class ArPathViewerNode(Node):
         if display_frames is not None:
             display_frames.close()
         self._image_source.close()
+        if bool(getattr(self._image_source, "worker_alive", False)):
+            self._log_warning(
+                "Camera capture worker did not stop within the bounded timeout"
+            )
         if self._writer is not None:
             self._writer.release()
+            writer_error = str(getattr(self._writer, "error_reason", ""))
+            if writer_error:
+                self._log_warning(
+                    f"Video writer shutdown status: {writer_error}"
+                )
             self._writer = None
         if self._display_window is not None:
             self._display_window.close()
