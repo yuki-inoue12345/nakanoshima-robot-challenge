@@ -10,6 +10,7 @@ from ar_path_viewer.localization_monitor import (
     LOCALIZING,
     LocalizationMonitor,
     LocalizationThresholds,
+    LocalizationWarningGate,
     amcl_message_to_observation,
 )
 
@@ -200,3 +201,84 @@ def test_pose_message_conversion_validates_quaternion_and_timestamp():
     message.pose.pose.orientation.w = 0.0
     with pytest.raises(ValueError, match="quaternion norm"):
         amcl_message_to_observation(message)
+
+
+def localization_status(state, detail, stable):
+    from ar_path_viewer.localization_monitor import LocalizationStatus
+
+    return LocalizationStatus(state, detail, stable, 1)
+
+
+def test_localization_warning_stays_active_then_retains_ten_second_history():
+    now = [0.0]
+    gate = LocalizationWarningGate(10.0, clock=lambda: now[0])
+    good = localization_status(LOCALIZATION_OK, "stable", True)
+    bad = localization_status(
+        LOCALIZATION_UNSTABLE,
+        "AMCL position uncertainty too high: sigma=1.000m",
+        False,
+    )
+
+    assert gate.update(good) is None
+    warning = gate.update(bad)
+    assert warning.active
+    assert warning.reason == "AMCL UNCERTAINTY HIGH"
+    now[0] = 20.0
+    assert gate.update(bad).active  # active warnings never expire
+
+    warning = gate.update(good)
+    assert warning.mode == "recent"
+    assert warning.age_sec == pytest.approx(0.0)
+    now[0] = 29.99
+    assert gate.update(good).mode == "recent"
+    now[0] = 30.0
+    assert gate.update(good) is None
+
+
+def test_localization_warning_does_not_treat_unknown_or_amcl_as_tf_recovery():
+    now = [0.0]
+    gate = LocalizationWarningGate(10.0, clock=lambda: now[0])
+    good = localization_status(LOCALIZATION_OK, "stable", True)
+    unknown = localization_status(LOCALIZING, "waiting for AMCL", False)
+
+    warning = gate.update(
+        good,
+        tf_checked=True,
+        tf_available=False,
+        tf_detail="localization TF stale",
+    )
+    assert warning.active
+    assert warning.reason == "LOCALIZATION TF UNAVAILABLE"
+    assert gate.update(unknown).active
+    assert gate.update(good, tf_checked=False).active
+
+    recovered = gate.update(good, tf_checked=True, tf_available=True)
+    assert recovered.mode == "recent"
+    now[0] = 1.0
+    uncertain_again = gate.update(unknown)
+    assert uncertain_again.active
+    assert uncertain_again.reason == "LOCALIZATION STATUS UNCONFIRMED"
+
+
+def test_localization_warning_reports_jumps_stale_updates_and_clock_reversal():
+    now = [10.0]
+    gate = LocalizationWarningGate(10.0, clock=lambda: now[0])
+    position_jump = localization_status(
+        LOCALIZATION_UNSTABLE,
+        "AMCL position jump: distance=3.000m",
+        False,
+    )
+    assert gate.update(position_jump).reason == "AMCL POSITION JUMP"
+
+    stale = localization_status(
+        LOCALIZATION_UNSTABLE,
+        "AMCL reception stale: age=3.100s",
+        False,
+    )
+    assert gate.update(stale).reason == "AMCL UPDATE STALE"
+    now[0] = 9.0
+    reversed_warning = gate.update(
+        localization_status(LOCALIZATION_OK, "stable", True)
+    )
+    assert reversed_warning.active
+    assert reversed_warning.reason == "LOCALIZATION CLOCK RESET"

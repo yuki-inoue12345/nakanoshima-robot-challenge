@@ -176,53 +176,67 @@ def draw_costmap_minimap(
     )
     selected_points = selected_points[indices]
     selected_costs = selected_costs[indices]
-    colors = {
-        "unknown": (90, 80, 65),
-        "high": (20, 190, 230),
-        "lethal": (205, 45, 235),
-    }
-    for point, cost in zip(selected_points, selected_costs):
-        if cost < 0:
-            color = colors["unknown"]
-        elif cost >= minimap.lethal_cost_min:
-            color = colors["lethal"]
-        elif cost >= minimap.high_cost_min:
-            color = colors["high"]
-        else:
-            continue
-        x = int(round(center_x - point[1] * scale))
-        y = int(round(origin_y - point[0] * scale))
-        if left < x < right and top + 16 < y < bottom:
-            frame[y, x] = color
+    # Selection already orders unknown -> high -> lethal. Draw each class in
+    # that same order so important classes still win at duplicate pixels, but
+    # avoid thousands of Python/OpenCV calls in every 30 fps frame.
+    if len(selected_points):
+        pixel_x = np.rint(
+            center_x - selected_points[:, 1] * scale
+        ).astype(np.int32)
+        pixel_y = np.rint(
+            origin_y - selected_points[:, 0] * scale
+        ).astype(np.int32)
+        inside = (
+            (pixel_x > left) & (pixel_x < right)
+            & (pixel_y > top + 16) & (pixel_y < bottom)
+        )
+        class_masks = (
+            (selected_costs < 0, (90, 80, 65)),
+            (
+                (selected_costs >= minimap.high_cost_min)
+                & (selected_costs < minimap.lethal_cost_min),
+                (20, 190, 230),
+            ),
+            (selected_costs >= minimap.lethal_cost_min, (205, 45, 235)),
+        )
+        for class_mask, color in class_masks:
+            visible = inside & class_mask
+            frame[pixel_y[visible], pixel_x[visible]] = color
 
     path = minimap.path_points_base
     if path is not None:
         path = np.asarray(path, dtype=np.float64)
         if path.ndim == 2 and path.shape[1] == 3:
-            pixels = []
-            for point in path:
-                if 0.0 <= point[0] <= range_m and abs(point[1]) <= range_m * 0.5:
-                    pixels.append((
-                        int(round(center_x - point[1] * scale)),
-                        int(round(origin_y - point[0] * scale)),
-                    ))
-            if len(pixels) >= 2:
-                cv2.polylines(frame, [np.asarray(pixels, np.int32)], False,
+            visible = (
+                (path[:, 0] >= 0.0) & (path[:, 0] <= range_m)
+                & (np.abs(path[:, 1]) <= range_m * 0.5)
+            )
+            path = path[visible]
+            if len(path) >= 2:
+                pixels = np.column_stack((
+                    np.rint(center_x - path[:, 1] * scale),
+                    np.rint(origin_y - path[:, 0] * scale),
+                )).astype(np.int32)
+                cv2.polylines(frame, [pixels], False,
                               (0, 255, 0), 2, cv2.LINE_AA)
 
     reference = minimap.reference_points_base
     if reference is not None:
         reference = np.asarray(reference, dtype=np.float64)
         if reference.ndim == 2 and reference.shape[1] == 3:
-            pixels = []
-            for point in reference:
-                if 0.0 <= point[0] <= range_m and abs(point[1]) <= range_m * 0.5:
-                    pixels.append((
-                        int(round(center_x - point[1] * scale)),
-                        int(round(origin_y - point[0] * scale)),
-                    ))
+            visible = (
+                (reference[:, 0] >= 0.0) & (reference[:, 0] <= range_m)
+                & (np.abs(reference[:, 1]) <= range_m * 0.5)
+            )
+            reference = reference[visible]
+            pixels = np.column_stack((
+                np.rint(center_x - reference[:, 1] * scale),
+                np.rint(origin_y - reference[:, 0] * scale),
+            )).astype(np.int32)
             for pixel in pixels[::5]:
-                cv2.circle(frame, pixel, 1, (255, 255, 0), -1, cv2.LINE_AA)
+                cv2.circle(
+                    frame, tuple(pixel), 1, (255, 255, 0), -1, cv2.LINE_AA
+                )
 
     half_l = max(2, int(round(robot_half_length_m * scale)))
     half_w = max(2, int(round(robot_half_width_m * scale)))

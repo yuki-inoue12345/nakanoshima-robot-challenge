@@ -10,6 +10,7 @@ from ar_path_viewer.costmap_overlay import ProjectedCostmap
 from ar_path_viewer.costmap_minimap import CostmapMinimap
 from ar_path_viewer.costmap_minimap import robot_view_tab_rectangle
 from ar_path_viewer.image_source import SimulationSource, StaticImageSource, make_image_source
+from ar_path_viewer.localization_monitor import LocalizationWarning
 from ar_path_viewer.offscreen_guidance import OffscreenGuidance
 from ar_path_viewer.paced_video_writer import PacedVideoWriter
 from ar_path_viewer.display_window import (
@@ -512,6 +513,35 @@ def test_recent_alert_history_is_visually_distinct_from_live_warning():
     # Historical state is muted and must not reproduce the live red alert.
     assert np.count_nonzero(history[region][:, :, 2] > 230) < np.count_nonzero(
         live[region][:, :, 2] > 230
+    )
+
+
+def test_localization_warning_active_recent_and_costmap_can_coexist():
+    image = np.full((480, 640, 3), 55, np.uint8)
+    costmap_alert = CostmapAlert(
+        "LETHAL COST NEAR PATH", "lethal_path", "path_distance_m=0.1"
+    )
+    active = render_frame(
+        image, [], "LOCALIZATION UNSTABLE",
+        costmap_alert=costmap_alert,
+        localization_warning=LocalizationWarning(
+            "active", "AMCL POSITION JUMP", "distance=2.1m", 0.0
+        ),
+    )
+    recent = render_frame(
+        image, [], "ACTIVE",
+        localization_warning=LocalizationWarning(
+            "recent", "AMCL POSITION JUMP", "distance=2.1m", 4.0
+        ),
+    )
+    costmap_region = np.s_[109:202, 10:411]
+    localization_region = np.s_[207:280, 10:411]
+    assert not np.array_equal(active[costmap_region], image[costmap_region])
+    assert not np.array_equal(active[localization_region], image[localization_region])
+    assert not np.array_equal(recent[207:266, 10:411], image[207:266, 10:411])
+    # Current and recovered history are deliberately different visual states.
+    assert not np.array_equal(
+        active[207:266, 10:411], recent[207:266, 10:411]
     )
 
 

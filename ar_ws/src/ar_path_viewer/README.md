@@ -375,7 +375,10 @@ Local Costmapはmessageの`header.stamp`に対するTFだけで変換します�
 後に届く実機順序に対応するため、最大`perception_costmap_tf_wait_timeout_sec`秒、
 最大`perception_costmap_max_pending_messages`件の有限キューで非同期に再試行します。
 期限切れ、frame変更、古い順序のmessageは棄却し、最新TFへの置換や時刻の偽装は
-行いません。直前のexact-time結果は通常のCostmap鮮度条件を満たす間だけ維持します。
+行いません。意味判定は通常のCostmap鮮度条件内だけで行います。表示だけは、その上限後
+`perception_costmap_visual_hold_sec`の間、Costmap時刻と各画像時刻のexact TFを改めて
+取得でき、並進・旋回上限も満たす場合に限り薄い`SYNC HOLD`として再投影します。古い
+画像画素は再利用せず、この表示専用結果を警告、説明、ミニマップへ渡しません。
 
 Costmap時刻のbase座標を後続の画像へ流用しません。通常のOpenCV `camera`入力には
 信頼できる撮影時刻がないため認識ARを許可せず、明示的な`camera_timestamped`入力だけが
@@ -396,17 +399,18 @@ ROS時刻との対応がないため、Costmap ARの時刻としては採用し�
   (`>`タブ)で収納します。パネルは映像を縮小・再投影せず、unknown、高コスト、
   lethal-cost、実`/plan`、任意の参考Path、設定済みfootprintを区別します。開閉状態を含む
   640×480の最終合成結果はMP4にも記録されます。
-- `perception_alert_enabled`: exact-time Costmapと有効な実`/plan`だけから
-  `HIGH COST NEAR PATH`、`LETHAL COST NEAR PATH`、
-  `COSTMAP ALERT: NEARBY`を判定します。high-costは橙色の「注意」、lethal-costは赤色の
+- `perception_alert_enabled`: 新鮮なexact-time Costmapから、実`/plan`に依存しない
+  footprint近傍の`COSTMAP ALERT: NEARBY`を判定します。経路上の
+  `HIGH COST NEAR PATH`、`LETHAL COST NEAR PATH`は、実`/plan`のGoal・世代・時刻対応も
+  確認できた場合だけ判定します。high-costは橙色の「注意」、lethal-costは赤色の
   「危険！」として大きく表示しますが、理由には必ずNav2 Costmapの分類と距離根拠を
   併記し、カメラ物体種別や衝突を断定しません。日本語フォントが利用できない環境では
   英語へフォールバックします。
 - `PATH UPDATED`: 既存のPath遷移ゲートが再計画を確定した事実だけを1秒表示します。
 
 警告は設定済みfootprintからの距離とPath corridorを使い、confirmation/releaseの
-ヒステリシスを持ちます。Path、TF、AMCL、Costmapのいずれかが不明・古い場合は
-fail closedで消え、不明を安全とは表示しません。実行中の表示だけを`C`（実写Costmap）、
+ヒステリシスを持ちます。TF、AMCL、Costmapが不明・古い場合、また経路上判定でPathが
+不明な場合はfail closedで消え、不明を安全とは表示しません。実行中の表示だけを`C`（実写Costmap）、
 `M`（ミニマップ）、`E`（説明）、`A`（注意表示）で切り替えられます。このキー操作は
 ROS/Nav2設定を変更せず、設定で有効になっていないレイヤーを新規有効化もしません。
 通常設定とC920設定は全レイヤー既定OFF、
@@ -555,7 +559,23 @@ localization_stationary_hold_distance_m: 0.5
 localization_stationary_hold_yaw_rad: 0.5
 localization_recovery_samples: 1
 localization_recovery_sec: 2.0
+localization_warning_history_sec: 10.0
 ```
+
+既存のAR安全ゲートが`LOCALIZATION UNSTABLE`を返した場合、Viewerは
+`LOCALIZATION WARNING`を表示します。対象には高いAMCL共分散、AMCL受信・timestamp
+停止、frame/値の不正、位置・yawの急変が含まれます。Path・Costmap・参考Pathの利用時に
+必要な`map -> base_frame` TFが取得不能・古い場合も警告します。異常中は時間で消さず、
+同じ安全ゲートで正常と再確認できた後だけ`RECENT LOCALIZATION WARNING`へ変わり、
+既定10秒で消えます。TF起因の警告は正常AMCLだけでは回復扱いにせず、TF成功の再確認を
+必要とします。この履歴表示はAR経路の許可条件を緩和せず、異常中の経路は従来どおり
+非表示です。
+
+この監視だけでは、AMCLが低い共分散のまま誤った地図位置へ収束した状態は検出できません。
+Renya構成ではAMCL入力が`/scan3`、Costmap入力が`/scan3`と
+`/hokuyo_scan_filtered`ですが、信頼できる地図–LiDAR照合には、選択中地図の世代、
+LaserScanとmap TFの同時刻履歴、動的物体を除外する条件、実機廊下で校正した一致スコアと
+継続回数が必要です。これらを確認せず単発scanの不一致を自己位置ずれとは表示しません。
 
 許容移動量は概ね`jump_distance + max_speed * 受信間隔`です。固定余裕に速度余裕を加えるため、通常走行を単純な座標差だけでジャンプ扱いしません。ジャンプ検出後は新しい位置を復帰候補の基準にするため、一度の正当な大補正で永久に復帰不能にはなりません。
 

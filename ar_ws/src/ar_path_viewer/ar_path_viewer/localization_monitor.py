@@ -75,6 +75,145 @@ class LocalizationStatus:
     receive_count: int
 
 
+@dataclass(frozen=True)
+class LocalizationWarning:
+    """One display-only warning derived from the existing localization gate."""
+
+    mode: str
+    reason: str
+    detail: str
+    age_sec: float = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self.mode == "active"
+
+
+class LocalizationWarningGate:
+    """Keep an active warning until verified recovery, then retain history.
+
+    The gate never decides whether AR geometry is safe.  That remains the job
+    of :class:`LocalizationMonitor` and the Viewer TF checks.  This class only
+    turns those already-conservative results into current/recent UI state.
+    """
+
+    def __init__(
+        self,
+        history_sec: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not math.isfinite(history_sec) or history_sec < 0.0:
+            raise ValueError("localization warning history must be finite and non-negative")
+        self.history_sec = float(history_sec)
+        self._clock = clock
+        self._active_source = ""
+        self._reason = ""
+        self._detail = ""
+        self._recovered_at: float | None = None
+        self._last_now: float | None = None
+
+    def update(
+        self,
+        status: LocalizationStatus,
+        *,
+        tf_checked: bool = False,
+        tf_available: bool = False,
+        tf_detail: str = "",
+        now: float | None = None,
+    ) -> LocalizationWarning | None:
+        timestamp = self._time(now)
+        clock_reversed = self._last_now is not None and timestamp < self._last_now
+        if clock_reversed:
+            self._activate(
+                "clock",
+                "LOCALIZATION CLOCK RESET",
+                "monotonic time moved backwards; recovery is unconfirmed",
+            )
+        self._last_now = timestamp
+
+        if clock_reversed:
+            return LocalizationWarning("active", self._reason, self._detail, 0.0)
+
+        if status.state == LOCALIZATION_UNSTABLE or (
+            not status.stable and status.state != LOCALIZING
+        ):
+            self._activate("amcl", _warning_reason(status.detail), status.detail)
+        elif status.stable and tf_checked and not tf_available:
+            detail = tf_detail or "localization TF unavailable"
+            self._activate("tf", "LOCALIZATION TF UNAVAILABLE", detail)
+        elif status.stable:
+            # A TF-origin warning needs an explicit successful TF check.  A
+            # healthy AMCL sample alone must not be called TF recovery.
+            if self._active_source != "tf" or (tf_checked and tf_available):
+                self._recover(timestamp)
+        else:
+            # LOCALIZING is an unknown state, not proof of recovery.  Startup
+            # remains quiet, but an existing warning stays current.
+            if self._active_source:
+                self._detail = (
+                    f"recovery unconfirmed: {status.detail}; previous={self._detail}"
+                )[:240]
+            elif self._recovered_at is not None:
+                self._activate(
+                    "unknown",
+                    "LOCALIZATION STATUS UNCONFIRMED",
+                    status.detail,
+                )
+
+        if self._active_source:
+            return LocalizationWarning("active", self._reason, self._detail, 0.0)
+        if self._recovered_at is None:
+            return None
+        age = max(0.0, timestamp - self._recovered_at)
+        if age >= self.history_sec:
+            self.clear()
+            return None
+        return LocalizationWarning("recent", self._reason, self._detail, age)
+
+    def clear(self) -> None:
+        self._active_source = ""
+        self._reason = ""
+        self._detail = ""
+        self._recovered_at = None
+
+    def _activate(self, source: str, reason: str, detail: str) -> None:
+        self._active_source = source
+        self._reason = reason
+        self._detail = str(detail)[:240]
+        self._recovered_at = None
+
+    def _recover(self, timestamp: float) -> None:
+        if not self._active_source:
+            return
+        self._active_source = ""
+        self._recovered_at = timestamp
+
+    def _time(self, value: float | None) -> float:
+        timestamp = self._clock() if value is None else float(value)
+        if not math.isfinite(timestamp):
+            raise ValueError("localization warning time must be finite")
+        return timestamp
+
+
+def _warning_reason(detail: str) -> str:
+    text = str(detail).lower()
+    if "position uncertainty" in text or "yaw uncertainty" in text:
+        return "AMCL UNCERTAINTY HIGH"
+    if "position jump" in text:
+        return "AMCL POSITION JUMP"
+    if "yaw jump" in text:
+        return "AMCL YAW JUMP"
+    if "reception stale" in text or "timestamp stale" in text:
+        return "AMCL UPDATE STALE"
+    if "future" in text or "clock" in text:
+        return "AMCL TIME INVALID"
+    if "frame mismatch" in text:
+        return "AMCL FRAME MISMATCH"
+    if "invalid" in text or "nan" in text or "inf" in text:
+        return "AMCL DATA INVALID"
+    return "LOCALIZATION UNSTABLE"
+
+
 def amcl_message_to_observation(message) -> AmclObservation:
     """Convert a PoseWithCovarianceStamped-like object without importing ROS."""
     header = message.header

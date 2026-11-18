@@ -92,20 +92,57 @@ def evaluate_costmap_alert(
     lethal_cost_min: int,
     settings: CostmapAlertSettings = CostmapAlertSettings(),
 ) -> tuple[CostmapAlert | None, str]:
-    """Return only observations supported by synchronized numeric inputs."""
-    settings.validate()
+    """Return the strongest observation supported by synchronized inputs."""
+    nearby, nearby_reason = evaluate_robot_proximity_alert(
+        points_in_base,
+        costs,
+        lethal_cost_min=lethal_cost_min,
+        settings=settings,
+    )
+    if nearby is not None:
+        return nearby, nearby_reason
+    path_alert, path_reason = evaluate_path_cost_alert(
+        points_in_base,
+        costs,
+        path_points_base,
+        high_cost_min=high_cost_min,
+        lethal_cost_min=lethal_cost_min,
+        settings=settings,
+    )
+    return path_alert, path_reason
+
+
+def _validated_costmap_arrays(
+    points_in_base: np.ndarray, costs: np.ndarray
+) -> tuple[np.ndarray | None, np.ndarray | None, str]:
     points = np.asarray(points_in_base, dtype=np.float64)
     values = np.asarray(costs, dtype=np.int16)
-    path = np.asarray(path_points_base, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 3 or values.shape != (len(points),):
-        return None, "invalid_costmap_geometry"
-    if path.ndim != 2 or path.shape[1] != 3 or len(path) < 2:
-        return None, "real_path_unavailable"
-    if not np.isfinite(points).all() or not np.isfinite(path).all():
-        return None, "nonfinite_geometry"
+        return None, None, "invalid_costmap_geometry"
+    if not np.isfinite(points).all():
+        return None, None, "nonfinite_geometry"
+    return points, values, "valid"
+
+
+def evaluate_robot_proximity_alert(
+    points_in_base: np.ndarray,
+    costs: np.ndarray,
+    *,
+    lethal_cost_min: int,
+    settings: CostmapAlertSettings = CostmapAlertSettings(),
+) -> tuple[CostmapAlert | None, str]:
+    """Evaluate exact-time lethal cells near the footprint without a Path.
+
+    This answers only whether the synchronized Local Costmap contains a
+    lethal-cost cell close to the robot.  It does not claim that the cell is a
+    person, that a collision will occur, or why Nav2 chose a route.
+    """
+    settings.validate()
+    points, values, reason = _validated_costmap_arrays(points_in_base, costs)
+    if points is None or values is None:
+        return None, reason
     relevant = points[:, 0] >= 0.0
     lethal = relevant & (values >= lethal_cost_min)
-    high = relevant & (values >= high_cost_min) & (values < lethal_cost_min)
     if np.any(lethal):
         lethal_xy = points[lethal, :2]
         # Distance to the configured rectangular footprint, not merely to the
@@ -123,6 +160,31 @@ def evaluate_costmap_alert(
                 "COSTMAP ALERT: NEARBY", "nearby",
                 f"nearest_lethal_m={minimum:.3f}",
             ), "lethal_cost_near_robot"
+    return None, "no_lethal_cost_near_robot"
+
+
+def evaluate_path_cost_alert(
+    points_in_base: np.ndarray,
+    costs: np.ndarray,
+    path_points_base: np.ndarray,
+    *,
+    high_cost_min: int,
+    lethal_cost_min: int,
+    settings: CostmapAlertSettings = CostmapAlertSettings(),
+) -> tuple[CostmapAlert | None, str]:
+    """Evaluate cost near one strictly synchronized real Path."""
+    settings.validate()
+    points, values, reason = _validated_costmap_arrays(points_in_base, costs)
+    if points is None or values is None:
+        return None, reason
+    path = np.asarray(path_points_base, dtype=np.float64)
+    if path.ndim != 2 or path.shape[1] != 3 or len(path) < 2:
+        return None, "real_path_unavailable"
+    if not np.isfinite(path).all():
+        return None, "nonfinite_geometry"
+    relevant = points[:, 0] >= 0.0
+    lethal = relevant & (values >= lethal_cost_min)
+    high = relevant & (values >= high_cost_min) & (values < lethal_cost_min)
     if np.any(lethal):
         candidates = _corridor_candidates(
             points[lethal, :2], path[:, :2], settings.path_corridor_width_m

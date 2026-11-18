@@ -16,6 +16,7 @@ from .costmap_minimap import (
     draw_robot_view_tab,
 )
 from .display_window import draw_localized_label
+from .localization_monitor import LocalizationWarning
 from .offscreen_guidance import OffscreenGuidance
 
 
@@ -193,6 +194,50 @@ def draw_costmap_alert_history(
     )
 
 
+def draw_localization_warning(
+    frame: np.ndarray, warning: LocalizationWarning | None
+) -> None:
+    """Draw current and recovered localization states without implying control."""
+    if warning is None:
+        return
+    active = warning.active
+    left, top = 10, 207
+    width = min(400, frame.shape[1] - 20)
+    height = 72 if active else 58
+    accent = (35, 45, 245) if active else (80, 150, 205)
+    background = (18, 18, 92) if active else (28, 34, 42)
+    layer = frame.copy()
+    cv2.rectangle(
+        layer, (left, top), (left + width, top + height), background, -1
+    )
+    cv2.addWeighted(layer, 0.78 if active else 0.66, frame,
+                    0.22 if active else 0.34, 0.0, frame)
+    cv2.rectangle(frame, (left, top), (left + width, top + height), accent,
+                  3 if active else 1)
+    cv2.rectangle(frame, (left, top), (left + 7, top + height), accent, -1)
+    title = "LOCALIZATION WARNING" if active else "RECENT LOCALIZATION WARNING"
+    cv2.putText(
+        frame, title, (left + 15, top + 23), cv2.FONT_HERSHEY_SIMPLEX,
+        0.53 if active else 0.45, accent, 2 if active else 1, cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame, warning.reason[:43], (left + 15, top + 45),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.39, (245, 245, 245), 1, cv2.LINE_AA,
+    )
+    if active:
+        detail = warning.detail.replace("\n", " ")[:57]
+        cv2.putText(
+            frame, detail, (left + 15, top + 64), cv2.FONT_HERSHEY_SIMPLEX,
+            0.28, (210, 210, 210), 1, cv2.LINE_AA,
+        )
+    else:
+        cv2.putText(
+            frame, f"RECOVERED {warning.age_sec:.1f}s AGO",
+            (left + width - 144, top + 51), cv2.FONT_HERSHEY_SIMPLEX,
+            0.27, (170, 170, 170), 1, cv2.LINE_AA,
+        )
+
+
 def draw_costmap_overlay(
     image: np.ndarray,
     projection: ProjectedCostmap | None,
@@ -211,43 +256,39 @@ def draw_costmap_overlay(
     layer = frame.copy()
     outline = (12, 12, 12)
 
-    def point_mask(points: np.ndarray) -> np.ndarray:
-        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        points = np.asarray(points, dtype=np.int64)
-        if points.size == 0:
-            return mask
-        valid = (
-            (points[:, 0] >= 0) & (points[:, 0] < frame.shape[1])
-            & (points[:, 1] >= 0) & (points[:, 1] < frame.shape[0])
+    # The previous implementation allocated and dilated six full 640x480
+    # masks on every camera frame. Projection already bounds each class to a
+    # small, configured sample, so drawing only those markers is materially
+    # cheaper while preserving the same outlined ground-patch semantics.
+    for x_value, y_value in projection.unknown_pixels:
+        cv2.circle(
+            layer, (int(x_value), int(y_value)), radius_px,
+            COSTMAP_UNKNOWN_BGR, -1, cv2.LINE_8,
         )
-        points = points[valid]
-        mask[points[:, 1], points[:, 0]] = 255
-        return mask
-
-    def ellipse(mask: np.ndarray, radius: int) -> np.ndarray:
-        size = radius * 2 + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
-        return cv2.dilate(mask, kernel)
-
-    def diamond(mask: np.ndarray, radius: int) -> np.ndarray:
-        axis = np.arange(-radius, radius + 1)
-        kernel = (
-            np.abs(axis[:, None]) + np.abs(axis[None, :]) <= radius
-        ).astype(np.uint8)
-        return cv2.dilate(mask, kernel)
-
-    unknown = ellipse(point_mask(projection.unknown_pixels), radius_px)
-    high_points = point_mask(projection.high_cost_pixels)
-    high_outline = ellipse(high_points, radius_px + 4)
-    high_fill = ellipse(high_points, radius_px + 2)
-    lethal_points = point_mask(projection.lethal_cost_pixels)
-    lethal_outline = diamond(lethal_points, radius_px * 2 + 6)
-    lethal_fill = diamond(lethal_points, radius_px * 2 + 4)
-    layer[unknown > 0] = COSTMAP_UNKNOWN_BGR
-    layer[high_outline > 0] = outline
-    layer[high_fill > 0] = COSTMAP_HIGH_BGR
-    layer[lethal_outline > 0] = outline
-    layer[lethal_fill > 0] = COSTMAP_LETHAL_BGR
+    for x_value, y_value in projection.high_cost_pixels:
+        center = (int(x_value), int(y_value))
+        cv2.circle(layer, center, radius_px + 4, outline, -1, cv2.LINE_8)
+        cv2.circle(
+            layer, center, radius_px + 2,
+            COSTMAP_HIGH_BGR, -1, cv2.LINE_8,
+        )
+    lethal_radius = radius_px * 2
+    for x_value, y_value in projection.lethal_cost_pixels:
+        center_x, center_y = int(x_value), int(y_value)
+        for patch_radius, color in (
+            (lethal_radius + 6, outline),
+            (lethal_radius + 4, COSTMAP_LETHAL_BGR),
+        ):
+            diamond = np.asarray(
+                (
+                    (center_x, center_y - patch_radius),
+                    (center_x + patch_radius, center_y),
+                    (center_x, center_y + patch_radius),
+                    (center_x - patch_radius, center_y),
+                ),
+                dtype=np.int32,
+            )
+            cv2.fillConvexPoly(layer, diamond, color, cv2.LINE_8)
     cv2.addWeighted(layer, alpha, frame, 1.0 - alpha, 0.0, frame)
     return frame
 
@@ -323,11 +364,13 @@ def dashed_line_segments(
     phase = 0.0
     output = []
     for start, end in segments:
-        vector = np.asarray(end, dtype=float) - np.asarray(start, dtype=float)
-        length = float(np.linalg.norm(vector))
+        start_x, start_y = float(start[0]), float(start[1])
+        delta_x = float(end[0]) - start_x
+        delta_y = float(end[1]) - start_y
+        length = math.hypot(delta_x, delta_y)
         if length < 1.0:
             continue
-        unit = vector / length
+        unit_x, unit_y = delta_x / length, delta_y / length
         distance = 0.0
         while distance < length - 1e-9:
             in_period = phase % period
@@ -335,12 +378,15 @@ def dashed_line_segments(
             if in_period < dash_px:
                 visible = min(step, dash_px - in_period)
                 if visible > 0.5:
-                    dash_start = np.asarray(start, dtype=float) + unit * distance
-                    dash_end = dash_start + unit * visible
+                    dash_start_x = start_x + unit_x * distance
+                    dash_start_y = start_y + unit_y * distance
                     output.append(
                         (
-                            tuple(np.rint(dash_start).astype(int)),
-                            tuple(np.rint(dash_end).astype(int)),
+                            (round(dash_start_x), round(dash_start_y)),
+                            (
+                                round(dash_start_x + unit_x * visible),
+                                round(dash_start_y + unit_y * visible),
+                            ),
                         )
                     )
             distance += step
@@ -510,6 +556,7 @@ def render_frame(
     costmap_minimap_status: str = "",
     costmap_alert: CostmapAlert | None = None,
     costmap_alert_history: CostmapAlertHistory | None = None,
+    localization_warning: LocalizationWarning | None = None,
     robot_view_enabled: bool = False,
     robot_view_expanded: bool = False,
 ) -> np.ndarray:
@@ -576,6 +623,7 @@ def render_frame(
     draw_costmap_alert(frame, costmap_alert)
     if costmap_alert is None:
         draw_costmap_alert_history(frame, costmap_alert_history)
+    draw_localization_warning(frame, localization_warning)
     if robot_view_enabled:
         if robot_view_expanded:
             draw_robot_view_panel(

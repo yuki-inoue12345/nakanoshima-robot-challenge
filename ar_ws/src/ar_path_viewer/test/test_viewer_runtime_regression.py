@@ -14,6 +14,7 @@ from ar_path_viewer.localization_monitor import (
     AmclObservation,
     LocalizationMonitor,
     LocalizationThresholds,
+    LocalizationWarningGate,
 )
 from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.path_transition import PathTransitionGate
@@ -696,6 +697,47 @@ def test_recorded_frame_removes_green_path_when_localization_degrades():
         & (unstable_frame[80:, :, 2] < 80)
     )
     assert unstable_green == 0
+
+
+def test_viewer_reports_current_localization_warning_then_recent_history(monkeypatch):
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append(
+            (state, list(segments), kwargs.get("localization_warning"))
+        )
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, "render_frame", render)
+    now = [10.0]
+    fake = make_viewer(clock=lambda: now[0])
+    fake._localization_warning_gate = LocalizationWarningGate(
+        10.0, clock=lambda: now[0]
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((1.0, 0.0, 0.0), (5.0, 0.0, 0.0)))
+    )
+
+    fake._localization.reject("AMCL position jump: distance=3.0m")
+    viewer_node.ArPathViewerNode._tick(fake)
+    state, segments, warning = rendered[-1]
+    assert state == "LOCALIZATION UNSTABLE"
+    assert segments == []
+    assert warning.active
+    assert warning.reason == "AMCL POSITION JUMP"
+
+    now[0] = 11.0
+    fake._localization.observe(
+        AmclObservation(
+            0.0, 0.0, 0.0, tuple(np.eye(6).ravel() * 0.01), "map", 101.0
+        ),
+        101.0,
+    )
+    viewer_node.ArPathViewerNode._tick(fake)
+    state, segments, warning = rendered[-1]
+    assert state == "ACTIVE"
+    assert segments
+    assert warning.mode == "recent"
 
 
 def test_offscreen_guidance_records_only_for_fresh_stable_real_path():

@@ -8,6 +8,8 @@ from ar_path_viewer.costmap_alerts import (
     CostmapAlertGate,
     CostmapAlertHistoryGate,
     evaluate_costmap_alert,
+    evaluate_path_cost_alert,
+    evaluate_robot_proximity_alert,
 )
 from ar_path_viewer.costmap_minimap import CostmapMinimap, draw_costmap_minimap
 from ar_path_viewer.rendering import render_frame
@@ -54,6 +56,26 @@ def test_alert_is_suppressed_for_invalid_path_and_debounced():
     now[0] = 0.25
     assert gate.update(alert).label == "LETHAL COST NEAR PATH"
     assert gate.update(None) is None
+
+
+def test_robot_proximity_alert_does_not_require_a_real_path():
+    """A fresh exact-time lethal cell near the footprint is independent of /plan."""
+    points = np.asarray(((0.55, 0.15, 0.0), (2.0, 0.0, 0.0)))
+    costs = np.asarray((100, 0), dtype=np.int16)
+
+    nearby, reason = evaluate_robot_proximity_alert(
+        points, costs, lethal_cost_min=100
+    )
+    assert nearby is not None
+    assert nearby.kind == "nearby"
+    assert reason == "lethal_cost_near_robot"
+
+    path_alert, reason = evaluate_path_cost_alert(
+        points, costs, np.empty((0, 3)),
+        high_cost_min=60, lethal_cost_min=100,
+    )
+    assert path_alert is None
+    assert reason == "real_path_unavailable"
 
 
 def test_nearby_distance_uses_footprint_and_valid_release_hysteresis():

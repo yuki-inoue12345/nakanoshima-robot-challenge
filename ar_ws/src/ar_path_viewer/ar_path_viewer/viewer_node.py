@@ -1,7 +1,8 @@
 """ROS 2 viewer node. This node creates subscriptions only, never publishers."""
 
-from pathlib import Path
 import math
+from dataclasses import replace
+from pathlib import Path
 import threading
 import time
 import traceback
@@ -28,6 +29,7 @@ from .costmap_overlay import (
     CostmapOverlaySettings,
     CostmapStore,
     CostmapTransformQueue,
+    CostmapVisualDisplay,
     CostmapVisualHold,
     SynchronizedCostmap,
     align_costmap_to_image_time,
@@ -45,7 +47,8 @@ from .costmap_alerts import (
     CostmapAlertGate,
     CostmapAlertHistoryGate,
     CostmapAlertSettings,
-    evaluate_costmap_alert,
+    evaluate_path_cost_alert,
+    evaluate_robot_proximity_alert,
 )
 from .costmap_explanation import (
     CostmapExplanationSettings,
@@ -67,6 +70,7 @@ from .log_gui import LogGui
 from .localization_monitor import (
     LocalizationMonitor,
     LocalizationThresholds,
+    LocalizationWarningGate,
     amcl_message_to_observation,
 )
 from .offscreen_guidance import GuidanceSettings
@@ -180,6 +184,7 @@ class ArPathViewerNode(Node):
             "localization_stationary_hold_yaw_rad": 0.5,
             "localization_recovery_samples": 1,
             "localization_recovery_sec": 2.0,
+            "localization_warning_history_sec": 10.0,
             "width": 640,
             "height": 480,
             "fx": 525.0,
@@ -723,10 +728,15 @@ class ArPathViewerNode(Node):
                 recovery_sec=self._float("localization_recovery_sec"),
             )
             self._localization = LocalizationMonitor(localization_thresholds)
+            self._localization_warning_gate = LocalizationWarningGate(
+                self._float("localization_warning_history_sec")
+            )
         except ValueError as exc:
             self._config_error = self._config_error or str(exc)
             self._log_error(f"Invalid localization configuration: {exc}")
             self._localization = LocalizationMonitor()
+            self._localization_warning_gate = LocalizationWarningGate()
+        self._last_localization_warning_key = None
         self._color = (self._int("line_b"), self._int("line_g"), self._int("line_r"))
         self._reference_enabled = self._bool("reference_path_enabled")
         self._waypoint_distance_enabled = self._bool(
@@ -1363,7 +1373,9 @@ class ArPathViewerNode(Node):
         split = snapshot.points.shape[0]
         return transformed[:split], transformed[split:]
 
-    def _costmap_arrays_at_image_time(self, snapshot, image_timing):
+    def _costmap_arrays_at_image_time(
+        self, snapshot, image_timing, *, max_costmap_age_sec=None
+    ):
         """Re-express Costmap cells in base at this image's host timestamp.
 
         The exact Costmap-time transform remains the admission prerequisite.
@@ -1392,12 +1404,17 @@ class ArPathViewerNode(Node):
             image_query,
             timeout=Duration(seconds=0.0),
         )
+        settings = self._costmap_camera_sync_settings
+        if max_costmap_age_sec is not None:
+            settings = replace(
+                settings, max_costmap_age_sec=float(max_costmap_age_sec)
+            )
         return align_costmap_to_image_time(
             snapshot,
             image_timing=image_timing,
             transform_at_costmap=transform_at_costmap,
             transform_at_image=transform_at_image,
-            settings=self._costmap_camera_sync_settings,
+            settings=settings,
         )
 
     def _check_localization_tf(
@@ -1452,6 +1469,42 @@ class ArPathViewerNode(Node):
         if not all(math.isfinite(value) for value in tf_pose):
             return False, "localization TF pose contains NaN or Inf", None
         return True, "", tf_pose
+
+    def _localization_warning_for_frame(
+        self,
+        status,
+        *,
+        tf_checked: bool,
+        tf_available: bool,
+        tf_detail: str,
+    ):
+        gate = getattr(self, "_localization_warning_gate", None)
+        if gate is None:
+            gate = LocalizationWarningGate()
+            self._localization_warning_gate = gate
+        warning = gate.update(
+            status,
+            tf_checked=tf_checked,
+            tf_available=tf_available,
+            tf_detail=tf_detail,
+        )
+        key = None if warning is None else (warning.mode, warning.reason)
+        previous = getattr(self, "_last_localization_warning_key", None)
+        if key != previous:
+            if warning is None:
+                self._log_info("localization_warning cleared")
+            elif warning.active:
+                self._log_warning(
+                    "localization_warning active=true "
+                    f"reason={warning.reason!r} detail={warning.detail!r}"
+                )
+            else:
+                self._log_info(
+                    "localization_warning active=false history=true "
+                    f"reason={warning.reason!r}"
+                )
+            self._last_localization_warning_key = key
+        return warning
 
     def _tick(self) -> None:
         if self._shutdown_requested:
@@ -1570,14 +1623,24 @@ class ArPathViewerNode(Node):
         guidance = None
         waypoint_status = ""
         navigation_status = ""
+        base_localization_status = self._localization.status()
+        localization_warning = None
         render_started_monotonic = time.monotonic()
         render_duration_sec = 0.0
         if image is None:
             image = np.zeros((self._intrinsics.height, self._intrinsics.width, 3), np.uint8)
             state = "CAMERA UNAVAILABLE"
             detail = "image source returned no frame"
+            localization_warning = ArPathViewerNode._localization_warning_for_frame(
+                self,
+                base_localization_status,
+                tf_checked=False,
+                tf_available=False,
+                tf_detail="",
+            )
             frame = render_frame(
                 image, [], state, debug_overlay=debug_overlay,
+                localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
@@ -1585,10 +1648,18 @@ class ArPathViewerNode(Node):
         elif self._camera_error:
             state = "CAMERA UNAVAILABLE"
             detail = self._camera_error
+            localization_warning = ArPathViewerNode._localization_warning_for_frame(
+                self,
+                base_localization_status,
+                tf_checked=False,
+                tf_available=False,
+                tf_detail="",
+            )
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
@@ -1596,10 +1667,18 @@ class ArPathViewerNode(Node):
         elif self._config_error:
             state = "INVALID CONFIG"
             detail = self._config_error
+            localization_warning = ArPathViewerNode._localization_warning_for_frame(
+                self,
+                base_localization_status,
+                tf_checked=False,
+                tf_available=False,
+                tf_detail="",
+            )
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
@@ -1614,10 +1693,18 @@ class ArPathViewerNode(Node):
                 f"discarded={frame_delay.discarded} "
                 f"image_stamp={captured_image_timing.stamp_sec:.6f}"
             )
+            localization_warning = ArPathViewerNode._localization_warning_for_frame(
+                self,
+                base_localization_status,
+                tf_checked=False,
+                tf_available=False,
+                tf_detail="",
+            )
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
+                localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
@@ -1645,6 +1732,8 @@ class ArPathViewerNode(Node):
             costmap_snapshot = None
             costmap_reason = "disabled_by_configuration"
             costmap_projection = None
+            costmap_visual_projection = None
+            costmap_visual_age_sec = None
             costmap_display_projection = None
             costmap_display_hold_age = None
             costmap_display_mode = "hidden"
@@ -1677,14 +1766,15 @@ class ArPathViewerNode(Node):
                         self._costmap_store.state(self._ros_now_sec())
                     )
 
-            localization = None
+            localization = base_localization_status
             tf_available = False
             tf_detail = ""
-            if (
+            tf_checked = bool(
                 state == "ACTIVE"
                 or reference_state == "ACTIVE"
                 or costmap_state == "ACTIVE"
-            ):
+            )
+            if tf_checked:
                 tf_available, tf_detail, tf_pose = self._check_localization_tf()
                 localization = self._localization.status(
                     freshness_confirmed=tf_available,
@@ -1695,6 +1785,13 @@ class ArPathViewerNode(Node):
                     localization.detail,
                     localization.receive_count,
                 )
+            localization_warning = ArPathViewerNode._localization_warning_for_frame(
+                self,
+                localization,
+                tf_checked=tf_checked,
+                tf_available=tf_available,
+                tf_detail=tf_detail,
+            )
 
             if state == "ACTIVE" and snapshot is not None:
                 if (
@@ -2055,10 +2152,36 @@ class ArPathViewerNode(Node):
                         alert_gate.clear()
                     else:
                         costmap_snapshot = synchronized.snapshot
+                        costmap_age = (
+                            image_timing.stamp_sec - costmap_snapshot.stamp_sec
+                        )
+                        semantic_age_limit = (
+                            self._costmap_camera_sync_settings.max_costmap_age_sec
+                        )
+                        configured_visual_hold = getattr(
+                            self, "_costmap_visual_hold_sec",
+                            getattr(
+                                getattr(self, "_costmap_visual_hold", None),
+                                "max_age_sec", 0.0,
+                            ),
+                        )
+                        visual_age_limit = (
+                            semantic_age_limit
+                            + max(0.0, float(configured_visual_hold))
+                        )
+                        visual_only = bool(
+                            costmap_age > semantic_age_limit
+                            and costmap_age <= visual_age_limit
+                        )
                         try:
                             camera_sync = (
                                 ArPathViewerNode._costmap_arrays_at_image_time(
-                                    self, costmap_snapshot, image_timing
+                                    self,
+                                    costmap_snapshot,
+                                    image_timing,
+                                    max_costmap_age_sec=(
+                                        visual_age_limit if visual_only else None
+                                    ),
                                 )
                             )
                         except Exception as exc:
@@ -2077,75 +2200,110 @@ class ArPathViewerNode(Node):
                                 )
                         else:
                             points_in_base = camera_sync.points_in_base
-                            costmap_analysis_points_base = (
-                                camera_sync.analysis_points_in_base
-                            )
-                            costmap_projection = project_costmap_points(
-                                points_in_base,
-                                costmap_snapshot.classes,
-                                self._mount,
-                                self._intrinsics,
-                                self._near,
-                            )
-                            costmap_reason = (
-                                "visible"
-                                if costmap_projection.visible_points > 0
-                                else "out_of_view"
-                            )
-                            costmap_reason += (
-                                " camera_time_aligned "
-                                f"age={camera_sync.costmap_age_sec:.3f}s "
-                                f"translation={camera_sync.translation_m:.3f}m "
-                                f"rotation={camera_sync.rotation_deg:.2f}deg"
-                            )
-                            bound_path, pairing_reason = check_costmap_path_pair(
-                                getattr(self, "_costmap_path_bindings", {}).get(
-                                    (
-                                        costmap_snapshot.frame_id,
-                                        costmap_snapshot.stamp_sec,
-                                    )
-                                ),
-                                costmap_stamp_sec=costmap_snapshot.stamp_sec,
-                                costmap_frame_id=costmap_snapshot.frame_id,
-                                current_path=snapshot,
-                                current_follower_identity=follower_goal_identity(
-                                    getattr(self, "_waypoint_progress_gate", None),
-                                    self._ros_now_sec(),
-                                ),
-                            )
-                            if bound_path is None:
-                                costmap_reason += f" path_pair_rejected={pairing_reason}"
-                            else:
-                                try:
-                                    costmap_path_points_base = (
-                                        ArPathViewerNode._points_in_base_at(
-                                            self,
-                                            bound_path.points,
-                                            bound_path.frame_id,
-                                            image_timing.stamp_sec,
+                            if visual_only:
+                                # This is an exact image-time reprojection of
+                                # the last Costmap, but its cell contents exceed
+                                # the semantic freshness limit. It is display
+                                # evidence only: no alert, explanation, or
+                                # minimap input is populated below.
+                                costmap_visual_projection = project_costmap_points(
+                                    points_in_base,
+                                    costmap_snapshot.classes,
+                                    self._mount,
+                                    self._intrinsics,
+                                    self._near,
+                                )
+                                costmap_visual_age_sec = costmap_age
+                                costmap_reason = (
+                                    "visual_only_exact_time_reprojection "
+                                    f"age={costmap_age:.3f}s "
+                                    f"semantic_limit={semantic_age_limit:.3f}s "
+                                    f"translation={camera_sync.translation_m:.3f}m "
+                                    f"rotation={camera_sync.rotation_deg:.2f}deg"
+                                )
+                            if not visual_only:
+                                # Only the original semantic age limit can
+                                # populate evidence consumed by warnings and
+                                # route explanations.
+                                costmap_analysis_points_base = (
+                                    camera_sync.analysis_points_in_base
+                                )
+                                costmap_projection = project_costmap_points(
+                                    points_in_base,
+                                    costmap_snapshot.classes,
+                                    self._mount,
+                                    self._intrinsics,
+                                    self._near,
+                                )
+                                costmap_reason = (
+                                    "visible"
+                                    if costmap_projection.visible_points > 0
+                                    else "out_of_view"
+                                )
+                                costmap_reason += (
+                                    " camera_time_aligned "
+                                    f"age={camera_sync.costmap_age_sec:.3f}s "
+                                    f"translation={camera_sync.translation_m:.3f}m "
+                                    f"rotation={camera_sync.rotation_deg:.2f}deg"
+                                )
+                                bound_path, pairing_reason = check_costmap_path_pair(
+                                    getattr(
+                                        self, "_costmap_path_bindings", {}
+                                    ).get(
+                                        (
+                                            costmap_snapshot.frame_id,
+                                            costmap_snapshot.stamp_sec,
                                         )
-                                    )
-                                except Exception as exc:
-                                    costmap_path_points_base = None
+                                    ),
+                                    costmap_stamp_sec=costmap_snapshot.stamp_sec,
+                                    costmap_frame_id=costmap_snapshot.frame_id,
+                                    current_path=snapshot,
+                                    current_follower_identity=(
+                                        follower_goal_identity(
+                                            getattr(
+                                                self,
+                                                "_waypoint_progress_gate",
+                                                None,
+                                            ),
+                                            self._ros_now_sec(),
+                                        )
+                                    ),
+                                )
+                                if bound_path is None:
                                     costmap_reason += (
-                                        " path_image_tf_unavailable "
-                                        f"{type(exc).__name__}: {exc}"
+                                        f" path_pair_rejected={pairing_reason}"
                                     )
-                            if reference_snapshot is not None:
-                                try:
-                                    costmap_reference_points_base = (
-                                        ArPathViewerNode._points_in_base_at(
-                                            self,
-                                            reference_snapshot.points,
-                                            reference_snapshot.frame_id,
-                                            image_timing.stamp_sec,
+                                else:
+                                    try:
+                                        costmap_path_points_base = (
+                                            ArPathViewerNode._points_in_base_at(
+                                                self,
+                                                bound_path.points,
+                                                bound_path.frame_id,
+                                                image_timing.stamp_sec,
+                                            )
                                         )
-                                    )
-                                except Exception:
-                                    # Reference geometry is optional on the
-                                    # mini-map and never weakens the real-path
-                                    # evidence gate.
-                                    costmap_reference_points_base = None
+                                    except Exception as exc:
+                                        costmap_path_points_base = None
+                                        costmap_reason += (
+                                            " path_image_tf_unavailable "
+                                            f"{type(exc).__name__}: {exc}"
+                                        )
+                                if reference_snapshot is not None:
+                                    try:
+                                        costmap_reference_points_base = (
+                                            ArPathViewerNode._points_in_base_at(
+                                                self,
+                                                reference_snapshot.points,
+                                                reference_snapshot.frame_id,
+                                                image_timing.stamp_sec,
+                                            )
+                                        )
+                                    except Exception:
+                                        # Reference geometry is optional on
+                                        # the mini-map and never weakens the
+                                        # real-path evidence gate.
+                                        costmap_reference_points_base = None
                 visible = (
                     0
                     if costmap_projection is None
@@ -2179,41 +2337,23 @@ class ArPathViewerNode(Node):
             live_visual_context = (
                 "" if costmap_snapshot is None else costmap_snapshot.frame_id
             )
-            visual_safe = bool(
-                costmap_enabled
-                and localization is not None
-                and localization.stable
-                and not retry_delayed_frame
-                and state not in (
-                    "TF UNAVAILABLE", "LOCALIZING",
-                    "LOCALIZATION UNSTABLE", "INVALID CONFIG",
-                )
-            )
             # Only bridge the expected gap created by Costmap publication
             # cadence/freshness. Motion-limit, clock, frame, or TF failures
-            # invalidate the old pixels instead of turning them into a hold.
-            hold_reason_allowed = any(
-                token in costmap_reason
-                for token in (
-                    "costmap_camera_age_exceeded",
-                    "local_costmap_receive_stale",
-                    "local_costmap_stamp_stale",
-                    "costmap_history_receive_stale",
-                    "costmap_history_stale_for_image",
-                )
-            )
+            # invalidate the projection instead of reusing old image pixels.
             if visual_hold is not None and costmap_projection is not None:
                 display = visual_hold.confirm(
                     costmap_projection, live_visual_context
                 )
                 self._last_costmap_visual_context = live_visual_context
-            elif (
-                visual_hold is not None
-                and visual_safe
-                and hold_reason_allowed
-            ):
-                display = visual_hold.held(
-                    getattr(self, "_last_costmap_visual_context", "")
+            elif costmap_visual_projection is not None:
+                # Unlike the former pixel hold, this projection was recomputed
+                # with exact TF at this image timestamp. Its old Costmap
+                # contents are visibly labelled and never enter semantics.
+                visual_hold.clear()
+                display = CostmapVisualDisplay(
+                    costmap_visual_projection,
+                    "hold",
+                    float(costmap_visual_age_sec or 0.0),
                 )
             else:
                 if visual_hold is not None:
@@ -2312,30 +2452,64 @@ class ArPathViewerNode(Node):
             )
             if alert_enabled:
                 now_sec = self._ros_now_sec()
-                if (
+                path_updated_event = bool(
                     state in ("ACTIVE", "PATH OUT OF VIEW")
                     and now_sec <= getattr(self, "_path_updated_until", 0.0)
-                ):
-                    # The transition gate confirmed a new real /plan.  This is
-                    # an event fact, not an obstacle-causality claim.
+                )
+                semantic_inputs_available = not (
+                    costmap_analysis_points_base is None
+                    or costmap_snapshot is None
+                    or localization is None
+                    or not localization.stable
+                )
+                candidate = None
+                if semantic_inputs_available:
+                    # Robot-proximity evidence is a property of the fresh,
+                    # exact-time Local Costmap.  It does not require a real
+                    # Path, so a temporarily unavailable /plan must not hide
+                    # a nearby lethal-cost cell.  This remains a neutral
+                    # Costmap statement, not a person/collision claim.
+                    candidate, costmap_alert_reason = (
+                        evaluate_robot_proximity_alert(
+                            costmap_analysis_points_base,
+                            costmap_snapshot.analysis_costs,
+                            lethal_cost_min=(
+                                self._costmap_settings.lethal_cost_min
+                            ),
+                            settings=self._costmap_alert_settings,
+                        )
+                    )
+                if candidate is not None:
+                    costmap_alert = alert_gate.update(candidate)
+                    costmap_alert_evaluation = "unconfirmed"
+                    if costmap_alert is None:
+                        costmap_alert_reason = "confirmation_pending"
+                    else:
+                        costmap_alert_evaluation = "active"
+                elif path_updated_event:
+                    # Preserve the existing /plan event even when perception
+                    # is unavailable. It reports only a confirmed generation
+                    # change and makes no Costmap-causality claim. Fresh near-
+                    # robot lethal evidence above takes precedence.
                     costmap_alert = CostmapAlert(
                         "PATH UPDATED", "path_updated",
                         "confirmed_real_plan_generation_change",
                     )
                     costmap_alert_reason = "confirmed_real_plan_update"
                     alert_gate.clear()
-                elif (
-                    state not in ("ACTIVE", "PATH OUT OF VIEW")
-                    or costmap_analysis_points_base is None
-                    or costmap_path_points_base is None
-                    or costmap_snapshot is None
-                    or localization is None
-                    or not localization.stable
-                ):
+                elif not semantic_inputs_available:
                     alert_gate.clear()
                     costmap_alert_reason = "synchronized_inputs_unavailable"
+                elif (
+                    state not in ("ACTIVE", "PATH OUT OF VIEW")
+                    or costmap_path_points_base is None
+                ):
+                    alert_gate.clear()
+                    costmap_alert_reason = (
+                        "robot_proximity_clear_path_inputs_unavailable"
+                    )
                 else:
-                    candidate, costmap_alert_reason = evaluate_costmap_alert(
+                    candidate, costmap_alert_reason = evaluate_path_cost_alert(
                         costmap_analysis_points_base,
                         costmap_snapshot.analysis_costs,
                         costmap_path_points_base,
@@ -2344,9 +2518,9 @@ class ArPathViewerNode(Node):
                         settings=self._costmap_alert_settings,
                     )
                     if candidate is None:
-                        # A valid synchronized safe evaluation ends the live
-                        # alert immediately.  Any remaining visibility is the
-                        # explicitly separate historical notice below.
+                        # A complete exact-time robot/path evaluation found no
+                        # alert. Any historical banner is explicitly marked
+                        # CLEARED by CostmapAlertHistoryGate.
                         alert_gate.clear()
                         costmap_alert = None
                         costmap_alert_evaluation = "cleared"
@@ -2535,6 +2709,7 @@ class ArPathViewerNode(Node):
                 ),
                 costmap_alert=costmap_alert,
                 costmap_alert_history=costmap_alert_history,
+                localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
