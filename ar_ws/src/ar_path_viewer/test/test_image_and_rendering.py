@@ -178,6 +178,25 @@ def test_normal_view_hides_short_lived_explanation_but_debug_can_show_it():
     assert not np.array_equal(debug[50:103, :380], image[50:103, :380])
 
 
+def test_normal_ui_uses_english_except_emergency_warnings(monkeypatch):
+    import ar_path_viewer.rendering as rendering
+    called = []
+    original = rendering.draw_localized_label
+
+    def checking_label(frame, rect, japanese, fallback, color, height):
+        called.append(japanese)
+        return original(frame, rect, japanese, fallback, color, height)
+
+    monkeypatch.setattr(rendering, "draw_localized_label", checking_label)
+    image = np.zeros((480, 640, 3), np.uint8)
+    rendering.render_frame(
+        image, [], "ACTIVE", debug_overlay=False,
+        guidance=OffscreenGuidance("RIGHT", -20.0, 1.0, 0.5),
+        waypoint_status="PLAN LEFT: 1.0 m",
+    )
+    assert called == []
+
+
 def test_frame_sync_wait_is_supported_and_hides_route():
     assert "FRAME SYNC WAIT" in VALID_STATES
     image = np.zeros((100, 160, 3), np.uint8)

@@ -8,11 +8,11 @@ ar_path_viewer:
     # Camera ground dots project poorly with the fixed upward C920 angle.
     # Preserve exact-time Costmap ingestion, ROBOT VIEW and evidence notices.
     perception_costmap_camera_overlay_enabled: false
-    # Fewer false alerts from inflated wall cells; these are UI-only.
-    perception_alert_nearby_lethal_distance_m: 0.30
-    perception_alert_confirm_sec: 0.85
-    perception_alert_forward_confirm_sec: 1.25
-    perception_alert_forward_max_m: 1.50
-    perception_alert_forward_half_width_m: 0.30
+    # Review-only more responsive COSTMAP evidence; NOT a camera person detector.
+    perception_alert_nearby_lethal_distance_m: 0.60
+    perception_alert_confirm_sec: 0.50
+    perception_alert_forward_confirm_sec: 0.80
+    perception_alert_forward_max_m: 2.00
+    perception_alert_forward_half_width_m: 0.40
     perception_alert_forward_min_cost: 85
-    perception_alert_forward_min_cells: 3
+    perception_alert_forward_min_cells: 2

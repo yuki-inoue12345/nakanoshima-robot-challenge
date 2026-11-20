@@ -479,7 +479,7 @@ class ArPathViewerNode(Node):
                 },
             )
             self._costmap_alert_history_gate = CostmapAlertHistoryGate(
-                2.5, clock=self._ros_now_sec
+                5.0, clock=self._ros_now_sec
             )
             if (
                 not math.isfinite(self._costmap_tf_max_age)
@@ -1537,6 +1537,42 @@ class ArPathViewerNode(Node):
         self._last_localization_warning_checked_monotonic = time.monotonic()
         return warning
 
+    def _display_minimap_snapshot(
+        self, current, *, now: float, allow_recent: bool
+    ):
+        """Keep a short, explicitly historical top-down snapshot for UI only.
+
+        No history is ever passed to semantic alerts, motion, TF, or paths.
+        """
+        if current is not None:
+            self._last_minimap_snapshot_ui = (float(now), current)
+            return current, ""
+        if not allow_recent:
+            self._last_minimap_snapshot_ui = None
+            return None, ""
+        cached = getattr(self, "_last_minimap_snapshot_ui", None)
+        if cached is None:
+            return None, ""
+        age = float(now) - float(cached[0])
+        if not math.isfinite(age) or not 0.0 <= age <= 1.0:
+            self._last_minimap_snapshot_ui = None
+            return None, ""
+        return cached[1], f"LAST SNAPSHOT {age:.1f}s"
+
+    def _recent_alert_history_for_ui(self):
+        """Render history in preview without calling it a live warning."""
+        history_gate = getattr(self, "_costmap_alert_history_gate", None)
+        if history_gate is None:
+            return None
+        return history_gate.update(
+            None,
+            evaluation_status="unconfirmed",
+            goal_identity=follower_goal_identity(
+                getattr(self, "_waypoint_progress_gate", None),
+                self._ros_now_sec(),
+            ),
+        )
+
     def _tick(self) -> None:
         if self._shutdown_requested:
             return
@@ -1735,11 +1771,22 @@ class ArPathViewerNode(Node):
             )
             if time.monotonic() - last_checked > 0.5:
                 localization_warning = None
+            recent_minimap, minimap_status = (
+                ArPathViewerNode._display_minimap_snapshot(
+                    self, None, now=time.monotonic(),
+                    allow_recent=bool(base_localization_status.stable),
+                ) if robot_view_enabled and robot_view_expanded else (None, "")
+            )
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
                 debug_overlay=debug_overlay,
                 localization_warning=localization_warning,
+                costmap_minimap=recent_minimap,
+                costmap_minimap_status=minimap_status,
+                costmap_alert_history=(
+                    ArPathViewerNode._recent_alert_history_for_ui(self)
+                ),
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
             )
@@ -2584,7 +2631,7 @@ class ArPathViewerNode(Node):
                 )
                 if history_gate is None:
                     history_gate = CostmapAlertHistoryGate(
-                        2.5, clock=self._ros_now_sec
+                        5.0, clock=self._ros_now_sec
                     )
                     self._costmap_alert_history_gate = history_gate
                 costmap_alert_history = history_gate.update(
@@ -2712,6 +2759,20 @@ class ArPathViewerNode(Node):
                 costmap_alert = None
                 if camera_pipeline_mode == "synchronized":
                     camera_pipeline_mode = "preview_path_wait"
+            minimap_status = ""
+            if robot_view_enabled and robot_view_expanded:
+                costmap_minimap, minimap_status = (
+                    ArPathViewerNode._display_minimap_snapshot(
+                        self, costmap_minimap, now=time.monotonic(),
+                        allow_recent=bool(
+                            localization is not None and localization.stable
+                            and state in (
+                                "ACTIVE", "PATH OUT OF VIEW",
+                                "FRAME SYNC WAIT", "REPLANNING",
+                            )
+                        ),
+                    )
+                )
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image,
@@ -2759,10 +2820,7 @@ class ArPathViewerNode(Node):
                 costmap_minimap_range_m=getattr(
                     self, "_costmap_minimap_range", 3.0
                 ),
-                costmap_minimap_status=(
-                    "UNAVAILABLE"
-                    if minimap_enabled and costmap_minimap is None else ""
-                ),
+                costmap_minimap_status=minimap_status,
                 costmap_alert=costmap_alert,
                 costmap_alert_history=costmap_alert_history,
                 localization_warning=localization_warning,

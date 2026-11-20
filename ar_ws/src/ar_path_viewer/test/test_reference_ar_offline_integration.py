@@ -928,6 +928,24 @@ def test_missing_image_time_tf_hides_costmap_without_hiding_paths():
     )
 
 
+def test_recent_minimap_snapshot_is_explicitly_stale_and_expires():
+    class Dummy:
+        pass
+
+    fake = Dummy()
+    token = object()
+    call = viewer_node.ArPathViewerNode._display_minimap_snapshot
+    current, label = call(fake, token, now=10.0, allow_recent=True)
+    assert current is token and label == ""
+    recent, label = call(fake, None, now=10.65, allow_recent=True)
+    assert recent is token and label.startswith("LAST SNAPSHOT 0.7s")
+    recent, label = call(fake, None, now=11.01, allow_recent=True)
+    assert recent is None and label == ""
+    call(fake, token, now=20.0, allow_recent=True)
+    recent, label = call(fake, None, now=20.1, allow_recent=False)
+    assert recent is None and label == ""
+
+
 def test_fresh_costmap_and_authorized_real_path_draw_explanation_card():
     clock = MutableClock()
     fake = _make_viewer(clock)

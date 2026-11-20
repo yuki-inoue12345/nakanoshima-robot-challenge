@@ -80,6 +80,17 @@ def draw_robot_view_panel(
         size = min(190, bottom - top - 62, width - 20)
         draw_costmap_minimap(frame, minimap, size_px=max(80, size),
                              range_m=range_m)
+        if status.startswith("LAST SNAPSHOT"):
+            # Cached data is a historical screenshot, NOT a live Costmap.
+            cv2.rectangle(
+                frame, (left + 9, bottom - 38),
+                (frame.shape[1] - 9, bottom - 9), (18, 18, 18), -1,
+            )
+            cv2.putText(
+                frame, status[:29], (left + 16, bottom - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.37, (90, 185, 245),
+                1, cv2.LINE_AA,
+            )
     else:
         cv2.putText(frame, "ROBOT VIEW", (left + 12, top + 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, (230, 230, 230), 1,

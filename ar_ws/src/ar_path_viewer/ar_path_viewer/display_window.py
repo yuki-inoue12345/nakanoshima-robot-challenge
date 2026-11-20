@@ -315,8 +315,8 @@ def compose_display_frame(
         offset_y + int(round(source_tab[3] * scale_y)),
     )
     labels = {
-        ACTION_VIEW_LOG: ("ログを見る", "LOG VIEW"),
-        ACTION_COPY_LOG: ("ログをコピー", "LOG COPY"),
+        ACTION_VIEW_LOG: ("LOG VIEW", "LOG VIEW"),
+        ACTION_COPY_LOG: ("LOG COPY", "LOG COPY"),
     }
     for action, (x1, top, x2, bottom) in rectangles.items():
         if action == ACTION_TOGGLE_ROBOT_VIEW:

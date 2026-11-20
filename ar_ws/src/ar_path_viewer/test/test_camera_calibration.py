@@ -422,13 +422,13 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
         "perception_minimap_enabled": True,
         "perception_alert_enabled": True,
         "perception_costmap_camera_overlay_enabled": False,
-        "perception_alert_nearby_lethal_distance_m": 0.30,
-        "perception_alert_confirm_sec": 0.85,
-        "perception_alert_forward_confirm_sec": 1.25,
-        "perception_alert_forward_max_m": 1.50,
-        "perception_alert_forward_half_width_m": 0.30,
+        "perception_alert_nearby_lethal_distance_m": 0.60,
+        "perception_alert_confirm_sec": 0.50,
+        "perception_alert_forward_confirm_sec": 0.80,
+        "perception_alert_forward_max_m": 2.00,
+        "perception_alert_forward_half_width_m": 0.40,
         "perception_alert_forward_min_cost": 85,
-        "perception_alert_forward_min_cells": 3,
+        "perception_alert_forward_min_cells": 2,
     }
     assert params == expected_review
 
