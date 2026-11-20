@@ -5,6 +5,11 @@ ar_path_viewer:
     # Camera-first test: do not queue C920 frames for TF arrival.
     # Costmap semantics remain strict and may fail closed.
     perception_camera_frame_delay_enabled: false
+    # Select only previously exact-TF-ready Costmaps at image time.
+    perception_costmap_camera_history_enabled: true
+    # Historical top-down snapshots are labelled, never live alerts.
+    perception_minimap_visual_hold_sec: 1.5
+    rotation_guidance_enabled: true
     perception_explanation_enabled: true
     perception_minimap_enabled: true
     perception_alert_enabled: true

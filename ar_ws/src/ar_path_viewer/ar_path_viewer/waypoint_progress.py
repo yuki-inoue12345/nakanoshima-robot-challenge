@@ -35,6 +35,7 @@ class WaypointGoalView:
     goal_generation: int
     stamp_sec: float
     minimum_path_generation: int
+    waypoint_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,11 @@ class WaypointProgressGate:
             if not _ROUTE_HASH.fullmatch(route_hash):
                 raise ValueError('invalid_route_hash')
             waypoint_count = int(message.waypoint_count)
-            if waypoint_count <= 0 or not 0 <= index < waypoint_count:
+            activity = int(message.activity)
+            if waypoint_count <= 0 or not (
+                0 <= index < waypoint_count
+                or (activity == 9 and index == waypoint_count)
+            ):
                 raise ValueError('next_waypoint_index_out_of_range')
             if mode not in ('to_pose', 'through_poses'):
                 raise ValueError('invalid_navigation_mode')
@@ -132,6 +137,7 @@ class WaypointProgressGate:
             goal_generation,
             stamp,
             minimum_generation,
+            waypoint_count,
         )
         self._activity = None
         self.reason = (
@@ -186,6 +192,33 @@ class WaypointProgressGate:
         else:
             distance = f'{remaining_path_m:.1f} m'
         return f'PLAN LEFT: {distance}'
+
+    def destination_status(
+        self, now_ros_sec: float, path_generation: int,
+        remaining_path_m: float | None,
+        anchor_distance_m: float | None,
+        maximum_anchor_distance_m: float,
+    ) -> str | None:
+        """Show final *route* distance only when the final goal is
+        the current verified to_pose plan endpoint. No WP chords.
+        """
+        view = self._view
+        valid_plan = self.label(
+            now_ros_sec, path_generation, remaining_path_m,
+            anchor_distance_m, maximum_anchor_distance_m,
+        )
+        if valid_plan is None or view is None:
+            return None
+        if view.navigation_mode != "to_pose":
+            return "NEXT WP: -- | FINAL WP: -- (MULTI-GOAL PLAN)"
+        if view.next_index != view.waypoint_count - 1:
+            return f"NEXT WP #{view.next_number} | FINAL WP: --"
+        # The last Waypoint *is* the endpoint of this real /plan.
+        distance = valid_plan.split(": ", 1)[1]
+        return (
+            f"NEXT WP #{view.next_number} (FINAL) | "
+            f"FINAL WP: {distance}"
+        )
 
     def authorizes_plan(self, now_ros_sec: float, path_generation: int) -> bool:
         """Confirm that guidance belongs to a fresh, navigating Follower goal."""

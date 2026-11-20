@@ -130,3 +130,32 @@ def test_transition_uses_plain_language_without_claiming_motion():
         follower_state(activity=2, allowed=False), 100.0, path_generation=8
     )
     assert gate.navigation_hold_status(100.1) == 'UPDATING ROUTE'
+
+
+def test_final_waypoint_distance_only_at_verified_final_to_pose():
+    gate = WaypointProgressGate()
+    gate.update(follower_state(index=18, number=19), 100.0, 3)
+    assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
+        'NEXT WP #19 | FINAL WP: --'
+    )
+    gate.update(follower_state(index=19, number=20, generation=5,
+                               stamp=100.2), 100.2, 4)
+    assert gate.destination_status(100.3, 5, 2.4, 0.1, 1.0) == (
+        'NEXT WP #20 (FINAL) | FINAL WP: 2.4 m'
+    )
+    assert gate.destination_status(100.3, 4, 2.4, 0.1, 1.0) is None
+
+
+def test_explicit_finished_accepts_count_as_next_index():
+    gate = WaypointProgressGate()
+    msg = follower_state(index=20, number=20, activity=9, allowed=False)
+    assert not gate.update(msg, 100.0, 5)
+    assert gate.navigation_hold_status(100.1) == 'ROUTE COMPLETE'
+    assert gate.navigation_hold_status(103.0) is None
+
+
+def test_stopped_cannot_be_reported_as_route_complete():
+    gate = WaypointProgressGate()
+    msg = follower_state(index=19, activity=8, allowed=False)
+    assert not gate.update(msg, 100.0, 5)
+    assert gate.navigation_hold_status(100.1) == 'STOPPED'

@@ -441,6 +441,7 @@ def _draw_bottom_badge(
     color_bgr: Tuple[int, int, int],
     *,
     align_right: bool = False,
+    offset_y: int = 0,
 ) -> None:
     if not label:
         return
@@ -452,7 +453,7 @@ def _draw_bottom_badge(
     )
     x = frame.shape[1] - text_width - 14 if align_right else 14
     x = max(8, x)
-    y = frame.shape[0] - 14
+    y = frame.shape[0] - 14 - offset_y
     cv2.rectangle(
         frame,
         (x - 6, y - text_height - 6),
@@ -491,7 +492,22 @@ def _draw_direction_panel(
     arrow_bottom = bottom - 12
     arrow_turn_y = top + 26
     arrow_top = top + 11
-    if guidance.direction == 'LEFT':
+    if guidance.direction in ('ROTATE LEFT', 'ROTATE RIGHT'):
+        # Circular-arrow symbol means observed turn in place, not a
+        # proposed Nav2 floor-path segment.
+        clockwise = guidance.direction == 'ROTATE RIGHT'
+        cv2.ellipse(
+            frame, (icon_center, top + 39), (19, 19), 0,
+            40, 315, color_bgr, 4, cv2.LINE_AA,
+        )
+        tip_x = icon_center + (14 if clockwise else -14)
+        tip_y = top + 24
+        cv2.arrowedLine(
+            frame, (icon_center, top + 20), (tip_x, tip_y),
+            color_bgr, 4, cv2.LINE_AA, tipLength=0.55,
+        )
+        label = guidance.direction
+    elif guidance.direction == 'LEFT':
         cv2.line(
             frame, (icon_center, arrow_bottom), (icon_center, arrow_turn_y),
             color_bgr, 6, cv2.LINE_AA,
@@ -518,7 +534,7 @@ def _draw_direction_panel(
         )
         label = 'GO STRAIGHT'
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.62
+    scale = 0.51 if guidance.direction.startswith('ROTATE') else 0.62
     thickness = 2
     (text_width, text_height), _ = cv2.getTextSize(label, font, scale, thickness)
     text_x = max(left + 82, right - text_width - 10)
@@ -553,6 +569,7 @@ def render_frame(
     reference_gap_px: float = 9.0,
     display_mode_label: str = "",
     waypoint_status: str = "",
+    final_waypoint_status: str = "",
     navigation_status: str = "",
     debug_overlay: bool = True,
     path_alpha: float = 1.0,
@@ -626,10 +643,49 @@ def render_frame(
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
     if waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
         _draw_bottom_badge(frame, waypoint_status, (230, 230, 230))
+        if final_waypoint_status:
+            _draw_bottom_badge(
+                frame, final_waypoint_status, (230, 230, 230),
+                offset_y=29,
+            )
     if navigation_status and state in (
         "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
     ):
         _draw_navigation_status(frame, navigation_status)
+    if (state == "NAVIGATION HOLD"
+            and navigation_status == "ROUTE COMPLETE"):
+        # Only an explicit FINISHED message authorizes this panel.
+        center_x = frame.shape[1] // 2
+        center_y = frame.shape[0] // 2
+        left = max(8, center_x - 229)
+        right = min(frame.shape[1] - 8, center_x + 229)
+        top = max(58, center_y - 43)
+        bottom = min(frame.shape[0] - 50, center_y + 43)
+        layer = frame.copy()
+        cv2.rectangle(layer, (left, top), (right, bottom),
+                      (16, 45, 24), -1)
+        cv2.addWeighted(layer, 0.87, frame, 0.13, 0.0, frame)
+        cv2.rectangle(frame, (left, top), (right, bottom),
+                      (50, 240, 100), 2)
+        cv2.putText(
+            frame, "ROUTE COMPLETE", (left + 38, top + 39),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (100, 255, 130), 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, "FOLLOWER CONFIRMED FINISHED",
+            (left + 42, top + 65), cv2.FONT_HERSHEY_SIMPLEX,
+            0.40, (210, 245, 218), 1, cv2.LINE_AA,
+        )
+    if (not debug_overlay and not segment_list and not reference_list
+            and state in (
+                "REPLANNING", "NO PATH", "PATH STALE",
+                "NAVIGATION HOLD", "TF UNAVAILABLE",
+            ) and not navigation_status):
+        _draw_bottom_badge(
+            frame, "NO VERIFIED LIVE ROUTE", (195, 195, 195),
+            align_right=True,
+        )
     if debug_overlay:
         draw_costmap_explanation(frame, costmap_explanation)
     draw_costmap_alert(frame, costmap_alert)

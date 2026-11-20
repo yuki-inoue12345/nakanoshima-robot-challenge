@@ -36,6 +36,7 @@ from .costmap_overlay import (
     estimate_image_frame_timing,
     project_costmap_points,
 )
+from .costmap_ready_history import CostmapReadyHistory
 from .costmap_path_sync import (
     capture_costmap_path,
     check_costmap_path_pair,
@@ -74,7 +75,8 @@ from .localization_monitor import (
     LocalizationWarningGate,
     amcl_message_to_observation,
 )
-from .offscreen_guidance import GuidanceSettings
+from .offscreen_guidance import GuidanceSettings, OffscreenGuidance
+from .rotation_motion import RotationMotionGate
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
 from .perception_frame_delay import PerceptionFrameDelay
@@ -117,6 +119,9 @@ class ArPathViewerNode(Node):
             # Read-only perception overlay. Production remains opt-in until
             # the NUC topic contract and real C920 alignment are verified.
             "perception_costmap_enabled": False,
+            # Review-only; keep exact-TF Costmap samples older than C920.
+            "perception_costmap_camera_history_enabled": False,
+            "perception_minimap_visual_hold_sec": 1.0,
             # Hide rarely visible floor dots only; keep Costmap sensing,
             # explanatory notices, and ROBOT VIEW independent.
             "perception_costmap_camera_overlay_enabled": False,
@@ -227,6 +232,7 @@ class ArPathViewerNode(Node):
             "offscreen_guidance_max_bearing_change_deg": 65.0,
             "guidance_require_follower_state": True,
             "guidance_direction_hold_sec": 0.35,
+            "rotation_guidance_enabled": False,
             "path_change_hold_sec": 0.35,
             "path_change_max_displacement_m": 0.60,
             "path_change_max_heading_deg": 35.0,
@@ -347,6 +353,9 @@ class ArPathViewerNode(Node):
             self._guidance_settings.validate()
             self._guidance_stability = GuidanceStabilityGate(
                 self._float("guidance_direction_hold_sec")
+            )
+            self._rotation_guidance_enabled = self._bool(
+                "rotation_guidance_enabled"
             )
             self._path_transition_gate = PathTransitionGate(
                 hold_sec=self._float("path_change_hold_sec"),
@@ -561,6 +570,7 @@ class ArPathViewerNode(Node):
             self._waypoint_progress_gate = WaypointProgressGate()
             self._guidance_settings = GuidanceSettings(enabled=False)
             self._guidance_stability = GuidanceStabilityGate(0.0)
+            self._rotation_guidance_enabled = False
             self._path_transition_gate = PathTransitionGate(0.0)
             self._path_alpha = 1.0
             self._perception_costmap_enabled = False
@@ -585,6 +595,13 @@ class ArPathViewerNode(Node):
             self._perception_explanation_visible = False
             self._costmap_explanation_settings = CostmapExplanationSettings()
 
+        self._rotation_motion_gate = RotationMotionGate()
+        self._costmap_ready_history = (
+            CostmapReadyHistory()
+            if self._perception_costmap_enabled and
+            self._bool("perception_costmap_camera_history_enabled")
+            else None
+        )
         self._costmap_store = CostmapStore(self._costmap_settings)
         self._costmap_transform_queue = CostmapTransformQueue(
             self._costmap_settings
@@ -594,6 +611,14 @@ class ArPathViewerNode(Node):
         )
         self._last_costmap_visual_context = ""
         self._last_image_frame_timing = None
+        self._minimap_visual_hold_sec = (
+            self._float("perception_minimap_visual_hold_sec")
+        )
+        if (not math.isfinite(self._minimap_visual_hold_sec)
+                or not 0.0 <= self._minimap_visual_hold_sec <= 2.0):
+            self._config_error = (
+                "invalid perception_minimap_visual_hold_sec"
+            )
         self._perception_frame_delay = None
         # Camera-first review: never postpone the live C920 preview.
         # With delay disabled, Costmap must still pass the existing
@@ -1266,6 +1291,13 @@ class ArPathViewerNode(Node):
                 self._last_costmap_visual_context = ""
             queued = transform_queue.submit(snapshot)
             if queued:
+                ready_history = getattr(
+                    self, "_costmap_ready_history", None
+                )
+                if ready_history is not None:
+                    ready_history.invalidate_if_frame_changed(
+                        snapshot.frame_id
+                    )
                 # Freeze the real /plan epoch at Costmap *receipt*, not at
                 # late exact-time TF resolution. Keep separate bindings for
                 # old ready and new pending Costmaps.
@@ -1300,6 +1332,9 @@ class ArPathViewerNode(Node):
             pass
         else:
             transform_queue.clear(detail)
+            ready_history = getattr(self, "_costmap_ready_history", None)
+            if ready_history is not None:
+                ready_history.clear()
             getattr(self, "_costmap_path_bindings", {}).clear()
             visual_hold = getattr(self, "_costmap_visual_hold", None)
             if visual_hold is not None:
@@ -1565,7 +1600,8 @@ class ArPathViewerNode(Node):
         if cached is None:
             return None, ""
         age = float(now) - float(cached[0])
-        if not math.isfinite(age) or not 0.0 <= age <= 1.0:
+        hold_sec = getattr(self, "_minimap_visual_hold_sec", 1.0)
+        if not math.isfinite(age) or not 0.0 <= age <= hold_sec:
             self._last_minimap_snapshot_ui = None
             return None, ""
         return cached[1], f"LAST SNAPSHOT {age:.1f}s"
@@ -1700,6 +1736,7 @@ class ArPathViewerNode(Node):
         detail = ""
         guidance = None
         waypoint_status = ""
+        final_waypoint_status = ""
         navigation_status = ""
         base_localization_status = self._localization.status()
         localization_warning = None
@@ -1885,6 +1922,19 @@ class ArPathViewerNode(Node):
                 tf_available=tf_available,
                 tf_detail=tf_detail,
             )
+            # Actual robot yaw, never a proposed/imagined rotate.
+            rotation_gate = getattr(self, "_rotation_motion_gate", None)
+            rotation_direction = (
+                rotation_gate.update(
+                    tf_pose if (
+                        getattr(self, "_rotation_guidance_enabled", False)
+                        and tf_available and localization is not None
+                        and localization.stable
+                    ) else None,
+                    self._ros_now_sec(),
+                )
+                if rotation_gate is not None else None
+            )
 
             if state == "ACTIVE" and snapshot is not None:
                 if (
@@ -2019,6 +2069,34 @@ class ArPathViewerNode(Node):
                                     .max_path_start_distance_m,
                                 )
                                 or ""
+                            )
+                            if waypoint_status:
+                                final_waypoint_status = (
+                                    self._waypoint_progress_gate
+                                    .destination_status(
+                                        self._ros_now_sec(),
+                                        snapshot.generation,
+                                        progress.remaining_path_m,
+                                        progress.anchor_distance_m,
+                                        self._guidance_settings
+                                        .max_path_start_distance_m,
+                                    ) or ""
+                                )
+                        if (
+                            state in ("ACTIVE", "PATH OUT OF VIEW")
+                            and rotation_direction is not None
+                            and progress is not None
+                            and self._waypoint_progress_gate
+                            .authorizes_plan(
+                                self._ros_now_sec(), snapshot.generation
+                            )
+                        ):
+                            guidance = OffscreenGuidance(
+                                rotation_direction,
+                                70.0 if rotation_direction ==
+                                "ROTATE LEFT" else -70.0,
+                                progress.remaining_path_m,
+                                progress.endpoint_distance_m,
                             )
                         if (
                             state in ("ACTIVE", "PATH OUT OF VIEW")
@@ -2240,9 +2318,44 @@ class ArPathViewerNode(Node):
                         self._costmap_transform_queue.expired_count,
                         sync_reason,
                     )
+                    # Camera-first review: a newly resolved Costmap may
+                    # be younger than this unchanged camera image.
+                    # Pick an actual, previously exact-TF-ready grid.
+                    ready_history = getattr(
+                        self, "_costmap_ready_history", None
+                    )
+                    if ready_history is not None and delayed_frame is None:
+                        if synchronized is not None:
+                            ready_history.add(synchronized)
+                        if image_timing.usable:
+                            matched = ready_history.for_image(
+                                image_timing.stamp_sec,
+                                self._ros_now_sec(),
+                                maximum_image_age_sec=(
+                                    self._costmap_camera_sync_settings
+                                    .max_costmap_age_sec
+                                    + self._costmap_visual_hold_sec
+                                ),
+                                maximum_ros_age_sec=(
+                                    self._costmap_settings.stamp_max_age_sec
+                                ),
+                            )
+                            synchronized = matched
+                        else:
+                            synchronized = None
+                        if synchronized is None:
+                            sync_reason = (
+                                "no_exact_ready_costmap_before_image"
+                            )
                     if synchronized is None:
                         costmap_reason = sync_reason
-                        alert_gate.clear()
+                        if (image_timing.usable
+                                and localization is not None
+                                and localization.stable
+                                and tf_available):
+                            alert_gate.suspend()
+                        else:
+                            alert_gate.clear()
                     else:
                         costmap_snapshot = synchronized.snapshot
                         costmap_age = (
@@ -2286,7 +2399,17 @@ class ArPathViewerNode(Node):
                                 f"{type(exc).__name__}: {exc}"
                             )
                             costmap_analysis_points_base = None
-                            alert_gate.clear()
+                            if (image_timing.usable
+                                    and isinstance(exc, ValueError)
+                                    and str(exc).startswith((
+                                        "costmap_camera_age_exceeded",
+                                        "costmap_newer_than_image",
+                                    ))
+                                    and localization is not None
+                                    and localization.stable):
+                                alert_gate.suspend()
+                            else:
+                                alert_gate.clear()
                             if not isinstance(exc, ValueError):
                                 retry_delayed_frame = (
                                     delayed_frame is not None
@@ -2604,7 +2727,15 @@ class ArPathViewerNode(Node):
                     costmap_alert_reason = "confirmed_real_plan_update"
                     alert_gate.clear()
                 elif not semantic_inputs_available:
-                    alert_gate.clear()
+                    # Missing image-time evidence is not evidence of
+                    # safety, nor may it produce a live alert. A short
+                    # gap can retain only a *pending* confirmation.
+                    if (image_timing.usable
+                            and localization is not None
+                            and localization.stable and tf_available):
+                        alert_gate.suspend()
+                    else:
+                        alert_gate.clear()
                     costmap_alert_reason = "synchronized_inputs_unavailable"
                 elif (
                     state not in ("ACTIVE", "PATH OUT OF VIEW")
@@ -2734,6 +2865,7 @@ class ArPathViewerNode(Node):
                 reference_segments = []
                 guidance = None
                 waypoint_status = ""
+                final_waypoint_status = ""
                 navigation_status = ""
                 costmap_projection = None
                 costmap_display_projection = None
@@ -2761,6 +2893,7 @@ class ArPathViewerNode(Node):
                 reference_segments = []
                 guidance = None
                 waypoint_status = ""
+                final_waypoint_status = ""
                 navigation_status = ""
                 costmap_projection = None
                 costmap_display_projection = None
@@ -2770,6 +2903,17 @@ class ArPathViewerNode(Node):
                 costmap_alert = None
                 if camera_pipeline_mode == "synchronized":
                     camera_pipeline_mode = "preview_path_wait"
+            if (self._waypoint_progress_gate.navigation_hold_status(
+                    self._ros_now_sec()) == "ROUTE COMPLETE"):
+                # Only explicit follower activity 9 authorizes this.
+                state = "NAVIGATION HOLD"
+                detail = "follower_reported_finished"
+                navigation_status = "ROUTE COMPLETE"
+                waypoint_status = ""
+                final_waypoint_status = ""
+                segments = []
+                reference_segments = []
+                guidance = None
             minimap_status = ""
             if robot_view_enabled and robot_view_expanded:
                 costmap_minimap, minimap_status = (
@@ -2808,6 +2952,7 @@ class ArPathViewerNode(Node):
                     self._calibration_profile_label,
                 ))),
                 waypoint_status=waypoint_status,
+                final_waypoint_status=final_waypoint_status,
                 navigation_status=navigation_status,
                 debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),

@@ -419,6 +419,9 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
     expected_review = {
         "perception_costmap_enabled": True,
         "perception_camera_frame_delay_enabled": False,
+        "perception_costmap_camera_history_enabled": True,
+        "perception_minimap_visual_hold_sec": 1.5,
+        "rotation_guidance_enabled": True,
         "perception_explanation_enabled": True,
         "perception_minimap_enabled": True,
         "perception_alert_enabled": True,

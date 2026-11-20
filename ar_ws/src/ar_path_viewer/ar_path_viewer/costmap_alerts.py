@@ -319,6 +319,18 @@ class CostmapAlertGate:
         self._last_seen = 0.0
         self._visible = False
 
+    def suspend(self, max_gap_sec: float = 0.40) -> None:
+        """Hide an unverified current alert, keeping only a short
+        pending confirmation. Call only on recoverable time-sync gaps.
+        A new, valid Costmap must confirm before anything is shown.
+        """
+        age = self.clock() - self._last_seen
+        if (self._candidate is None or not math.isfinite(age)
+                or age < 0.0 or age > max_gap_sec):
+            self.clear()
+        else:
+            self._visible = False
+
     def update(self, alert: CostmapAlert | None) -> CostmapAlert | None:
         if alert is None:
             if (
