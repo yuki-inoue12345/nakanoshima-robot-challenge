@@ -145,6 +145,9 @@ class ArPathViewerNode(Node):
             "perception_camera_sync_clock_tolerance_sec": 0.02,
             "perception_camera_sync_future_tolerance_sec": 0.02,
             "perception_camera_sync_exact_tf_tolerance_sec": 0.005,
+            # Default preserves the established exact-time delayed mode.
+            # Review profiles may opt out to keep newest C920 video direct.
+            "perception_camera_frame_delay_enabled": True,
             # Review-only: let the image-time TF arrive without blocking ROS.
             "perception_camera_frame_delay_sec": 0.12,
             "perception_camera_frame_max_age_sec": 0.30,
@@ -592,9 +595,11 @@ class ArPathViewerNode(Node):
         self._last_costmap_visual_context = ""
         self._last_image_frame_timing = None
         self._perception_frame_delay = None
-        # Delay is deliberately unavailable for the default OpenCV and
-        # production profiles. It is only used by opt-in timestamped Costmap.
+        # Camera-first review: never postpone the live C920 preview.
+        # With delay disabled, Costmap must still pass the existing
+        # exact-time, motion and freshness checks before use.
         if (self._perception_costmap_enabled and
+                self._bool("perception_camera_frame_delay_enabled") and
                 self._str("image_input_type").strip().lower() ==
                 "camera_timestamped"):
             self._perception_frame_delay = PerceptionFrameDelay(
@@ -890,6 +895,12 @@ class ArPathViewerNode(Node):
             f"{self._path_transition_gate.max_heading_change_deg:.1f} "
             f"path_overlay_alpha={self._path_alpha:.2f} "
             "old_path_held=false"
+        )
+        self._log_info(
+            "camera_preview_policy "
+            f"delay_enabled={self._perception_frame_delay is not None} "
+            f"costmap_enabled={self._perception_costmap_enabled} "
+            "camera_source_timestamps_unchanged=true"
         )
         if self._perception_frame_delay is not None:
             self._log_info(

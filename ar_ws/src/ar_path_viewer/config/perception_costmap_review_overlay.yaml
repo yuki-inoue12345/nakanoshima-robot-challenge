@@ -2,6 +2,9 @@ ar_path_viewer:
   ros__parameters:
     # Review-only opt-in. The normal and C920 base profiles remain false.
     perception_costmap_enabled: true
+    # Camera-first test: do not queue C920 frames for TF arrival.
+    # Costmap semantics remain strict and may fail closed.
+    perception_camera_frame_delay_enabled: false
     perception_explanation_enabled: true
     perception_minimap_enabled: true
     perception_alert_enabled: true

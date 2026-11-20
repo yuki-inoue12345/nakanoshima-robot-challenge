@@ -418,6 +418,7 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
     params = review["ar_path_viewer"]["ros__parameters"]
     expected_review = {
         "perception_costmap_enabled": True,
+        "perception_camera_frame_delay_enabled": False,
         "perception_explanation_enabled": True,
         "perception_minimap_enabled": True,
         "perception_alert_enabled": True,
