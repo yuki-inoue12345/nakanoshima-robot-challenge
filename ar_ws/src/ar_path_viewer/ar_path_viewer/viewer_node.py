@@ -1533,6 +1533,8 @@ class ArPathViewerNode(Node):
                     f"reason={warning.reason!r}"
                 )
             self._last_localization_warning_key = key
+        self._last_localization_warning_for_display = warning
+        self._last_localization_warning_checked_monotonic = time.monotonic()
         return warning
 
     def _tick(self) -> None:
@@ -1722,13 +1724,17 @@ class ArPathViewerNode(Node):
                 f"discarded={frame_delay.discarded} "
                 f"image_stamp={captured_image_timing.stamp_sec:.6f}"
             )
-            localization_warning = ArPathViewerNode._localization_warning_for_frame(
-                self,
-                base_localization_status,
-                tf_checked=False,
-                tf_available=False,
-                tf_detail="",
+            # A short camera/TF synchronization wait is NOT a new AMCL
+            # verification.  Retain a recent *verified* UI observation for
+            # at most 0.5s; do not flip the warning gate without a TF check.
+            localization_warning = getattr(
+                self, "_last_localization_warning_for_display", None
             )
+            last_checked = getattr(
+                self, "_last_localization_warning_checked_monotonic", 0.0
+            )
+            if time.monotonic() - last_checked > 0.5:
+                localization_warning = None
             render_started_monotonic = time.monotonic()
             frame = render_frame(
                 image, [], state, detail=detail,
@@ -2414,6 +2420,7 @@ class ArPathViewerNode(Node):
             explanation_enabled = bool(
                 getattr(self, "_perception_explanation_enabled", False)
                 and ui_state["_perception_explanation_visible"]
+                and debug_overlay
             )
             if explanation_enabled:
                 if not costmap_enabled:

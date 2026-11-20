@@ -138,12 +138,41 @@ def draw_localized_label(
             return True
         except (AttributeError, RuntimeError, cv2.error):
             pass
-    _paint_centered_mask(
-        canvas, rectangle,
-        _hershey_text_mask(fallback, max(8, int(font_height))),
-        color,
-    )
+    # Optional cached Pillow fallback on systems without cv2.freetype.
+    # Missing Pillow or a CJK system font still leaves the ASCII fallback.
+    try:
+        mask = _pillow_japanese_mask(japanese, max(8, int(font_height)))
+    except (ImportError, OSError, RuntimeError, ValueError):
+        pass
+    else:
+        _paint_centered_mask(canvas, rectangle, mask, color)
+        return True
+    mask = _hershey_text_mask(fallback, max(8, int(font_height)))
+    _paint_centered_mask(canvas, rectangle, mask, color)
     return False
+
+
+@lru_cache(maxsize=64)
+def _pillow_japanese_mask(text: str, font_height: int) -> np.ndarray:
+    """Render cached Japanese glyph ink using installed system CJK fonts."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    for font_path in _JAPANESE_FONT_CANDIDATES:
+        if not Path(font_path).is_file():
+            continue
+        try:
+            font = ImageFont.truetype(font_path, font_height)
+            left, top, right, bottom = font.getbbox(text)
+            image = Image.new(
+                "L", (max(1, right - left + 8), max(1, bottom - top + 8)), 0
+            )
+            ImageDraw.Draw(image).text(
+                (4 - left, 4 - top), text, font=font, fill=255
+            )
+            return _crop_nonzero(np.asarray(image))
+        except (OSError, ValueError):
+            continue
+    raise RuntimeError("no working CJK system font for Pillow")
 
 
 @lru_cache(maxsize=16)

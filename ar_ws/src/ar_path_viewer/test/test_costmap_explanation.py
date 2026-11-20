@@ -103,7 +103,7 @@ def test_explanation_card_is_compact_and_does_not_cover_lower_paths():
         [((100, 400), (540, 300))],
         "ACTIVE",
         costmap_explanation=decision.explanation,
-        debug_overlay=False,
+        debug_overlay=True,
     )
 
     assert np.count_nonzero(frame[50:104, 10:380]) > 500

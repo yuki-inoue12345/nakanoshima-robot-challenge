@@ -931,6 +931,8 @@ def test_missing_image_time_tf_hides_costmap_without_hiding_paths():
 def test_fresh_costmap_and_authorized_real_path_draw_explanation_card():
     clock = MutableClock()
     fake = _make_viewer(clock)
+    # The explanation card is available in diagnostic display mode.
+    fake._debug_overlay = True
     fake._perception_costmap_enabled = True
     fake._perception_explanation_enabled = True
     fake._costmap_settings = CostmapOverlaySettings(

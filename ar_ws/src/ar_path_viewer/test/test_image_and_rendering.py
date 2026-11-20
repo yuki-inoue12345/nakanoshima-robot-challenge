@@ -143,6 +143,41 @@ def test_all_required_states_render_and_only_active_draws_route():
 
 
 
+def test_normal_header_does_not_flash_when_image_time_sync_waits():
+    image = np.full((480, 640, 3), 55, np.uint8)
+    active = render_frame(image, [], "ACTIVE", debug_overlay=False)
+    waiting = render_frame(image, [], "FRAME SYNC WAIT", debug_overlay=False)
+    assert np.array_equal(active[8:42, 8:632], waiting[8:42, 8:632])
+    # D remains the truth-preserving technical view for troubleshooting.
+    debug_active = render_frame(image, [], "ACTIVE", debug_overlay=True)
+    debug_waiting = render_frame(
+        image, [], "FRAME SYNC WAIT", debug_overlay=True
+    )
+    assert not np.array_equal(
+        debug_active[8:42, 8:632], debug_waiting[8:42, 8:632]
+    )
+
+
+def test_normal_view_hides_short_lived_explanation_but_debug_can_show_it():
+    image = np.full((480, 640, 3), 55, np.uint8)
+    from ar_path_viewer.costmap_explanation import CostmapExplanation
+
+    explanation = CostmapExplanation(
+        "FRONT LOW COST | PATH STRAIGHT", "low_cost", "evidence"
+    )
+    normal = render_frame(
+        image, [], "ACTIVE", debug_overlay=False,
+        costmap_explanation=explanation,
+    )
+    baseline = render_frame(image, [], "ACTIVE", debug_overlay=False)
+    debug = render_frame(
+        image, [], "ACTIVE", debug_overlay=True,
+        costmap_explanation=explanation,
+    )
+    assert np.array_equal(normal, baseline)
+    assert not np.array_equal(debug[50:103, :380], image[50:103, :380])
+
+
 def test_frame_sync_wait_is_supported_and_hides_route():
     assert "FRAME SYNC WAIT" in VALID_STATES
     image = np.zeros((100, 160, 3), np.uint8)

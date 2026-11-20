@@ -220,13 +220,20 @@ def draw_localization_warning(
                   3 if active else 1)
     cv2.rectangle(frame, (left, top), (left + 7, top + height), accent, -1)
     title = "LOCALIZATION WARNING" if active else "RECENT LOCALIZATION WARNING"
-    cv2.putText(
-        frame, title, (left + 15, top + 23), cv2.FONT_HERSHEY_SIMPLEX,
-        0.53 if active else 0.45, accent, 2 if active else 1, cv2.LINE_AA,
+    draw_localized_label(
+        frame, (left + 12, top + 3, left + width - 12, top + 30),
+        "自己位置を確認できません" if active else "自己位置情報は復旧しました",
+        title, accent, 20,
     )
-    cv2.putText(
-        frame, warning.reason[:43], (left + 15, top + 45),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.39, (245, 245, 245), 1, cv2.LINE_AA,
+    reason_japanese = (
+        "自己位置情報の更新が遅れています"
+        if "STALE" in warning.reason
+        else "位置情報の正確さを確認してください"
+    )
+    draw_localized_label(
+        frame, (left + 12, top + 29, left + width - 12, top + 52),
+        reason_japanese,
+        warning.reason[:43], (245, 245, 245), 16,
     )
     if active:
         detail = warning.detail.replace("\n", " ")[:57]
@@ -453,10 +460,19 @@ def _draw_bottom_badge(
         (20, 20, 20),
         -1,
     )
-    cv2.putText(
-        frame, label, (x, y), font, scale, color_bgr,
-        thickness, cv2.LINE_AA,
-    )
+    if label.startswith("PLAN LEFT:"):
+        draw_localized_label(
+            frame,
+            (x, y - text_height - 6,
+             min(frame.shape[1] - 8, x + text_width), y + baseline + 5),
+            "経路残り " + label.split(":", 1)[1].strip(),
+            label, color_bgr, 19,
+        )
+    else:
+        cv2.putText(
+            frame, label, (x, y), font, scale, color_bgr,
+            thickness, cv2.LINE_AA,
+        )
 
 
 def _draw_direction_panel(
@@ -510,15 +526,14 @@ def _draw_direction_panel(
             color_bgr, 6, cv2.LINE_AA, tipLength=0.30,
         )
         label = 'GO STRAIGHT'
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.62
-    thickness = 2
-    (text_width, text_height), _ = cv2.getTextSize(label, font, scale, thickness)
-    text_x = max(left + 82, right - text_width - 10)
-    text_y = top + (panel_height + text_height) // 2 - 2
-    cv2.putText(
-        frame, label, (text_x, text_y), font, scale, color_bgr,
-        thickness, cv2.LINE_AA,
+    localized = {
+        "TURN LEFT": "左折",
+        "TURN RIGHT": "右折",
+        "GO STRAIGHT": "直進",
+    }[label]
+    draw_localized_label(
+        frame, (left + 82, top + 8, right - 8, bottom - 8),
+        localized, label, color_bgr, 24,
     )
 
 
@@ -623,13 +638,14 @@ def render_frame(
         "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
     ):
         _draw_navigation_status(frame, navigation_status)
-    draw_costmap_explanation(frame, costmap_explanation)
+    if debug_overlay:
+        draw_costmap_explanation(frame, costmap_explanation)
     draw_costmap_alert(frame, costmap_alert)
     if costmap_alert is None:
         draw_costmap_alert_history(frame, costmap_alert_history)
     draw_localization_warning(frame, localization_warning)
     if robot_view_enabled:
-        if robot_view_expanded:
+        if robot_view_expanded and costmap_minimap is not None:
             draw_robot_view_panel(
                 frame, costmap_minimap, range_m=costmap_minimap_range_m,
                 status=costmap_minimap_status,
@@ -644,10 +660,23 @@ def render_frame(
     cv2.rectangle(
         frame, (8, 8), (max(8, frame.shape[1] - 8), box_bottom), (20, 20, 20), -1
     )
-    cv2.putText(frame, state, (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.72,
-                label_color, 2, cv2.LINE_AA)
+    if debug_overlay:
+        cv2.putText(frame, state, (18, 34), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.72, label_color, 2, cv2.LINE_AA)
+    else:
+        draw_localized_label(
+            frame, (12, 9, min(frame.shape[1] - 10, 225), 40),
+            "ココちゃんナビ", "KOKO NAVI", (235, 235, 235), 23,
+        )
+        if state in ("CAMERA UNAVAILABLE", "INVALID CONFIG") and frame.shape[1] >= 500:
+            message = "映像を確認できません" if state == "CAMERA UNAVAILABLE" else "設定に問題があります"
+            draw_localized_label(
+                frame, (235, 9, 475, 40), message,
+                "CAMERA ERROR" if state == "CAMERA UNAVAILABLE" else "CONFIG ERROR",
+                (30, 170, 255), 18,
+            )
     right_edge = frame.shape[1] - 18
-    if display_mode_label:
+    if display_mode_label and debug_overlay:
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.45
         mode_thickness = 1
@@ -665,7 +694,7 @@ def render_frame(
             cv2.LINE_AA,
         )
         right_edge -= mode_width + 18
-    if reference_list:
+    if reference_list and debug_overlay:
         label = "REFERENCE"
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.52
@@ -684,7 +713,7 @@ def render_frame(
             cv2.LINE_AA,
         )
         right_edge -= label_width + 18
-    if costmap_projection is not None:
+    if costmap_projection is not None and debug_overlay:
         if hold_visible:
             hold_age = max(0.0, float(costmap_sync_hold_age_sec))
             label = f"SYNC HOLD | LAST SYNC {hold_age:.2f} s"
