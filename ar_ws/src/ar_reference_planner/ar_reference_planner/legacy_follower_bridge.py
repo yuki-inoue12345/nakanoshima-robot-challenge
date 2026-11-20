@@ -15,6 +15,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import Path as PathMessage
 from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters, ListParameters
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -61,10 +62,19 @@ class LegacyFollowerBridge(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self._validate_parameters()
-        self._parameter_client = AsyncParameterClient(
-            self, str(self.get_parameter('follower_node_name').value)
+        follower_name = str(self.get_parameter('follower_node_name').value).rstrip('/')
+        # Probe ONLY services actually required by this read-only bridge.
+        # AsyncParameterClient.services_are_ready() checks unrelated parameter
+        # mutation services too, which can strand the bridge at startup.
+        self._parameter_client = AsyncParameterClient(self, follower_name)
+        self._parameter_list_service = self.create_client(
+            ListParameters, follower_name + '/list_parameters'
+        )
+        self._parameter_get_service = self.create_client(
+            GetParameters, follower_name + '/get_parameters'
         )
         self._parameter_future = None
+        self._parameter_future_since = None
         self._next_parameter_query = monotonic()
         self._legacy_verified = False
         self._modern_follower = False
@@ -176,23 +186,48 @@ class LegacyFollowerBridge(Node):
         self._log_reason(reason)
 
     def _query_parameters(self, now: float) -> None:
-        if self._parameter_future is not None or now < self._next_parameter_query:
+        if self._parameter_future is not None:
+            started = getattr(self, '_parameter_future_since', None)
+            if started is None or now - started < 2.5:
+                return
+            # An RPC can remain unresolved if the Follower restarts between
+            # readiness and call_async. Discard the stale future and retry.
+            self._parameter_future = None
+            self._follower_parameters_available = False
+            self._log_reason('follower_parameter_response_timeout')
+        if now < self._next_parameter_query:
             return
         poll = float(self.get_parameter('parameter_poll_sec').value)
         self._next_parameter_query = now + poll
-        if not self._parameter_client.services_are_ready():
+        list_service = getattr(self, '_parameter_list_service', None)
+        ready = (
+            list_service.service_is_ready()
+            if list_service is not None
+            else self._parameter_client.services_are_ready()
+        )
+        if not ready:
             self._follower_parameters_available = False
-            self._log_reason('follower_parameter_service_unavailable')
+            self._log_reason(
+                'follower_parameter_list_service_unavailable'
+                if list_service is not None else 'follower_parameter_service_unavailable'
+            )
             return
         # Do not include the optional modern-only reference_state_topic in a
         # GetParameters request.  Jazzy's rclpy parameter service returns an
         # empty value array when any requested name is undeclared, which made
         # all three valid legacy parameters appear missing.  Listing the exact
         # optional name first works for both declared and undeclared cases.
-        future = self._parameter_client.list_parameters(
-            prefixes=['reference_state_topic'], depth=1
-        )
+        if list_service is None:
+            future = self._parameter_client.list_parameters(
+                prefixes=['reference_state_topic'], depth=1
+            )
+        else:
+            request = ListParameters.Request()
+            request.prefixes = ['reference_state_topic']
+            request.depth = 1
+            future = list_service.call_async(request)
         self._parameter_future = future
+        self._parameter_future_since = now
         future.add_done_callback(self._on_parameter_list)
 
     def _parameter_transport_failed(self, reason: str) -> None:
@@ -201,8 +236,9 @@ class LegacyFollowerBridge(Node):
         self._log_reason(reason)
 
     def _on_parameter_list(self, future) -> None:
-        if future is self._parameter_future:
-            self._parameter_future = None
+        if future is not self._parameter_future:
+            return  # Ignore a timed-out RPC after the next retry started.
+        self._parameter_future = None
         try:
             names = tuple(str(name) for name in future.result().result.names)
         except Exception as error:  # noqa: BLE001 - ROS service transport
@@ -220,22 +256,33 @@ class LegacyFollowerBridge(Node):
 
         self._modern_follower = False
         try:
-            parameter_future = self._parameter_client.get_parameters([
-                'waypoint_file',
-                'navigation_mode',
-                'map_frame',
-            ])
+            get_service = getattr(self, '_parameter_get_service', None)
+            if get_service is None:
+                parameter_future = self._parameter_client.get_parameters([
+                    'waypoint_file', 'navigation_mode', 'map_frame',
+                ])
+            else:
+                if not get_service.service_is_ready():
+                    self._parameter_transport_failed(
+                        'follower_parameter_get_service_unavailable'
+                    )
+                    return
+                request = GetParameters.Request()
+                request.names = ['waypoint_file', 'navigation_mode', 'map_frame']
+                parameter_future = get_service.call_async(request)
         except Exception as error:  # noqa: BLE001 - ROS service transport
             self._parameter_transport_failed(
                 f'follower_parameter_query_start_failed {error}'
             )
             return
         self._parameter_future = parameter_future
+        self._parameter_future_since = monotonic()
         parameter_future.add_done_callback(self._on_parameters)
 
     def _on_parameters(self, future) -> None:
-        if future is self._parameter_future:
-            self._parameter_future = None
+        if future is not self._parameter_future:
+            return
+        self._parameter_future = None
         try:
             values = list(future.result().values)
         except Exception as error:  # noqa: BLE001 - ROS service transport

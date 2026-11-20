@@ -329,3 +329,30 @@ def test_review_red_nearby_requires_small_footprint_gap():
         lethal_cost_min=100, settings=settings,
     )
     assert close is not None and reason == "lethal_cost_near_robot"
+
+
+def test_side_wall_lethal_is_not_front_collision_but_front_lethal_is():
+    from ar_path_viewer.costmap_alerts import CostmapAlertSettings
+    settings = CostmapAlertSettings(
+        nearby_lethal_distance_m=0.60, forward_half_width_m=0.40,
+    )
+    # Reconstructed from the actual 20:49:50 Costmap (right wall).
+    side, reason = evaluate_robot_proximity_alert(
+        np.asarray(((0.36, -0.87, 0.0),)), np.asarray((100,)),
+        lethal_cost_min=100, settings=settings,
+    )
+    assert side is None and reason == 'no_lethal_cost_near_robot'
+    # Reconstructed from the actual 20:49:42 Costmap (front region).
+    front, reason = evaluate_robot_proximity_alert(
+        np.asarray(((0.75, -0.15, 0.0),)), np.asarray((100,)),
+        lethal_cost_min=100, settings=settings,
+    )
+    assert front is not None and reason == 'lethal_cost_near_robot'
+    assert 'cell_x_m=0.750' in front.detail
+    assert 'cell_y_m=-0.150' in front.detail
+    # A lethal cell intersecting the current front half-footprint remains red.
+    overlap, _ = evaluate_robot_proximity_alert(
+        np.asarray(((0.10, 0.29, 0.0),)), np.asarray((100,)),
+        lethal_cost_min=100, settings=settings,
+    )
+    assert overlap is not None

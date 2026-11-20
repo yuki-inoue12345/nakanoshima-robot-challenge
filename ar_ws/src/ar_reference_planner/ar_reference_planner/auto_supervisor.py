@@ -17,6 +17,7 @@ from time import monotonic
 
 from nav_msgs.msg import Path
 from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -181,6 +182,11 @@ class ReferencePlannerAutoSupervisor(Node):
         self._parameter_client = AsyncParameterClient(
             self, self._follower_node_name
         )
+        # Only a read-only GetParameters service is required here.
+        self._parameter_get_service = self.create_client(
+            GetParameters,
+            self._follower_node_name.rstrip('/') + '/get_parameters',
+        )
         self._follower_subscription = self.create_subscription(
             WaypointFollowerState,
             str(self.get_parameter('follower_state_topic').value),
@@ -258,22 +264,43 @@ class ReferencePlannerAutoSupervisor(Node):
         self._reconcile(None, reason)
 
     def _request_waypoint_parameter(self, now: float) -> None:
-        if self._follower is None or self._parameter_future is not None:
+        if self._follower is None:
             return
+        if self._parameter_future is not None:
+            started = getattr(self, '_parameter_future_started_at', None)
+            if started is None or now - started < 2.5:
+                return
+            # Discard an RPC stranded by a Follower restart; never reuse it.
+            self._parameter_future = None
+            self._waypoint_status = SelectionStatus(
+                None, 'follower_waypoint_parameter_timeout'
+            )
         if now < self._next_parameter_query_at:
             return
-        if not self._parameter_client.services_are_ready():
+        get_service = getattr(self, '_parameter_get_service', None)
+        ready = (
+            get_service.service_is_ready()
+            if get_service is not None
+            else self._parameter_client.services_are_ready()
+        )
+        if not ready:
             self._next_parameter_query_at = now + self._parameter_retry
             self._waypoint_status = SelectionStatus(
-                None, 'follower_parameter_service_unavailable'
+                None, 'follower_parameter_get_service_unavailable'
             )
             return
         identity = (
             self._follower.route_sha256,
             self._follower.waypoint_count,
         )
-        future = self._parameter_client.get_parameters(['waypoint_file'])
+        if get_service is None:
+            future = self._parameter_client.get_parameters(['waypoint_file'])
+        else:
+            request = GetParameters.Request()
+            request.names = ['waypoint_file']
+            future = get_service.call_async(request)
         self._parameter_future = future
+        self._parameter_future_started_at = now
         self._parameter_identity = identity
         future.add_done_callback(
             lambda completed, expected=identity: self._parameter_result(
@@ -282,8 +309,9 @@ class ReferencePlannerAutoSupervisor(Node):
         )
 
     def _parameter_result(self, future, expected_identity: tuple) -> None:
-        if future is self._parameter_future:
-            self._parameter_future = None
+        if future is not self._parameter_future:
+            return  # Timed-out, superseded response: do not revive stale route.
+        self._parameter_future = None
         self._next_parameter_query_at = monotonic() + self._parameter_retry
         follower = self._follower
         current_identity = None if follower is None else (

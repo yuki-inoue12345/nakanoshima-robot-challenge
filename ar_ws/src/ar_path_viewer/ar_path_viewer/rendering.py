@@ -111,7 +111,7 @@ def draw_costmap_alert(
     ):
         if alert.detail.startswith(prefix):
             try:
-                detail_label = f"{title} {float(alert.detail[len(prefix):]):.2f} m"
+                detail_label = f"{title} {float(alert.detail[len(prefix):].split()[0]):.2f} m"
             except ValueError:
                 detail_label = ""
             break

@@ -631,3 +631,69 @@ def test_dedicated_launch_starts_bridge_without_control_interfaces():
     assert 'send_goal' not in bridge
     assert "'reference_state_topic'" in bridge
     assert 'modern_follower_native_state' in bridge
+
+
+def test_scoped_follower_list_service_skips_unrelated_parameter_services():
+    # The bridge needs only read-only ListParameters, not set services.
+    from types import SimpleNamespace
+    requests = []
+
+    class Future:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    future = Future()
+    scoped = SimpleNamespace(
+        service_is_ready=lambda: True,
+        call_async=lambda req: requests.append(req) or future,
+    )
+    fake = SimpleNamespace(
+        _parameter_future=None, _next_parameter_query=0.0,
+        _parameter_list_service=scoped,
+        _parameter_client=SimpleNamespace(
+            services_are_ready=lambda: False,
+        ),
+        _follower_parameters_available=False,
+        get_parameter=lambda name: SimpleNamespace(value=1.0),
+        _log_reason=lambda reason: None,
+        _on_parameter_list=lambda result: None,
+    )
+    LegacyFollowerBridge._query_parameters(fake, 10.0)
+    assert len(requests) == 1
+    assert requests[0].prefixes == ['reference_state_topic']
+    assert requests[0].depth == 1
+    assert fake._parameter_future is future
+
+
+def test_scoped_follower_get_service_preserves_legacy_parameter_names():
+    from types import SimpleNamespace
+    requested = []
+
+    class Future:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    list_future = SimpleNamespace(
+        result=lambda: SimpleNamespace(result=SimpleNamespace(names=[]))
+    )
+    get_future = Future()
+    fake = SimpleNamespace(
+        _parameter_future=list_future,
+        _parameter_get_service=SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=lambda req: requested.append(list(req.names)) or get_future,
+        ),
+        _parameter_client=SimpleNamespace(
+            get_parameters=lambda names: (_ for _ in ()).throw(
+                AssertionError('legacy generic client was incorrectly used')
+            ),
+        ),
+        _modern_follower=True,
+        _on_parameters=lambda result: None,
+        _parameter_transport_failed=lambda reason: (_ for _ in ()).throw(
+            AssertionError(reason)
+        ),
+    )
+    LegacyFollowerBridge._on_parameter_list(fake, list_future)
+    assert requested == [['waypoint_file', 'navigation_mode', 'map_frame']]
+    assert fake._parameter_future is get_future

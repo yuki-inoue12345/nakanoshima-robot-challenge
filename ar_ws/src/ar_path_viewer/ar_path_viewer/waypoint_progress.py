@@ -211,12 +211,14 @@ class WaypointProgressGate:
             return None
         if view.navigation_mode != "to_pose":
             return "NEXT WP: -- | FINAL WP: -- (MULTI-GOAL PLAN)"
-        if view.next_index != view.waypoint_count - 1:
-            return f"NEXT WP #{view.next_number} | FINAL WP: --"
-        # The last Waypoint *is* the endpoint of this real /plan.
+        # This is a real Nav2 /plan-to-the-next-goal distance, not a
+        # straight-line chord or fabricated route to the final destination.
         distance = valid_plan.split(": ", 1)[1]
+        if view.next_index != view.waypoint_count - 1:
+            return f"NEXT WP #{view.next_number}: {distance} | FINAL WP: --"
+        # Only at the final verified to_pose goal do these distances coincide.
         return (
-            f"NEXT WP #{view.next_number} (FINAL) | "
+            f"NEXT WP #{view.next_number}: {distance} | "
             f"FINAL WP: {distance}"
         )
 

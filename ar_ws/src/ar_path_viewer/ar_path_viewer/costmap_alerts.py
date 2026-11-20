@@ -163,7 +163,21 @@ def evaluate_robot_proximity_alert(
     points, values, reason = _validated_costmap_arrays(points_in_base, costs)
     if points is None or values is None:
         return None, reason
-    relevant = points[:, 0] >= 0.0
+    # An obstacle beside a corridor is not an obstacle in the robot's
+    # *forward swept corridor*. Preserve footprint overlap and a narrow
+    # forward margin, but reject lethal cells on distant lateral walls.
+    # This is only a visual notice: never modify Nav2's real costmap.
+    half_width = (
+        settings.robot_half_width_m + 0.25
+        if settings.forward_half_width_m is None
+        else max(settings.robot_half_width_m, settings.forward_half_width_m)
+    )
+    x = points[:, 0]
+    y = points[:, 1]
+    relevant = (
+        (x >= 0.0)
+        & (np.abs(y) <= half_width)
+    )
     lethal = relevant & (values >= lethal_cost_min)
     if np.any(lethal):
         lethal_xy = points[lethal, :2]
@@ -178,9 +192,15 @@ def evaluate_robot_proximity_alert(
         robot_distance = np.hypot(delta_x, delta_y)
         minimum = float(np.min(robot_distance))
         if minimum <= settings.nearby_lethal_distance_m:
+            # Retain the exact offending Costmap cell for forensic review.
+            # x is forward, y is robot-left; cost is from the same cell.
+            closest = lethal_xy[int(np.argmin(robot_distance))]
+            cost = int(values[lethal][int(np.argmin(robot_distance))])
             return CostmapAlert(
                 "COSTMAP ALERT: NEARBY", "nearby",
-                f"nearest_lethal_m={minimum:.3f}",
+                f"nearest_lethal_m={minimum:.3f} "
+                f"cell_x_m={closest[0]:.3f} "
+                f"cell_y_m={closest[1]:.3f} cost={cost}",
             ), "lethal_cost_near_robot"
     return None, "no_lethal_cost_near_robot"
 

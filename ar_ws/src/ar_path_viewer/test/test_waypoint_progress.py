@@ -136,12 +136,12 @@ def test_final_waypoint_distance_only_at_verified_final_to_pose():
     gate = WaypointProgressGate()
     gate.update(follower_state(index=18, number=19), 100.0, 3)
     assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
-        'NEXT WP #19 | FINAL WP: --'
+        'NEXT WP #19: 2.4 m | FINAL WP: --'
     )
     gate.update(follower_state(index=19, number=20, generation=5,
                                stamp=100.2), 100.2, 4)
     assert gate.destination_status(100.3, 5, 2.4, 0.1, 1.0) == (
-        'NEXT WP #20 (FINAL) | FINAL WP: 2.4 m'
+        'NEXT WP #20: 2.4 m | FINAL WP: 2.4 m'
     )
     assert gate.destination_status(100.3, 4, 2.4, 0.1, 1.0) is None
 

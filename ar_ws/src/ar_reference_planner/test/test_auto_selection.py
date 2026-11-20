@@ -553,3 +553,32 @@ def test_negative_or_nonfinite_initial_state_age_is_rejected(
         LauncherMapStateReader(
             tmp_path / 'state.yaml', maximum_initial_age_sec=bad_value
         )
+
+
+def test_supervisor_uses_scoped_follower_get_service():
+    from types import SimpleNamespace
+    requested = []
+
+    class Future:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    fake = SimpleNamespace(
+        _follower=SimpleNamespace(
+            route_sha256='a' * 64, waypoint_count=30,
+        ),
+        _parameter_future=None,
+        _next_parameter_query_at=0.0,
+        _parameter_retry=1.0,
+        _parameter_get_service=SimpleNamespace(
+            service_is_ready=lambda: True,
+            call_async=lambda req: requested.append(list(req.names)) or Future(),
+        ),
+        _parameter_client=SimpleNamespace(
+            services_are_ready=lambda: False,
+        ),
+        _parameter_result=lambda result, expected: None,
+    )
+    ReferencePlannerAutoSupervisor._request_waypoint_parameter(fake, now=10.0)
+    assert requested == [['waypoint_file']]
+    assert fake._parameter_identity == ('a' * 64, 30)
