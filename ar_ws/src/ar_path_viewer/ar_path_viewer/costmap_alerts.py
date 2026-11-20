@@ -15,6 +15,12 @@ class CostmapAlertSettings:
     robot_half_width_m: float = 0.29
     confirm_sec: float = 0.25
     release_sec: float = 0.40
+    # Defaults retain old library/API behavior; the review Viewer passes
+    # narrower, more selective thresholds without changing robot control.
+    forward_max_m: float = 2.0
+    forward_half_width_m: float | None = None
+    forward_min_cost: int = 0
+    forward_min_cells: int = 1
 
     def validate(self) -> None:
         values = (
@@ -24,6 +30,7 @@ class CostmapAlertSettings:
             self.robot_half_width_m,
             self.confirm_sec,
             self.release_sec,
+            self.forward_max_m,
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("costmap alert settings must be finite")
@@ -35,6 +42,21 @@ class CostmapAlertSettings:
             raise ValueError("costmap alert footprint must be positive")
         if self.confirm_sec < 0.0 or self.release_sec < 0.0:
             raise ValueError("costmap alert hysteresis must be non-negative")
+        if self.forward_max_m <= 0.0:
+            raise ValueError("forward Costmap distance must be positive")
+        if self.forward_half_width_m is not None and (
+            not math.isfinite(self.forward_half_width_m)
+            or self.forward_half_width_m <= 0.0
+        ):
+            raise ValueError("forward Costmap width must be positive")
+        if (not isinstance(self.forward_min_cells, int)
+            or isinstance(self.forward_min_cells, bool)
+            or self.forward_min_cells < 1):
+            raise ValueError("forward Costmap cell count must be positive")
+        if (not isinstance(self.forward_min_cost, int)
+            or isinstance(self.forward_min_cost, bool)
+            or not 0 <= self.forward_min_cost <= 100):
+            raise ValueError("forward Costmap minimum cost must be in 0..100")
 
 
 @dataclass(frozen=True)
@@ -185,12 +207,18 @@ def evaluate_forward_cost_alert(
     x = points[:, 0]
     y = points[:, 1]
     start = settings.robot_half_length_m + settings.nearby_lethal_distance_m
-    within = (
-        (x >= start) & (x <= 2.0)
-        & (np.abs(y) <= settings.robot_half_width_m + 0.25)
-        & (values >= high_cost_min)
+    half_width = (
+        settings.robot_half_width_m + 0.25
+        if settings.forward_half_width_m is None
+        else settings.forward_half_width_m
     )
-    if not np.any(within):
+    within = (
+        (x >= start) & (x <= settings.forward_max_m)
+        & (np.abs(y) <= half_width)
+        & (values >= max(high_cost_min, settings.forward_min_cost))
+    )
+    # One isolated high-inflation cell must not create a large caution banner.
+    if np.count_nonzero(within) < settings.forward_min_cells:
         return None, "no_forward_costmap_evidence"
     distances = x[within]
     classes = values[within]
@@ -261,8 +289,16 @@ class CostmapAlertGate:
         confirm_sec: float,
         release_sec: float = 0.0,
         clock=time.monotonic,
+        confirm_by_kind: dict[str, float] | None = None,
     ) -> None:
         self.confirm_sec = float(confirm_sec)
+        self.confirm_by_kind = dict(confirm_by_kind or {})
+        if any(
+            not isinstance(kind, str) or not kind
+            or not math.isfinite(float(delay)) or float(delay) < 0.0
+            for kind, delay in self.confirm_by_kind.items()
+        ):
+            raise ValueError("invalid per-kind alert confirmation")
         self.release_sec = float(release_sec)
         if (
             not math.isfinite(self.confirm_sec)
@@ -302,7 +338,8 @@ class CostmapAlertGate:
         else:
             self._candidate = alert
         self._last_seen = now
-        if now - self._since + 1e-9 < self.confirm_sec:
+        required = float(self.confirm_by_kind.get(alert.kind, self.confirm_sec))
+        if now - self._since + 1e-9 < required:
             return None
         self._visible = True
         return self._candidate

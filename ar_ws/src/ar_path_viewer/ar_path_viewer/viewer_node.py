@@ -117,6 +117,9 @@ class ArPathViewerNode(Node):
             # Read-only perception overlay. Production remains opt-in until
             # the NUC topic contract and real C920 alignment are verified.
             "perception_costmap_enabled": False,
+            # Hide rarely visible floor dots only; keep Costmap sensing,
+            # explanatory notices, and ROBOT VIEW independent.
+            "perception_costmap_camera_overlay_enabled": False,
             "perception_costmap_topic": "/local_costmap/costmap",
             "perception_costmap_timeout_sec": 1.5,
             "perception_costmap_stamp_max_age_sec": 1.5,
@@ -155,10 +158,16 @@ class ArPathViewerNode(Node):
             "perception_minimap_range_m": 3.0,
             "perception_alert_enabled": False,
             "perception_alert_path_corridor_width_m": 0.35,
-            "perception_alert_nearby_lethal_distance_m": 0.60,
+            "perception_alert_nearby_lethal_distance_m": 0.30,
             "perception_alert_robot_half_length_m": 0.30,
             "perception_alert_robot_half_width_m": 0.29,
-            "perception_alert_confirm_sec": 0.25,
+            # Longer verification: a frame of inflation is not a warning.
+            "perception_alert_confirm_sec": 0.85,
+            "perception_alert_forward_confirm_sec": 1.25,
+            "perception_alert_forward_max_m": 1.50,
+            "perception_alert_forward_half_width_m": 0.30,
+            "perception_alert_forward_min_cost": 85,
+            "perception_alert_forward_min_cells": 3,
             "perception_alert_release_sec": 0.40,
             "perception_explanation_enabled": False,
             "perception_explanation_forward_min_m": 0.40,
@@ -352,6 +361,9 @@ class ArPathViewerNode(Node):
                 "perception_costmap_enabled"
             )
             self._perception_costmap_visible = self._perception_costmap_enabled
+            self._perception_costmap_camera_overlay_enabled = self._bool(
+                "perception_costmap_camera_overlay_enabled"
+            )
             self._costmap_settings = CostmapOverlaySettings(
                 timeout_sec=self._float("perception_costmap_timeout_sec"),
                 stamp_max_age_sec=self._float(
@@ -449,12 +461,22 @@ class ArPathViewerNode(Node):
                 ),
                 confirm_sec=self._float("perception_alert_confirm_sec"),
                 release_sec=self._float("perception_alert_release_sec"),
+                forward_max_m=self._float("perception_alert_forward_max_m"),
+                forward_half_width_m=self._float(
+                    "perception_alert_forward_half_width_m"
+                ),
+                forward_min_cost=self._int("perception_alert_forward_min_cost"),
+                forward_min_cells=self._int("perception_alert_forward_min_cells"),
             )
             self._costmap_alert_settings.validate()
             self._costmap_alert_gate = CostmapAlertGate(
                 self._costmap_alert_settings.confirm_sec,
                 self._costmap_alert_settings.release_sec,
                 clock=self._ros_now_sec,
+                confirm_by_kind={
+                    "forward": self._float("perception_alert_forward_confirm_sec"),
+                    "high_path": self._float("perception_alert_forward_confirm_sec"),
+                },
             )
             self._costmap_alert_history_gate = CostmapAlertHistoryGate(
                 2.5, clock=self._ros_now_sec
@@ -540,6 +562,7 @@ class ArPathViewerNode(Node):
             self._path_alpha = 1.0
             self._perception_costmap_enabled = False
             self._perception_costmap_visible = False
+            self._perception_costmap_camera_overlay_enabled = False
             self._costmap_settings = CostmapOverlaySettings()
             self._costmap_camera_sync_settings = CostmapCameraSyncSettings()
             self._costmap_tf_max_age = 1.5
@@ -2709,10 +2732,18 @@ class ArPathViewerNode(Node):
                 navigation_status=navigation_status,
                 debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
-                costmap_projection=costmap_display_projection,
+                costmap_projection=(
+                    costmap_display_projection
+                    if getattr(self, "_perception_costmap_camera_overlay_enabled", True)
+                    else None
+                ),
                 costmap_alpha=getattr(self, "_costmap_alpha", 0.42),
                 costmap_radius_px=getattr(self, "_costmap_radius", 2),
-                costmap_sync_hold_age_sec=costmap_display_hold_age,
+                costmap_sync_hold_age_sec=(
+                    costmap_display_hold_age
+                    if getattr(self, "_perception_costmap_camera_overlay_enabled", True)
+                    else None
+                ),
                 costmap_explanation=costmap_explanation,
                 costmap_minimap=costmap_minimap,
                 costmap_minimap_size_px=getattr(

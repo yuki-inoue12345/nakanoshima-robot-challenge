@@ -416,11 +416,31 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
         )
     )
     params = review["ar_path_viewer"]["ros__parameters"]
-    assert params == {
+    expected_review = {
         "perception_costmap_enabled": True,
         "perception_explanation_enabled": True,
         "perception_minimap_enabled": True,
         "perception_alert_enabled": True,
+        "perception_costmap_camera_overlay_enabled": False,
+        "perception_alert_nearby_lethal_distance_m": 0.30,
+        "perception_alert_confirm_sec": 0.85,
+        "perception_alert_forward_confirm_sec": 1.25,
+        "perception_alert_forward_max_m": 1.50,
+        "perception_alert_forward_half_width_m": 0.30,
+        "perception_alert_forward_min_cost": 85,
+        "perception_alert_forward_min_cells": 3,
+    }
+    assert params == expected_review
+
+    v4l2 = yaml.safe_load(
+        (config_directory /
+         "perception_costmap_v4l2_review_overlay.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert v4l2["ar_path_viewer"]["ros__parameters"] == {
+        **expected_review,
+        "image_input_type": "camera_timestamped",
     }
 
 

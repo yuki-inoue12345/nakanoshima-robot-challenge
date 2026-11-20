@@ -257,3 +257,75 @@ def test_forward_caution_never_claims_person_or_live_danger():
     )
     assert "PERSON" not in alert.label
     assert alert.kind != "nearby"
+
+
+def test_review_forward_caution_rejects_sparse_or_wide_inflation():
+    from ar_path_viewer.costmap_alerts import (
+        CostmapAlertSettings, evaluate_forward_cost_alert,
+    )
+    settings = CostmapAlertSettings(
+        forward_max_m=1.5, forward_half_width_m=0.30,
+        forward_min_cost=85, forward_min_cells=3,
+        nearby_lethal_distance_m=0.30,
+    )
+    # A lone high-cost cell is not evidence for a full-screen warning.
+    points = np.asarray(((1.0, 0.0, 0.0), (1.1, 0.0, 0.0)))
+    alert, reason = evaluate_forward_cost_alert(
+        points, np.asarray((100, 90)), high_cost_min=60,
+        lethal_cost_min=100, settings=settings,
+    )
+    assert alert is None and reason == "no_forward_costmap_evidence"
+    # Wide/weak/too-distant inflation must not trigger the review banner.
+    rejected = np.asarray(((1.0, 0.45, 0.0), (1.0, 0.0, 0.0),
+                           (1.6, 0.0, 0.0), (1.0, 0.0, 0.0)))
+    alert, _ = evaluate_forward_cost_alert(
+        rejected, np.asarray((100, 60, 100, 70)), high_cost_min=60,
+        lethal_cost_min=100, settings=settings,
+    )
+    assert alert is None
+    # Multiple strong cells in the actual forward corridor can still warn.
+    points = np.asarray(((0.95, -0.05, 0.0), (1.0, 0.0, 0.0),
+                         (1.05, 0.05, 0.0)))
+    alert, reason = evaluate_forward_cost_alert(
+        points, np.asarray((85, 100, 90)), high_cost_min=60,
+        lethal_cost_min=100, settings=settings,
+    )
+    assert alert is not None and alert.kind == "forward"
+    assert reason == "costmap_cost_in_forward_corridor"
+
+
+def test_review_caution_requires_longer_confirmation_than_nearby():
+    clock = [0.0]
+    gate = CostmapAlertGate(
+        0.85, clock=lambda: clock[0], confirm_by_kind={"forward": 1.25},
+    )
+    caution = CostmapAlert("FORWARD COSTMAP CAUTION", "forward", "")
+    red = CostmapAlert("COSTMAP ALERT: NEARBY", "nearby", "")
+    assert gate.update(caution) is None
+    clock[0] = 0.9
+    assert gate.update(caution) is None
+    clock[0] = 1.25
+    assert gate.update(caution) == caution
+    gate.clear()
+    clock[0] = 2.0
+    assert gate.update(red) is None
+    clock[0] = 2.85
+    assert gate.update(red) == red
+    # Invalid inputs must never be turned into live danger via the gate.
+    gate.clear()
+    assert gate.update(None) is None
+
+
+def test_review_red_nearby_requires_small_footprint_gap():
+    from ar_path_viewer.costmap_alerts import CostmapAlertSettings
+    settings = CostmapAlertSettings(nearby_lethal_distance_m=0.30)
+    distant, reason = evaluate_robot_proximity_alert(
+        np.asarray(((0.85, 0.0, 0.0),)), np.asarray((100,)),
+        lethal_cost_min=100, settings=settings,
+    )
+    assert distant is None and reason == "no_lethal_cost_near_robot"
+    close, reason = evaluate_robot_proximity_alert(
+        np.asarray(((0.55, 0.0, 0.0),)), np.asarray((100,)),
+        lethal_cost_min=100, settings=settings,
+    )
+    assert close is not None and reason == "lethal_cost_near_robot"
