@@ -653,6 +653,24 @@ def render_frame(
     ):
         _draw_navigation_status(frame, navigation_status)
     if (state == "NAVIGATION HOLD"
+            and navigation_status == "FINAL WP REACHED"):
+        # Follower-confirmed final waypoint threshold only; not route success.
+        cx, cy = frame.shape[1] // 2, frame.shape[0] // 2
+        left, right = max(8, cx - 226), min(frame.shape[1] - 8, cx + 226)
+        top, bottom = max(58, cy - 43), min(frame.shape[0] - 50, cy + 43)
+        layer = frame.copy()
+        cv2.rectangle(layer, (left, top), (right, bottom),
+                      (40, 43, 57), -1)
+        cv2.addWeighted(layer, 0.88, frame, 0.12, 0.0, frame)
+        cv2.rectangle(frame, (left, top), (right, bottom),
+                      (40, 184, 240), 2)
+        cv2.putText(frame, "FINAL WAYPOINT REACHED",
+                    (left + 24, top + 37), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.63, (70, 211, 252), 2, cv2.LINE_AA)
+        cv2.putText(frame, "ROUTE / MAP SWITCH NOT CONFIRMED",
+                    (left + 30, top + 63), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.40, (226, 226, 226), 1, cv2.LINE_AA)
+    if (state == "NAVIGATION HOLD"
             and navigation_status == "ROUTE COMPLETE"):
         # Only an explicit FINISHED message authorizes this panel.
         center_x = frame.shape[1] // 2

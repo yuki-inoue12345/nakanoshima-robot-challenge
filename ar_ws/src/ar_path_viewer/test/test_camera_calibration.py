@@ -445,6 +445,7 @@ def test_perception_costmap_is_opt_in_and_review_overlay_is_scoped():
     assert v4l2["ar_path_viewer"]["ros__parameters"] == {
         **expected_review,
         "image_input_type": "camera_timestamped",
+        "perception_costmap_visual_hold_sec": 0.85,
     }
 
 

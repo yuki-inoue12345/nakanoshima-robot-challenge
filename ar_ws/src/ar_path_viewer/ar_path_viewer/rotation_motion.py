@@ -105,3 +105,60 @@ class RotationMotionGate:
         ):
             return None
         return "ROTATE LEFT" if angle > 0.0 else "ROTATE RIGHT"
+
+
+class OdomRotationMotionGate:
+    """Measured filtered-odometry in-place yaw, never commanded velocity.
+
+    Reset on linear motion, time gaps, invalid values or reversed yaw. A recent
+    continuous sample run is required; no extrapolation from old odometry.
+    """
+
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        self._samples = deque()
+        self._direction = None
+
+    def update(self, linear_m_s, angular_rad_s, stamp_sec):
+        try:
+            v, w, now = (float(linear_m_s), float(angular_rad_s),
+                         float(stamp_sec))
+        except (TypeError, ValueError):
+            self.clear()
+            return None
+        if (not all(math.isfinite(x) for x in (v, w, now))
+                or abs(v) >= 0.08 or abs(w) < 0.20 or abs(w) > 1.6):
+            self.clear()
+            return None
+        if self._samples:
+            prev_t, prev_w = self._samples[-1]
+            if (now <= prev_t or now - prev_t > 0.20
+                    or (w > 0) != (prev_w > 0)):
+                self.clear()
+        self._samples.append((now, w))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= 0.80:
+            self._samples.popleft()
+        elapsed = now - self._samples[0][0]
+        if len(self._samples) < 5 or elapsed < 0.32:
+            return None
+        signed_angle = sum(
+            (t1 - t0) * (w0 + w1) / 2.0
+            for (t0, w0), (t1, w1) in zip(
+                list(self._samples)[:-1], list(self._samples)[1:]
+            )
+        )
+        if abs(signed_angle) < math.radians(9.0):
+            return None
+        self._direction = 'ROTATE LEFT' if w > 0 else 'ROTATE RIGHT'
+        return self._direction
+
+    def direction(self, now_sec):
+        if not self._samples:
+            return None
+        age = float(now_sec) - self._samples[-1][0]
+        if not math.isfinite(age) or age < -0.05 or age > 0.22:
+            self.clear()
+            return None
+        return self._direction

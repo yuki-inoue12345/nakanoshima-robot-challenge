@@ -12,6 +12,9 @@ ar_path_viewer:
     # Historical top-down snapshots are labelled, never live alerts.
     perception_minimap_visual_hold_sec: 1.5
     rotation_guidance_enabled: true
+    # Display-only LAST SYNC hold, always visibly dimmed and age-labelled.
+    # Fresh Costmap alerts still require exact timestamps; no safety relaxation.
+    perception_costmap_visual_hold_sec: 0.85
     perception_minimap_enabled: true
     perception_explanation_enabled: true
     perception_alert_enabled: true

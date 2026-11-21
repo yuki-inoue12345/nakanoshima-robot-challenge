@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import OccupancyGrid, Path as PathMessage
+from nav_msgs.msg import OccupancyGrid, Odometry, Path as PathMessage
+from rcl_interfaces.msg import Log
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -76,7 +77,7 @@ from .localization_monitor import (
     amcl_message_to_observation,
 )
 from .offscreen_guidance import GuidanceSettings, OffscreenGuidance
-from .rotation_motion import RotationMotionGate
+from .rotation_motion import OdomRotationMotionGate, RotationMotionGate
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
 from .perception_frame_delay import PerceptionFrameDelay
@@ -233,6 +234,9 @@ class ArPathViewerNode(Node):
             "guidance_require_follower_state": True,
             "guidance_direction_hold_sec": 0.35,
             "rotation_guidance_enabled": False,
+            "rotation_odom_topic": "/odom/filtered",
+            "rotation_odom_frame": "robot/odom",
+            "final_waypoint_follower_node_name": "koko_waypoint_follower",
             "path_change_hold_sec": 0.35,
             "path_change_max_displacement_m": 0.60,
             "path_change_max_heading_deg": 35.0,
@@ -596,6 +600,10 @@ class ArPathViewerNode(Node):
             self._costmap_explanation_settings = CostmapExplanationSettings()
 
         self._rotation_motion_gate = RotationMotionGate()
+        self._odom_rotation_gate = OdomRotationMotionGate()
+        self._last_reported_rotation = None
+        self._last_verified_final_goal = None
+        self._final_waypoint_success = None
         self._costmap_ready_history = (
             CostmapReadyHistory()
             if self._perception_costmap_enabled and
@@ -866,6 +874,15 @@ class ArPathViewerNode(Node):
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        # Both subscriptions are read-only. Follower /rosout is evidence
+        # of the Follower's own arrival threshold, NOT route completion.
+        self._odom_rotation_subscription = self.create_subscription(
+            Odometry, self._str('rotation_odom_topic'),
+            self._on_rotation_odom, 10,
+        )
+        self._follower_log_subscription = self.create_subscription(
+            Log, '/rosout', self._on_follower_log, 100,
         )
         self._reference_follower_subscription = None
         if self._reference_enabled or self._waypoint_distance_enabled:
@@ -1345,6 +1362,55 @@ class ArPathViewerNode(Node):
                 alert_gate.clear()
         self._diagnostics.costmap_update(accepted and queued, detail)
 
+    def _on_rotation_odom(self, message: Odometry) -> None:
+        # Filtered odometry reports measured motion, never motor commands.
+        now = self._ros_now_sec()
+        stamp = (float(message.header.stamp.sec)
+                 + float(message.header.stamp.nanosec) * 1e-9)
+        if (stamp <= 0.0 or abs(now - stamp) > 0.75
+                or str(message.header.frame_id)
+                != self._str('rotation_odom_frame')):
+            self._odom_rotation_gate.clear()
+            return
+        direction = self._odom_rotation_gate.update(
+            message.twist.twist.linear.x,
+            message.twist.twist.angular.z,
+            now,
+        )
+        if direction != self._last_reported_rotation:
+            self._last_reported_rotation = direction
+            if direction is not None:
+                self._log_info(
+                    f'measured_in_place_rotation direction={direction!r}'
+                )
+
+    def _on_follower_log(self, message: Log) -> None:
+        """Only the real Follower threshold event can confirm final arrival."""
+        verified = getattr(self, '_last_verified_final_goal', None)
+        if verified is None:
+            return
+        now = self._ros_now_sec()
+        _route, _generation, wp_number, wp_count, verified_at = verified
+        if not 0.0 <= now - verified_at <= 7.0:
+            return
+        stamp = (float(message.stamp.sec)
+                 + float(message.stamp.nanosec) * 1e-9)
+        from .final_waypoint_log import verified_final_arrival
+        distance = verified_final_arrival(
+            message.name, message.msg, now - stamp,
+            wp_number, wp_count,
+            expected_node_name=self._str('final_waypoint_follower_node_name'),
+        )
+        if distance is None:
+            return
+        if getattr(self, '_final_waypoint_success', None) is not None:
+            return
+        self._final_waypoint_success = (now, wp_number)
+        self._log_info(
+            f'final_waypoint_threshold_verified waypoint={wp_number} '
+            f'distance_m={distance:.2f} route_complete_claim=false'
+        )
+
     def _on_reference_follower_state(
         self, message: WaypointFollowerState
     ) -> None:
@@ -1353,6 +1419,20 @@ class ArPathViewerNode(Node):
         progress_accepted = self._waypoint_progress_gate.update(
             message, self._ros_now_sec(), path_generation
         )
+        if progress_accepted:
+            if (str(message.navigation_mode) == 'to_pose'
+                    and int(message.next_waypoint_index)
+                    == int(message.waypoint_count) - 1):
+                self._last_verified_final_goal = (
+                    str(message.route_sha256),
+                    int(message.goal_generation),
+                    int(message.next_waypoint_number),
+                    int(message.waypoint_count),
+                    self._ros_now_sec(),
+                )
+            else:
+                self._last_verified_final_goal = None
+                self._final_waypoint_success = None
         if self._reference_enabled:
             accepted = self._reference_gate.update_follower(
                 message, self._ros_now_sec()
@@ -1935,6 +2015,19 @@ class ArPathViewerNode(Node):
                 )
                 if rotation_gate is not None else None
             )
+            # Independent real-odometry evidence remains available when TF
+            # heading is too sparsely sampled to pass the TF-only gate.
+            # All existing follower, stable-localization and Path authorization
+            # requirements still apply before an orange cue is rendered.
+            if (getattr(self, "_rotation_guidance_enabled", False)
+                    and tf_available and localization is not None
+                    and localization.stable):
+                odom_gate = getattr(self, "_odom_rotation_gate", None)
+                if odom_gate is not None:
+                    rotation_direction = (
+                        odom_gate.direction(self._ros_now_sec())
+                        or rotation_direction
+                    )
 
             if state == "ACTIVE" and snapshot is not None:
                 if (
@@ -2085,7 +2178,6 @@ class ArPathViewerNode(Node):
                         if (
                             state in ("ACTIVE", "PATH OUT OF VIEW")
                             and rotation_direction is not None
-                            and progress is not None
                             and self._waypoint_progress_gate
                             .authorizes_plan(
                                 self._ros_now_sec(), snapshot.generation
@@ -2095,8 +2187,10 @@ class ArPathViewerNode(Node):
                                 rotation_direction,
                                 70.0 if rotation_direction ==
                                 "ROTATE LEFT" else -70.0,
-                                progress.remaining_path_m,
-                                progress.endpoint_distance_m,
+                                (progress.remaining_path_m
+                                 if progress is not None else 0.0),
+                                (progress.endpoint_distance_m
+                                 if progress is not None else 0.0),
                             )
                         if (
                             state in ("ACTIVE", "PATH OUT OF VIEW")
@@ -2914,6 +3008,23 @@ class ArPathViewerNode(Node):
                 segments = []
                 reference_segments = []
                 guidance = None
+            final_success = getattr(self, "_final_waypoint_success", None)
+            if final_success is not None:
+                success_age = self._ros_now_sec() - final_success[0]
+                if not 0.0 <= success_age <= 20.0:
+                    self._final_waypoint_success = None
+                elif (navigation_status != "ROUTE COMPLETE"
+                      and state not in ("ACTIVE", "PATH OUT OF VIEW")):
+                    # The Follower's arrival threshold is not evidence
+                    # that the next map or the entire route was completed.
+                    state = "NAVIGATION HOLD"
+                    detail = "follower_final_threshold_reached; route_unconfirmed"
+                    navigation_status = "FINAL WP REACHED"
+                    waypoint_status = ""
+                    final_waypoint_status = ""
+                    segments = []
+                    reference_segments = []
+                    guidance = None
             minimap_status = ""
             if robot_view_enabled and robot_view_expanded:
                 costmap_minimap, minimap_status = (

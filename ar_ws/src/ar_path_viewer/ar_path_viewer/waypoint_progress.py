@@ -210,16 +210,18 @@ class WaypointProgressGate:
         if valid_plan is None or view is None:
             return None
         if view.navigation_mode != "to_pose":
-            return "NEXT WP: -- | FINAL WP: -- (MULTI-GOAL PLAN)"
+            return (f"NEXT WP: -- | FINAL WP (last of {view.waypoint_count}): -- "
+                    "(MULTI-GOAL)")
         # This is a real Nav2 /plan-to-the-next-goal distance, not a
         # straight-line chord or fabricated route to the final destination.
         distance = valid_plan.split(": ", 1)[1]
         if view.next_index != view.waypoint_count - 1:
-            return f"NEXT WP #{view.next_number}: {distance} | FINAL WP: --"
+            return (f"NEXT WP #{view.next_number}: {distance} | "
+                    f"FINAL WP (last of {view.waypoint_count}): --")
         # Only at the final verified to_pose goal do these distances coincide.
         return (
             f"NEXT WP #{view.next_number}: {distance} | "
-            f"FINAL WP: {distance}"
+            f"FINAL WP #{view.next_number}: {distance}"
         )
 
     def authorizes_plan(self, now_ros_sec: float, path_generation: int) -> bool:

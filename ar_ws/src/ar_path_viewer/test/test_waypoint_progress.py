@@ -136,12 +136,12 @@ def test_final_waypoint_distance_only_at_verified_final_to_pose():
     gate = WaypointProgressGate()
     gate.update(follower_state(index=18, number=19), 100.0, 3)
     assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
-        'NEXT WP #19: 2.4 m | FINAL WP: --'
+        'NEXT WP #19: 2.4 m | FINAL WP (last of 20): --'
     )
     gate.update(follower_state(index=19, number=20, generation=5,
                                stamp=100.2), 100.2, 4)
     assert gate.destination_status(100.3, 5, 2.4, 0.1, 1.0) == (
-        'NEXT WP #20: 2.4 m | FINAL WP: 2.4 m'
+        'NEXT WP #20: 2.4 m | FINAL WP #20: 2.4 m'
     )
     assert gate.destination_status(100.3, 4, 2.4, 0.1, 1.0) is None
 
@@ -159,3 +159,16 @@ def test_stopped_cannot_be_reported_as_route_complete():
     msg = follower_state(index=19, activity=8, allowed=False)
     assert not gate.update(msg, 100.0, 5)
     assert gate.navigation_hold_status(100.1) == 'STOPPED'
+
+
+def test_nonsequential_waypoint_numbers_keep_true_final_identity():
+    gate = WaypointProgressGate()
+    gate.update(follower_state(index=18, number=45), 100.0, 3)
+    assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
+        'NEXT WP #45: 2.4 m | FINAL WP (last of 20): --'
+    )
+    gate.update(follower_state(index=19, number=90, generation=5,
+                               stamp=100.2), 100.2, 4)
+    assert gate.destination_status(100.3, 5, 0.8, 0.1, 1.0) == (
+        'NEXT WP #90: 80 cm | FINAL WP #90: 80 cm'
+    )
