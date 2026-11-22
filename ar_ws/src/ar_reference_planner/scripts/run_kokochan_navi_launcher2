@@ -37,6 +37,11 @@ if [[ -n "${comparison_fps}" && "${comparison_fps}" != "20" && "${comparison_fps
     notify_failure "KOKO_NAVI_FPS must be 20 or 30 (received: ${comparison_fps})"
     exit 2
 fi
+shared_camera="${KOKO_NAVI_SHARED_CAMERA:-0}"
+if [[ "${shared_camera}" != "0" && "${shared_camera}" != "1" ]]; then
+    notify_failure "KOKO_NAVI_SHARED_CAMERA must be 0 or 1"
+    exit 2
+fi
 camera_device="${KOKO_NAVI_CAMERA_DEVICE:-}"
 if [[ -z "${camera_device}" ]]; then
     for candidate in /dev/v4l/by-id/*C920*video-index0; do
@@ -102,7 +107,13 @@ for node in /ar_path_viewer /legacy_follower_reference_bridge /reference_planner
     fi
 done
 
-if [[ -n "${camera_device}" && -e "${camera_device}" ]] && command -v fuser >/dev/null 2>&1; then
+if [[ "${shared_camera}" == "1" ]]; then
+    if ! grep -Fxq "/koko_v8_camera_source" <<<"${running_nodes}"; then
+        notify_failure "Shared camera owner is not running; AR will not open C920"
+        exit 4
+    fi
+fi
+if [[ "${shared_camera}" != "1" && -n "${camera_device}" && -e "${camera_device}" ]] && command -v fuser >/dev/null 2>&1; then
     camera_users="$(fuser "${camera_device}" 2>/dev/null || true)"
     if [[ -n "${camera_users//[[:space:]]/}" ]]; then
         notify_failure "C920 is already in use; not taking it from another process."
@@ -124,14 +135,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ "${shared_camera}" == "1" ]]; then
+    camera_input_uri="/koko/c920/raw_image"
+else
+    camera_input_uri="${camera_device}"
+fi
 cat >"${runtime_overlay}" <<EOF
 ar_path_viewer:
   ros__parameters:
-    image_input_uri: "${camera_device}"
+    image_input_uri: "${camera_input_uri}"
     output_video: "${session_base}.mp4"
     log_output: "${session_base}.log"
 EOF
-if [[ -n "${comparison_fps}" ]]; then
+if [[ "${shared_camera}" == "1" ]]; then
+    # Unique keys: do not append a second image_input_uri YAML entry.
+    cat >>"${runtime_overlay}" <<EOF
+    image_input_type: ros_image
+    fps: ${comparison_fps:-30}.0
+EOF
+elif [[ -n "${comparison_fps}" ]]; then
     cat >>"${runtime_overlay}" <<EOF
     image_input_type: camera_timestamped
     fps: ${comparison_fps}.0

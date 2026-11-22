@@ -69,6 +69,7 @@ from .display_window import (
 from .image_source import SimulationSource, make_image_source
 from .guidance_stability import GuidanceStabilityGate
 from .latest_image_source import LatestImageSource
+from .ros_image_source import RosLatestImageSource
 from .log_gui import LogGui
 from .localization_monitor import (
     LocalizationMonitor,
@@ -643,11 +644,17 @@ class ArPathViewerNode(Node):
 
         try:
             self._image_input_kind = self._str("image_input_type").strip().lower()
-            self._image_source = make_image_source(
-                self._image_input_kind, self._str("image_input_uri"),
-                self._intrinsics.width, self._intrinsics.height,
-                fps=self._float("fps"),
-            )
+            if self._image_input_kind == "ros_image":
+                self._image_source = RosLatestImageSource(
+                    self, self._str("image_input_uri"),
+                    self._intrinsics.width, self._intrinsics.height,
+                )
+            else:
+                self._image_source = make_image_source(
+                    self._image_input_kind, self._str("image_input_uri"),
+                    self._intrinsics.width, self._intrinsics.height,
+                    fps=self._float("fps"),
+                )
             if self._image_input_kind == "camera_timestamped":
                 self._image_source = LatestImageSource(self._image_source)
         except OSError as exc:
@@ -1742,7 +1749,13 @@ class ArPathViewerNode(Node):
             ros_finished_sec=capture_finished_ros,
             monotonic_started_sec=capture_started_monotonic,
             monotonic_finished_sec=capture_finished_monotonic,
-            source_kind=getattr(self, "_image_input_kind", "simulation"),
+            source_kind=(
+                "camera_timestamped"
+                if getattr(self, "_image_input_kind", "") == "ros_image"
+                and getattr(self._image_source, "frame_timestamp_kind", "")
+                == "v4l2_monotonic_soe"
+                else getattr(self, "_image_input_kind", "simulation")
+            ),
             settings=getattr(
                 self,
                 "_costmap_camera_sync_settings",
