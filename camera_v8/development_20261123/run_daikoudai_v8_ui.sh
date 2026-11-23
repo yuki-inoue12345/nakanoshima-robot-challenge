@@ -16,13 +16,20 @@ if [[ -r "$HOME/robotbase_ws_renya/install/setup.bash" ]]; then
   source "$HOME/robotbase_ws_renya/install/setup.bash"
   set -u
 fi
+
+# V8 standalone photo-owner needs the installed AR camera-source Python package.
+if [[ -r "$REPO/ar_ws/install/setup.bash" ]]; then
+  set +u
+  source "$REPO/ar_ws/install/setup.bash"
+  set -u
+fi
 PYTHON_BIN="${V8_PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
-  for p in "$HOME/venvs/person_search/bin/python" "$V7/venv/bin/python" "$V7/.venv/bin/python"; do
+  for p in "$HOME/venvs/person_search/bin/python" "$HOME/camera_project/venv/bin/python" "$V7/venv/bin/python" "$V7/.venv/bin/python"; do
     if [[ -x "$p" ]]; then PYTHON_BIN="$p"; break; fi
   done
 fi
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 [[ -f "$V7/person_search_vlm_milestone2_v7.py" ]] || { echo 'V7 algorithm missing' >&2; exit 2; }
 cd "$HERE"
-exec "$PYTHON_BIN" "$HERE/daikoudai_v8.py"
+exec "$PYTHON_BIN" "$HERE/ui_v7_compat.py"
