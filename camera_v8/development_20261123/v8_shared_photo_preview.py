@@ -15,6 +15,7 @@ import time
 import cv2
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
@@ -144,7 +145,8 @@ def main():
                     break
                 if k in (ord('c'), ord('C'), 32):
                     node.capture_by_key()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # Normal ROS shutdown initiated by the V8 UI.
         pass
     finally:
         cv2.destroyAllWindows()
