@@ -643,8 +643,13 @@ def render_frame(
             _draw_direction_panel(frame, guidance, guidance_color_bgr)
     elif state == "PATH OUT OF VIEW" and guidance is not None:
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
-    if (observed_rotation_status in ('ROTATE LEFT', 'ROTATE RIGHT')
-            and state in ('ACTIVE', 'PATH OUT OF VIEW', 'REPLANNING')):
+    if (
+        observed_rotation_status in ('ROTATE LEFT', 'ROTATE RIGHT')
+        and state in (
+            'ACTIVE', 'PATH OUT OF VIEW', 'REPLANNING',
+            'NAVIGATION HOLD',
+        )
+    ):
         # Independent observation of physical yaw, NOT a route proposal.
         # Remains visible while a genuine Goal switch temporarily hides /plan.
         _draw_direction_panel(
@@ -656,13 +661,10 @@ def render_frame(
             ),
             guidance_color_bgr,
         )
-    if waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
-        _draw_bottom_badge(frame, waypoint_status, (230, 230, 230))
-        if final_waypoint_status:
-            _draw_bottom_badge(
-                frame, final_waypoint_status, (230, 230, 230),
-                offset_y=29,
-            )
+    if final_waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
+        _draw_bottom_badge(
+            frame, final_waypoint_status, (230, 230, 230),
+        )
     if navigation_status and state in (
         "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
     ):

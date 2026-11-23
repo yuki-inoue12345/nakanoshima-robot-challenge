@@ -44,3 +44,19 @@ def test_missing_and_out_of_order_odom_fail_closed():
     # Skip a missing 1 second interval rather than invent its path.
     m.observe(10, 0, 2.2)
     assert abs(m._total - 0.05) < 1e-6
+
+
+def test_route_updating_continues_measuring_actual_odom():
+    meter = OdomTravelDistanceMeter()
+    meter.set_follower('c' * 64, 30, 1)
+    for i in range(5):
+        meter.observe(0.03 * i, 0.0, 1.0 + i * 0.1)
+    meter.set_follower('c' * 64, 30, 2)
+    for i in range(5, 11):
+        meter.observe(0.03 * i, 0.0, 1.0 + i * 0.1)
+    meter.set_follower('c' * 64, 30, 1)
+    meter.observe(0.33, 0.0, 2.1)
+    assert abs(meter.total_m() - 0.33) < 1e-9
+    meter.set_follower('c' * 64, 30, 8)
+    meter.observe(0.36, 0.0, 2.2)
+    assert abs(meter.total_m() - 0.33) < 1e-9

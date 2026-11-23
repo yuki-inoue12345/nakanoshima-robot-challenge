@@ -308,3 +308,32 @@ def test_invalid_geometry_is_rejected():
         world_to_optical(np.array(((math.nan, 0.0, 0.0),)), (0, 0, 0), LEVEL_MOUNT)
     with np.testing.assert_raises(ValueError):
         CameraIntrinsics(fx=0.0).validate()
+
+
+def test_vectorized_clipping_matches_individual_segments():
+    from ar_path_viewer.projection import (
+        _clip_segment_parameters, _clip_segment_parameters_batch,
+        _frustum_planes,
+    )
+    rng = np.random.default_rng(20261123)
+    points = rng.uniform(-8.0, 8.0, (300, 3))
+    start = points[:-1]
+    directions = np.diff(points, axis=0)
+    planes = _frustum_planes(INTRINSICS, 0.1)
+    enter, leave, valid = _clip_segment_parameters_batch(
+        start, directions, planes
+    )
+    for i, (a, b) in enumerate(zip(points[:-1], points[1:])):
+        reference = _clip_segment_parameters(a, b, planes)
+        assert bool(valid[i]) == (reference is not None)
+        if reference is not None:
+            assert np.allclose((enter[i], leave[i]), reference, atol=1e-10)
+
+
+def test_vectorized_long_path_keeps_every_original_segment():
+    t = np.linspace(0.0, 8.0, 600)
+    path = np.column_stack((t + 2.0, np.sin(t), np.zeros_like(t)))
+    projected = project_path(path, (0, 0, 0), CameraMount(), INTRINSICS)
+    assert projected.stats.transformed_points == len(path)
+    assert projected.stats.input_segments == len(path) - 1
+    assert projected.stats.drawable_segments == len(projected.segments)

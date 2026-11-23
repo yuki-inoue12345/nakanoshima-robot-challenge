@@ -305,6 +305,34 @@ def _clip_segment_parameters(
     return enter, leave
 
 
+def _clip_segment_parameters_batch(
+    starts: np.ndarray,
+    directions: np.ndarray,
+    planes: Sequence[Tuple[np.ndarray, float]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized equivalent of _clip_segment_parameters (same half spaces)."""
+    count = len(starts)
+    enter = np.zeros(count, dtype=np.float64)
+    leave = np.ones(count, dtype=np.float64)
+    valid = np.ones(count, dtype=bool)
+    for normal, offset in planes:
+        f0 = starts @ normal + offset
+        fd = directions @ normal
+        parallel = np.abs(fd) < 1e-12
+        valid &= ~(parallel & (f0 < 0.0))
+        crossing = np.divide(
+            -f0, fd, out=np.zeros_like(f0), where=~parallel
+        )
+        enter = np.where(
+            fd >= 1e-12, np.maximum(enter, crossing), enter
+        )
+        leave = np.where(
+            fd <= -1e-12, np.minimum(leave, crossing), leave
+        )
+        valid &= enter <= leave
+    return enter, leave, valid
+
+
 def project_path(
     points_world: np.ndarray,
     robot_xy_yaw: Sequence[float],
@@ -332,45 +360,57 @@ def project_path(
     below = front & (optical[:, 1] > ymax * depth)
     inside = front & ~(left | right | above | below)
 
-    result: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
-    camera_forward_path_length_m = 0.0
-    visible_path_length_m = 0.0
-    visible_depths: List[float] = []
+    # Compute every original Path segment, but clip the whole array at once.
+    # This preserves Nav2's actual XY polyline, including curves/keepout turns.
+    starts = optical[:-1]
+    directions = np.diff(optical, axis=0)
+    segment_lengths = np.linalg.norm(directions, axis=1)
     forward_plane = ((np.array((0.0, 0.0, 1.0)), 0.0),)
-    frustum_planes = _frustum_planes(intrinsics, near)
-    for index in range(max(0, len(optical) - 1)):
-        segment_length_m = float(np.linalg.norm(optical[index + 1] - optical[index]))
-        forward_parameters = _clip_segment_parameters(
-            optical[index], optical[index + 1], forward_plane
+    forward_enter, forward_leave, forward_valid = (
+        _clip_segment_parameters_batch(starts, directions, forward_plane)
+    )
+    camera_forward_path_length_m = float(np.sum(
+        segment_lengths[forward_valid]
+        * (forward_leave[forward_valid] - forward_enter[forward_valid])
+    ))
+    enter, leave, valid = _clip_segment_parameters_batch(
+        starts, directions, _frustum_planes(intrinsics, near)
+    )
+    indices = np.flatnonzero(valid)
+    visible_path_length_m = float(np.sum(
+        segment_lengths[indices] * (leave[indices] - enter[indices])
+    ))
+    result: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+    visible_depths: List[float] = []
+    if len(indices):
+        selected_starts = starts[indices]
+        selected_directions = directions[indices]
+        clipped_start = (
+            selected_starts + enter[indices, None] * selected_directions
         )
-        if forward_parameters is not None:
-            camera_forward_path_length_m += (
-                segment_length_m * (forward_parameters[1] - forward_parameters[0])
-            )
-        visible_parameters = _clip_segment_parameters(
-            optical[index], optical[index + 1], frustum_planes
+        clipped_end = (
+            selected_starts + leave[indices, None] * selected_directions
         )
-        if visible_parameters is None:
-            continue
-        enter, leave = visible_parameters
-        direction = optical[index + 1] - optical[index]
-        clipped = (
-            optical[index] + enter * direction,
-            optical[index] + leave * direction,
-        )
-        visible_path_length_m += segment_length_m * (leave - enter)
-        visible_depths.extend((float(clipped[0][2]), float(clipped[1][2])))
-        pixels = []
-        for point in clipped:
-            u = intrinsics.fx * point[0] / point[2] + intrinsics.cx
-            v = intrinsics.fy * point[1] / point[2] + intrinsics.cy
-            pixels.append(
-                (
-                    int(np.clip(np.rint(u), 0, intrinsics.width - 1)),
-                    int(np.clip(np.rint(v), 0, intrinsics.height - 1)),
-                )
-            )
-        result.append((pixels[0], pixels[1]))
+        visible_depths = np.column_stack((
+            clipped_start[:, 2], clipped_end[:, 2]
+        )).ravel().tolist()
+
+        def pixels_for(points):
+            u = (intrinsics.fx * points[:, 0] / points[:, 2]
+                 + intrinsics.cx)
+            v = (intrinsics.fy * points[:, 1] / points[:, 2]
+                 + intrinsics.cy)
+            return np.column_stack((
+                np.clip(np.rint(u), 0, intrinsics.width - 1).astype(int),
+                np.clip(np.rint(v), 0, intrinsics.height - 1).astype(int),
+            ))
+
+        first_pixels = pixels_for(clipped_start)
+        last_pixels = pixels_for(clipped_end)
+        result = [
+            ((int(a[0]), int(a[1])), (int(b[0]), int(b[1])))
+            for a, b in zip(first_pixels, last_pixels)
+        ]
 
     point_count = len(optical)
     front_count = int(np.count_nonzero(front))

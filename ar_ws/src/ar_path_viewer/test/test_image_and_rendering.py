@@ -306,13 +306,13 @@ def test_active_route_keeps_green_line_and_adds_direction_and_distance_badges():
         route,
         "ACTIVE",
         guidance=OffscreenGuidance("RIGHT", -22.0, 2.4, 2.0),
-        waypoint_status="PLAN LEFT: 2.4 m",
+        final_waypoint_status="NEXT WP #19: 2.4 m",
     )
 
     # Existing projected line remains green and unchanged away from the badges.
     assert np.array_equal(frame[292:304, 300:340], baseline[292:304, 300:340])
     assert np.count_nonzero(frame[:, :, 1] > 180) > 100
-    # The distance remains at the bottom; direction is moved above the floor.
+    # NEXT WP remains at the bottom; PLAN LEFT is no longer displayed.
     assert not np.array_equal(frame[430:475, :310], baseline[430:475, :310])
     assert not np.array_equal(frame[48:130, 400:], baseline[48:130, 400:])
 
@@ -901,3 +901,13 @@ def test_fullscreen_api_failure_keeps_normal_window_running():
     assert window.show_and_poll(frame) == -1
     assert not window.fullscreen
     assert window.show_and_poll(frame) == ord("q")
+
+
+def test_measured_rotate_is_visible_during_goal_update_hold():
+    image = np.zeros((480, 640, 3), np.uint8)
+    base = render_frame(image, [], 'NAVIGATION HOLD',
+                        navigation_status='UPDATING ROUTE')
+    rotated = render_frame(image, [], 'NAVIGATION HOLD',
+                           navigation_status='UPDATING ROUTE',
+                           observed_rotation_status='ROTATE RIGHT')
+    assert not np.array_equal(rotated[48:130, 400:], base[48:130, 400:])

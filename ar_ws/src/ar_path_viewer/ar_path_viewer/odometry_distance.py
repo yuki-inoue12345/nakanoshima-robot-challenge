@@ -37,9 +37,10 @@ class OdomTravelDistanceMeter:
                 self._last = None
             was_active = self._active
             self._follower_seen_monotonic = time.monotonic()
-            # 2: goal/route updating. It is not counted as motor travel until
-            # normal activity 1 resumes; do not bridge over that time gap.
-            self._active = activity == 1
+            # Both 1 (NAVIGATING) and 2 (UPDATING ROUTE) can include actual
+            # robot motion. Count ONLY adjacent measured odom positions for
+            # the same verified route. Other activities remain excluded.
+            self._active = activity in (1, 2)
             if not self._active or not was_active:
                 self._last = None
 

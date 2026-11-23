@@ -2118,16 +2118,15 @@ class ArPathViewerNode(Node):
                         or rotation_direction
                     )
 
-            # A measured turn is an observation, not a proposed Path.
-            # Do not require a newly replanned /plan for the observed indicator.
-            observed_rotation_status = ''
-            follower_view = getattr(
-                self._waypoint_progress_gate, 'current_view', None
+            # A *measured* /odom/filtered turn does not depend on Follower
+            # goal/index or AMCL map localization. Never infer planned turns.
+            # OdomRotationMotionGate already enforces source frame, velocity,
+            # direction consistency and a fresh (<0.22 s) measurement.
+            odom_gate = getattr(self, '_odom_rotation_gate', None)
+            observed_rotation_status = (
+                '' if odom_gate is None
+                else (odom_gate.direction(self._ros_now_sec()) or '')
             )
-            if (rotation_direction is not None and follower_view is not None
-                    and 0.0 <= self._ros_now_sec() - follower_view.stamp_sec
-                    <= getattr(self._waypoint_progress_gate, 'timeout_sec', 2.5)):
-                observed_rotation_status = rotation_direction
 
             if state == "ACTIVE" and snapshot is not None:
                 if (
@@ -2658,11 +2657,14 @@ class ArPathViewerNode(Node):
                                         self._intrinsics,
                                         self._near,
                                     )
-                                costmap_reason = (
-                                    "visible"
-                                    if costmap_projection.visible_points > 0
-                                    else "out_of_view"
-                                )
+                                if costmap_projection is None:
+                                    costmap_reason = "camera_costmap_overlay_disabled"
+                                else:
+                                    costmap_reason = (
+                                        "visible"
+                                        if costmap_projection.visible_points > 0
+                                        else "out_of_view"
+                                    )
                                 costmap_reason += (
                                     " camera_time_aligned "
                                     f"age={camera_sync.costmap_age_sec:.3f}s "
