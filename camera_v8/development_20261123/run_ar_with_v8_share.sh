@@ -39,7 +39,16 @@ if ros2 node list 2>/dev/null | grep -Fxq /koko_v8_camera_source; then
     echo "C920 camera owner node is already running; refusing duplicate." >&2
     exit 3
 fi
-python3 -u "$HERE/v8_camera_source.py" --device "$DEVICE" --fps "$KOKO_NAVI_FPS" \
+CAMERA_PYTHON="${V8_PYTHON:-python3}"
+if ! command -v "$CAMERA_PYTHON" >/dev/null 2>&1; then
+    echo "Camera V8 Python not available: $CAMERA_PYTHON" >&2
+    exit 2
+fi
+if ! "$CAMERA_PYTHON" -c 'import cv2, numpy, rclpy; from ar_path_viewer.latest_image_source import LatestImageSource' >/dev/null 2>&1; then
+    echo "Camera V8 Python dependencies unavailable" >&2
+    exit 2
+fi
+"$CAMERA_PYTHON" -u "$HERE/v8_camera_source.py" --device "$DEVICE" --fps "$KOKO_NAVI_FPS" \
     >"$OWNER_LOG" 2>&1 &
 OWNER_PID=$!
 cleanup() {
