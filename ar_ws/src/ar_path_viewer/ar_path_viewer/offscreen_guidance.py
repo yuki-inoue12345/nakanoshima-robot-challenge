@@ -71,32 +71,53 @@ class GuidanceDecision:
 
 
 def _closest_path_anchor(points_xy: np.ndarray) -> tuple[int, float, np.ndarray, float]:
-    best = None
-    for index, (start, end) in enumerate(zip(points_xy[:-1], points_xy[1:])):
-        delta = end - start
-        squared_length = float(np.dot(delta, delta))
-        fraction = 0.0
-        if squared_length > 1e-12:
-            fraction = float(np.clip(-np.dot(start, delta) / squared_length, 0.0, 1.0))
-        point = start + fraction * delta
-        distance = float(np.linalg.norm(point))
-        candidate = (distance, index, fraction, point)
-        if best is None or candidate[0] < best[0]:
-            best = candidate
-    if best is None:
-        raise ValueError("guidance requires at least one non-empty Path segment")
-    distance, index, fraction, point = best
-    return index, fraction, point, distance
+    """Same first-minimum closest segment as the original; batched in NumPy.
+
+    The received Path is not simplified, reordered, or altered.  Exact tie
+    resolution remains first-segment-wins (np.argmin).
+    """
+    if len(points_xy) < 2:
+        raise ValueError(
+            "guidance requires at least one non-empty Path segment"
+        )
+    starts = points_xy[:-1]
+    deltas = np.diff(points_xy, axis=0)
+    squared_lengths = np.einsum('ij,ij->i', deltas, deltas)
+    numerators = -np.einsum('ij,ij->i', starts, deltas)
+    fractions = np.divide(
+        numerators, squared_lengths,
+        out=np.zeros_like(numerators), where=squared_lengths > 1e-12,
+    )
+    np.clip(fractions, 0.0, 1.0, out=fractions)
+    closest = starts + fractions[:, None] * deltas
+    distances = np.linalg.norm(closest, axis=1)
+    index = int(np.argmin(distances))
+    return (
+        index, float(fractions[index]),
+        closest[index].copy(), float(distances[index]),
+    )
 
 
 def _remaining_polyline(
     points_xy: np.ndarray, index: int, anchor: np.ndarray
 ) -> np.ndarray:
-    candidates = [anchor]
-    candidates.extend(points_xy[index + 1:])
-    filtered = [np.asarray(candidates[0], dtype=float)]
+    """Zero-copy-friendly fast path, with legacy near-duplicate semantics.
+
+    The original compares each point against the *last accepted* point, not
+    merely the preceding point.  Keep that exact behavior for sub-nanometer
+    repeated/near-repeated points; ordinary ROS Path points take the fast path.
+    """
+    candidates = np.concatenate((
+        np.asarray(anchor, dtype=float).reshape(1, 2),
+        np.asarray(points_xy[index + 1:], dtype=float),
+    ))
+    if len(candidates) <= 1:
+        return candidates
+    consecutive_distances = np.linalg.norm(np.diff(candidates, axis=0), axis=1)
+    if bool(np.all(consecutive_distances > 1e-9)):
+        return candidates
+    filtered = [candidates[0]]
     for point in candidates[1:]:
-        point = np.asarray(point, dtype=float)
         if np.linalg.norm(point - filtered[-1]) > 1e-9:
             filtered.append(point)
     return np.asarray(filtered)

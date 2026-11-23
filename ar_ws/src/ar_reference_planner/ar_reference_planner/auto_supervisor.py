@@ -15,6 +15,8 @@ import signal
 import subprocess
 from time import monotonic
 
+from lifecycle_msgs.msg import State
+from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import Path
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
@@ -138,6 +140,9 @@ class ReferencePlannerAutoSupervisor(Node):
             'follower_node_name': '/koko_waypoint_follower',
             'follower_state_topic': '/waypoint_follower/reference_state',
             'follower_state_timeout_sec': 2.5,
+            # Process-only grace, never extends path/heartbeat validity.
+            'follower_process_grace_sec': 5.0,
+            'planner_activation_timeout_sec': 20.0,
             'reference_path_topic': '/ar/reference_path',
             'reference_path_state_topic': '/ar/reference_path_state',
             'reference_namespace': 'ar_reference',
@@ -154,6 +159,12 @@ class ReferencePlannerAutoSupervisor(Node):
 
         self._follower_timeout = self._positive_parameter(
             'follower_state_timeout_sec'
+        )
+        self._follower_process_grace = self._positive_parameter(
+            'follower_process_grace_sec'
+        )
+        self._planner_activation_timeout = self._positive_parameter(
+            'planner_activation_timeout_sec'
         )
         poll_period = self._positive_parameter('poll_period_sec')
         self._parameter_retry = self._positive_parameter('parameter_retry_sec')
@@ -187,6 +198,12 @@ class ReferencePlannerAutoSupervisor(Node):
             GetParameters,
             self._follower_node_name.rstrip('/') + '/get_parameters',
         )
+        # Observe only the isolated reference Planner's lifecycle.
+        namespace = str(self.get_parameter('reference_namespace').value)
+        planner_name = '/' + namespace.strip('/') + '/planner_server'
+        self._planner_state_client = self.create_client(
+            GetState, planner_name + '/get_state'
+        )
         self._follower_subscription = self.create_subscription(
             WaypointFollowerState,
             str(self.get_parameter('follower_state_topic').value),
@@ -214,6 +231,12 @@ class ReferencePlannerAutoSupervisor(Node):
         self._parameter_identity = None
         self._next_parameter_query_at = monotonic()
         self._next_process_retry_at = monotonic()
+        self._planner_started_at = None
+        self._planner_active_seen = False
+        self._planner_state_future = None
+        self._planner_query_started_at = None
+        self._planner_last_query_at = float('-inf')
+        self._planner_epoch = 0
         self._active_selection = None
         self._blocked_map_identity = None
         self._blocked_route_sha256 = None
@@ -345,6 +368,31 @@ class ReferencePlannerAutoSupervisor(Node):
             return None, 'waiting_for_follower_state'
         follower_age = now - self._follower_received_at
         if follower_age > self._follower_timeout:
+            # Stale heartbeat is ALWAYS invalid for the Viewer's Path.
+            # Preserve only a verified, unchanged child process during a
+            # brief dropout to avoid expensive lifecycle reactivation.
+            active = self._active_selection
+            same_map = (
+                active is not None
+                and map_status.value.identity
+                == active.map_selection.identity
+            )
+            same_route = (
+                active is not None
+                and self._follower.route_sha256
+                == active.waypoint_selection.route.sha256
+                and self._follower.waypoint_count
+                == len(active.waypoint_selection.route.waypoints)
+            )
+            if (
+                follower_age <= (
+                    self._follower_timeout + self._follower_process_grace
+                )
+                and self._process.running and same_map and same_route
+            ):
+                return None, (
+                    f'follower_state_stale_grace age_sec={follower_age:.3f}'
+                )
             self._clear_follower(
                 f'follower_state_stale age_sec={follower_age:.3f}'
             )
@@ -384,12 +432,72 @@ class ReferencePlannerAutoSupervisor(Node):
             return None, 'waiting_for_follower_route_after_map_change'
         return candidate, 'selection_verified'
 
+    def _check_planner_activation(self, now: float) -> None:
+        """
+        Retry an isolated Planner stuck during initial lifecycle activation.
+
+        This only queries this reference Planner's GetState; it cannot issue
+        commands to the real Nav2 planner or the robot.
+        """
+        started = self._planner_started_at
+        if (started is None or not self._process.running
+                or self._active_selection is None
+                or self._planner_active_seen):
+            return
+        if now - started >= self._planner_activation_timeout:
+            self._invalidate('reference_planner_activation_timeout')
+            self._process.stop()
+            self._active_selection = None
+            self._planner_started_at = None
+            self._planner_state_future = None
+            self._planner_epoch += 1
+            self._next_process_retry_at = now + self._process_retry
+            return
+        if self._planner_state_future is not None:
+            queried = self._planner_query_started_at
+            if queried is not None and now - queried <= 3.0:
+                return
+            # Ignore an RPC that got stranded during a lifecycle transition.
+            self._planner_state_future = None
+        if now - self._planner_last_query_at < 1.0:
+            return
+        self._planner_last_query_at = now
+        if not self._planner_state_client.service_is_ready():
+            return
+        future = self._planner_state_client.call_async(GetState.Request())
+        self._planner_state_future = future
+        self._planner_query_started_at = now
+        epoch = self._planner_epoch
+        future.add_done_callback(
+            lambda completed, tag=epoch: self._on_planner_state(
+                completed, tag
+            )
+        )
+
+    def _on_planner_state(self, future, epoch: int) -> None:
+        if (future is not self._planner_state_future
+                or epoch != self._planner_epoch):
+            return
+        self._planner_state_future = None
+        try:
+            state = future.result().current_state
+            active = int(state.id) == State.PRIMARY_STATE_ACTIVE
+        except Exception:
+            return  # Retry; the watchdog has an independent bounded deadline.
+        if active:
+            self._planner_active_seen = True
+            self.get_logger().info('reference_planner_lifecycle_active')
+
     def _tick(self) -> None:
         now = monotonic()
+        self._check_planner_activation(now)
         if self._process.process is not None and not self._process.running:
             result = self._process.poll()
             self._process.process = None
             self._active_selection = None
+            self._planner_started_at = None
+            self._planner_state_future = None
+            self._planner_epoch = getattr(self, '_planner_epoch', 0) + 1
             self._invalidate(f'reference_planner_exited returncode={result}')
             self._next_process_retry_at = now + self._process_retry
         desired, reason = self._desired_selection(now)
@@ -402,6 +510,16 @@ class ReferencePlannerAutoSupervisor(Node):
         now: float | None = None,
     ) -> None:
         timestamp = monotonic() if now is None else now
+        if (
+            desired is None
+            and reason.startswith('follower_state_stale_grace ')
+            and self._active_selection is not None
+            and self._process.running
+        ):
+            # Fail closed immediately; do not extend the 2.5s Path gate.
+            # The child also enforces its own follower staleness checks.
+            self._invalidate(reason)
+            return
         transition = runtime_transition(
             self._active_selection, desired, self._process.running
         )
@@ -414,6 +532,9 @@ class ReferencePlannerAutoSupervisor(Node):
         )
         self._process.stop()
         self._active_selection = None
+        self._planner_started_at = None
+        self._planner_state_future = None
+        self._planner_epoch = getattr(self, '_planner_epoch', 0) + 1
         # A child that was already publishing can race with the first
         # invalidation while it is shutting down.  Publish the invalid state
         # again after the process is gone so a late valid sample cannot remain
@@ -445,6 +566,11 @@ class ReferencePlannerAutoSupervisor(Node):
             self._next_process_retry_at = timestamp + self._process_retry
             return
         self._active_selection = desired
+        self._planner_started_at = timestamp
+        self._planner_active_seen = False
+        self._planner_state_future = None
+        self._planner_last_query_at = float('-inf')
+        self._planner_epoch = getattr(self, '_planner_epoch', 0) + 1
         self._next_process_retry_at = timestamp
         self.get_logger().info(
             'reference_planner_auto_started '

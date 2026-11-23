@@ -144,8 +144,12 @@ class OdomRotationMotionGate:
         except (TypeError, ValueError):
             self.clear()
             return None
+        # Starting a turn requires the original strict angular threshold.
+        # Once verified, modest slowing must not erase real measured yaw.
+        minimum_rate = 0.12 if self._direction is not None else 0.20
         if (not all(math.isfinite(x) for x in (v, w, now))
-                or abs(v) >= 0.12 or abs(w) < 0.20 or abs(w) > 1.6):
+                or abs(v) >= 0.12 or abs(w) < minimum_rate
+                or abs(w) > 1.6):
             self.clear()
             return None
         if self._samples:

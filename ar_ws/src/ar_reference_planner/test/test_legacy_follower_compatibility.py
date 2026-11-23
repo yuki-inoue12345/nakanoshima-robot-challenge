@@ -583,7 +583,10 @@ def test_real_jazzy_parameter_service_recovers_after_legacy_follower_start(
         executor.add_node(follower)
 
         ready_deadline = monotonic() + 3.0
-        while not bridge._legacy_verified and monotonic() < ready_deadline:
+        while (
+            (not bridge._legacy_verified or bridge._publisher is None)
+            and monotonic() < ready_deadline
+        ):
             executor.spin_once(timeout_sec=0.05)
 
         assert bridge._legacy_verified is True
