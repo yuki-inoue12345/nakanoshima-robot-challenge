@@ -587,6 +587,8 @@ def render_frame(
     localization_warning: LocalizationWarning | None = None,
     robot_view_enabled: bool = False,
     robot_view_expanded: bool = False,
+    observed_rotation_status: str = '',
+    travel_distance_status: str = '',
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -641,6 +643,19 @@ def render_frame(
             _draw_direction_panel(frame, guidance, guidance_color_bgr)
     elif state == "PATH OUT OF VIEW" and guidance is not None:
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
+    if (observed_rotation_status in ('ROTATE LEFT', 'ROTATE RIGHT')
+            and state in ('ACTIVE', 'PATH OUT OF VIEW', 'REPLANNING')):
+        # Independent observation of physical yaw, NOT a route proposal.
+        # Remains visible while a genuine Goal switch temporarily hides /plan.
+        _draw_direction_panel(
+            frame,
+            OffscreenGuidance(
+                observed_rotation_status,
+                70.0 if observed_rotation_status == 'ROTATE LEFT' else -70.0,
+                0.0, 0.0,
+            ),
+            guidance_color_bgr,
+        )
     if waypoint_status and state in ("ACTIVE", "PATH OUT OF VIEW"):
         _draw_bottom_badge(frame, waypoint_status, (230, 230, 230))
         if final_waypoint_status:
@@ -652,6 +667,12 @@ def render_frame(
         "ACTIVE", "PATH OUT OF VIEW", "REPLANNING", "NAVIGATION HOLD"
     ):
         _draw_navigation_status(frame, navigation_status)
+    if (travel_distance_status
+            and navigation_status in ('FINAL WP REACHED', 'ROUTE COMPLETE')):
+        # Accumulated robot/odom displacement; never a planned path distance.
+        _draw_bottom_badge(
+            frame, travel_distance_status, (200, 245, 225), offset_y=30,
+        )
     if (state == "NAVIGATION HOLD"
             and navigation_status == "FINAL WP REACHED"):
         # Follower-confirmed final waypoint threshold only; not route success.

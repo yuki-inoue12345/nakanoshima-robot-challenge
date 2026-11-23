@@ -719,6 +719,8 @@ def test_viewer_reports_current_localization_warning_then_recent_history(monkeyp
     )
 
     fake._localization.reject("AMCL position jump: distance=3.0m")
+    # Sustained critical event (>5s), rather than transient timing noise.
+    fake._localization_ui_bad_since = viewer_node.time.monotonic() - 6.0
     viewer_node.ArPathViewerNode._tick(fake)
     state, segments, warning = rendered[-1]
     assert state == "LOCALIZATION UNSTABLE"
@@ -737,7 +739,7 @@ def test_viewer_reports_current_localization_warning_then_recent_history(monkeyp
     state, segments, warning = rendered[-1]
     assert state == "ACTIVE"
     assert segments
-    assert warning.mode == "recent"
+    assert warning is None  # No routine recovered banner.
 
 
 def test_offscreen_guidance_records_only_for_fresh_stable_real_path():

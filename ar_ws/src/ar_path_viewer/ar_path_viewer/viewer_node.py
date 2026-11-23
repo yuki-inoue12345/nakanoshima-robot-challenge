@@ -80,6 +80,7 @@ from .localization_monitor import (
 )
 from .offscreen_guidance import GuidanceSettings, OffscreenGuidance
 from .rotation_motion import OdomRotationMotionGate, RotationMotionGate
+from .odometry_distance import OdomTravelDistanceMeter
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
 from .perception_frame_delay import PerceptionFrameDelay
@@ -90,7 +91,7 @@ from .projection import (
     ground_plane_view,
 )
 from .reference_path import ReferencePathGate
-from .route_destination import direct_distance_m, destination_from_reference_state
+from .route_destination import destination_from_reference_state
 from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
@@ -604,6 +605,7 @@ class ArPathViewerNode(Node):
 
         self._rotation_motion_gate = RotationMotionGate()
         self._odom_rotation_gate = OdomRotationMotionGate()
+        self._odom_distance_meter = OdomTravelDistanceMeter()
         self._last_reported_rotation = None
         self._last_verified_final_goal = None
         self._final_waypoint_success = None
@@ -1391,6 +1393,11 @@ class ArPathViewerNode(Node):
                 != self._str('rotation_odom_frame')):
             self._odom_rotation_gate.clear()
             return
+        meter = getattr(self, '_odom_distance_meter', None)
+        if meter is not None:
+            # Only valid /odom/filtered timestamp and frame enter this meter.
+            meter.observe(message.pose.pose.position.x,
+                          message.pose.pose.position.y, stamp)
         direction = self._odom_rotation_gate.update(
             message.twist.twist.linear.x,
             message.twist.twist.angular.z,
@@ -1433,6 +1440,21 @@ class ArPathViewerNode(Node):
     def _on_reference_follower_state(
         self, message: WaypointFollowerState
     ) -> None:
+        meter = getattr(self, '_odom_distance_meter', None)
+        if meter is not None:
+            try:
+                stamp = (float(message.header.stamp.sec)
+                         + 1e-9 * float(message.header.stamp.nanosec))
+                age = self._ros_now_sec() - stamp
+                if (int(message.schema_version) == 1
+                        and str(message.header.frame_id)
+                        == self._str('localization_global_frame')
+                        and 0.0 <= age <= 2.5):
+                    meter.set_follower(str(message.route_sha256),
+                                       int(message.waypoint_count),
+                                       int(message.activity))
+            except (AttributeError, TypeError, ValueError):
+                pass  # Unverified state must never advance the meter.
         snapshot = self._path_store.snapshot()
         path_generation = 0 if snapshot is None else snapshot.generation
         progress_accepted = self._waypoint_progress_gate.update(
@@ -1516,8 +1538,10 @@ class ArPathViewerNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _points_in_base(self, points: np.ndarray, frame_id: str) -> np.ndarray:
+        # Do not block the 30 fps rendering timer for an optional TF.
+        # If TF is unavailable, existing fail-closed route gating hides it.
         transform = self._tf_buffer.lookup_transform(
-            self._base_frame, frame_id, Time(), timeout=Duration(seconds=0.05)
+            self._base_frame, frame_id, Time(), timeout=Duration(seconds=0.0)
         )
         return transform_message_points(points, transform)
 
@@ -1704,9 +1728,23 @@ class ArPathViewerNode(Node):
                     f"reason={warning.reason!r}"
                 )
             self._last_localization_warning_key = key
-        self._last_localization_warning_for_display = warning
+        # Display only severe, sustained warnings. Keep ALL actual
+        # localization/TF/Costmap validity gates and diagnostics unchanged.
+        # Routine recovery history and short AMCL timing gaps are not banners.
+        display_warning = None
+        if warning is not None and warning.active:
+            now_mono = time.monotonic()
+            since = getattr(self, '_localization_ui_bad_since', None)
+            if since is None:
+                since = now_mono
+                self._localization_ui_bad_since = since
+            if now_mono - since >= 5.0:
+                display_warning = warning
+        else:
+            self._localization_ui_bad_since = None
+        self._last_localization_warning_for_display = display_warning
         self._last_localization_warning_checked_monotonic = time.monotonic()
-        return warning
+        return display_warning
 
     def _display_minimap_snapshot(
         self, current, *, now: float, allow_recent: bool
@@ -2080,6 +2118,17 @@ class ArPathViewerNode(Node):
                         or rotation_direction
                     )
 
+            # A measured turn is an observation, not a proposed Path.
+            # Do not require a newly replanned /plan for the observed indicator.
+            observed_rotation_status = ''
+            follower_view = getattr(
+                self._waypoint_progress_gate, 'current_view', None
+            )
+            if (rotation_direction is not None and follower_view is not None
+                    and 0.0 <= self._ros_now_sec() - follower_view.stamp_sec
+                    <= getattr(self._waypoint_progress_gate, 'timeout_sec', 2.5)):
+                observed_rotation_status = rotation_direction
+
             if state == "ACTIVE" and snapshot is not None:
                 if (
                     delayed_frame is not None
@@ -2215,32 +2264,9 @@ class ArPathViewerNode(Node):
                                 or ""
                             )
                             if waypoint_status:
-                                direct_distance = None
-                                direct_number = None
-                                progress_view = (
-                                    self._waypoint_progress_gate.current_view
-                                )
-                                destination = getattr(
-                                    self, '_route_destination', None
-                                )
-                                if (
-                                    localization.stable
-                                    and tf_available
-                                    and tf_pose is not None
-                                    and progress_view is not None
-                                    and destination is not None
-                                ):
-                                    direct_distance = direct_distance_m(
-                                        destination,
-                                        progress_view.route_sha256,
-                                        progress_view.waypoint_count,
-                                        tf_pose[0], tf_pose[1],
-                                    )
-                                    if direct_distance is not None:
-                                        direct_number = (
-                                            destination.waypoint_number
-                                        )
-                                final_waypoint_status = (
+                                # Show only verified NEXT WP /plan length.
+                                # No map-plane FINAL WP DIRECT calculation/UI.
+                                destination_label = (
                                     self._waypoint_progress_gate
                                     .destination_status(
                                         self._ros_now_sec(),
@@ -2249,9 +2275,10 @@ class ArPathViewerNode(Node):
                                         progress.anchor_distance_m,
                                         self._guidance_settings
                                         .max_path_start_distance_m,
-                                        direct_distance,
-                                        direct_number,
-                                    ) or ""
+                                    ) or ''
+                                )
+                                final_waypoint_status = (
+                                    destination_label.split(' | ', 1)[0]
                                 )
                         if (
                             state in ("ACTIVE", "PATH OUT OF VIEW")
@@ -2600,13 +2627,14 @@ class ArPathViewerNode(Node):
                                 # the semantic freshness limit. It is display
                                 # evidence only: no alert, explanation, or
                                 # minimap input is populated below.
-                                costmap_visual_projection = project_costmap_points(
-                                    points_in_base,
-                                    costmap_snapshot.classes,
-                                    self._mount,
-                                    self._intrinsics,
-                                    self._near,
-                                )
+                                if getattr(self, '_perception_costmap_camera_overlay_enabled', True):
+                                    costmap_visual_projection = project_costmap_points(
+                                        points_in_base,
+                                        costmap_snapshot.classes,
+                                        self._mount,
+                                        self._intrinsics,
+                                        self._near,
+                                    )
                                 costmap_visual_age_sec = costmap_age
                                 costmap_reason = (
                                     "visual_only_exact_time_reprojection "
@@ -2622,13 +2650,14 @@ class ArPathViewerNode(Node):
                                 costmap_analysis_points_base = (
                                     camera_sync.analysis_points_in_base
                                 )
-                                costmap_projection = project_costmap_points(
-                                    points_in_base,
-                                    costmap_snapshot.classes,
-                                    self._mount,
-                                    self._intrinsics,
-                                    self._near,
-                                )
+                                if getattr(self, '_perception_costmap_camera_overlay_enabled', True):
+                                    costmap_projection = project_costmap_points(
+                                        points_in_base,
+                                        costmap_snapshot.classes,
+                                        self._mount,
+                                        self._intrinsics,
+                                        self._near,
+                                    )
                                 costmap_reason = (
                                     "visible"
                                     if costmap_projection.visible_points > 0
@@ -3109,6 +3138,12 @@ class ArPathViewerNode(Node):
                     segments = []
                     reference_segments = []
                     guidance = None
+            travel_distance_status = ''
+            if navigation_status in ('ROUTE COMPLETE', 'FINAL WP REACHED'):
+                meter = getattr(self, '_odom_distance_meter', None)
+                distance = None if meter is None else meter.total_m()
+                if distance is not None:
+                    travel_distance_status = f'ODOM TRAVELED: {distance:.1f} m'
             minimap_status = ""
             if robot_view_enabled and robot_view_expanded:
                 costmap_minimap, minimap_status = (
@@ -3149,6 +3184,8 @@ class ArPathViewerNode(Node):
                 waypoint_status=waypoint_status,
                 final_waypoint_status=final_waypoint_status,
                 navigation_status=navigation_status,
+                observed_rotation_status=observed_rotation_status,
+                travel_distance_status=travel_distance_status,
                 debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
                 costmap_projection=(

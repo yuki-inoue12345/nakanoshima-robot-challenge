@@ -145,7 +145,7 @@ class OdomRotationMotionGate:
             self.clear()
             return None
         if (not all(math.isfinite(x) for x in (v, w, now))
-                or abs(v) >= 0.08 or abs(w) < 0.20 or abs(w) > 1.6):
+                or abs(v) >= 0.12 or abs(w) < 0.20 or abs(w) > 1.6):
             self.clear()
             return None
         if self._samples:
