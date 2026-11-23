@@ -180,6 +180,7 @@ def test_atomic_reference_message_binds_path_to_follower_identity(tmp_path):
     published = []
     node = ReferencePathRequestNode.__new__(ReferencePathRequestNode)
     node._map_frame = 'map'
+    node._route = route
     node._state_publisher = SimpleNamespace(
         publish=lambda message: published.append(message))
     node.get_clock = lambda: SimpleNamespace(
@@ -205,3 +206,7 @@ def test_atomic_reference_message_binds_path_to_follower_identity(tmp_path):
     assert message.planner_generation == 12
     assert message.path_length_m == 6.0
     assert message.follower_state_stamp.sec == 20
+    assert message.final_waypoint_valid
+    assert message.final_waypoint_number == route.waypoints[-1].number
+    assert message.final_waypoint_position.x == route.waypoints[-1].x
+    assert message.final_waypoint_position.y == route.waypoints[-1].y

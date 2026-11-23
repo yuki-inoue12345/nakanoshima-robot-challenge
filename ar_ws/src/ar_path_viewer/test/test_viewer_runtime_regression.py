@@ -275,7 +275,7 @@ def reference_path_message(
     )
     return SimpleNamespace(
         header=SimpleNamespace(frame_id="map", stamp=stamp_message),
-        schema_version=1,
+        schema_version=2,
         valid=valid,
         invalid_reason=reason,
         route_sha256=route,
@@ -862,6 +862,41 @@ def test_pause_suppresses_direction_guidance_on_the_next_frame(monkeypatch):
     )
     viewer_node.ArPathViewerNode._tick(fake)
     assert guidance_values[-1] is None
+
+
+def test_verified_rotation_bypasses_redundant_path_direction_debounce(monkeypatch):
+    guidance_values = []
+
+    def render(image, segments, state, *args, **kwargs):
+        guidance_values.append(kwargs.get('guidance'))
+        return image.copy()
+
+    class TfRotationGate:
+        def update(self, pose, now):
+            return None
+
+    class VerifiedOdomRotation:
+        def direction(self, now):
+            return 'ROTATE LEFT'
+
+    monkeypatch.setattr(viewer_node, 'render_frame', render)
+    fake = make_viewer()
+    fake._rotation_guidance_enabled = True
+    fake._rotation_motion_gate = TfRotationGate()
+    fake._odom_rotation_gate = VerifiedOdomRotation()
+    fake._guidance_stability = GuidanceStabilityGate(0.35)
+    fake._guidance_require_follower = True
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, reference_follower_message()
+    )
+    viewer_node.ArPathViewerNode._on_path(
+        fake, path_message(((0.1, 0.0, 0.0), (3.0, 0.0, 0.0)))
+    )
+
+    viewer_node.ArPathViewerNode._tick(fake)
+
+    assert guidance_values[-1] is not None
+    assert guidance_values[-1].direction == 'ROTATE LEFT'
 
 
 def test_pause_and_person_search_hide_green_path_and_report_hold(monkeypatch):

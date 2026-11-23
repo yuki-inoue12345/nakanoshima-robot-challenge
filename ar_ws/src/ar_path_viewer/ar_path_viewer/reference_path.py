@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 import re
+import threading
 import time
 from typing import Callable
 
@@ -13,7 +14,8 @@ from .path_adapter import PathSnapshot, PathStore, path_message_to_array
 
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _VALID_MODES = {"to_pose", "through_poses"}
-_SCHEMA_VERSION = 1
+_FOLLOWER_SCHEMA_VERSION = 1
+_REFERENCE_SCHEMA_VERSION = 2
 _NAVIGATING_ACTIVITY = 1
 
 
@@ -66,6 +68,7 @@ class ReferencePathGate:
         self._follower: FollowerView | None = None
         self._metadata: ReferenceMetadata | None = None
         self._pending_reference: tuple[object, float] | None = None
+        self._lock = threading.RLock()
         self.reason = "waiting_for_follower_state"
 
     @staticmethod
@@ -96,15 +99,20 @@ class ReferencePathGate:
         )
 
     def clear(self, reason: str) -> None:
-        self.path_store.clear()
-        self._metadata = None
-        self._pending_reference = None
-        self.reason = str(reason)
+        with self._lock:
+            self.path_store.clear()
+            self._metadata = None
+            self._pending_reference = None
+            self.reason = str(reason)
 
     def update_follower(self, message, now_ros_sec: float) -> bool:
         """Update the live authorization and immediately clear on pause/change."""
+        with self._lock:
+            return self._update_follower_locked(message, now_ros_sec)
+
+    def _update_follower_locked(self, message, now_ros_sec: float) -> bool:
         try:
-            if int(message.schema_version) != _SCHEMA_VERSION:
+            if int(message.schema_version) != _FOLLOWER_SCHEMA_VERSION:
                 raise ValueError(f"unsupported_follower_schema={message.schema_version}")
             if str(message.header.frame_id) != self.expected_frame:
                 raise ValueError(
@@ -147,8 +155,12 @@ class ReferencePathGate:
 
     def update_reference(self, message, now_ros_sec: float) -> bool:
         """Atomically validate metadata and Path before replacing visible state."""
+        with self._lock:
+            return self._update_reference_locked(message, now_ros_sec)
+
+    def _update_reference_locked(self, message, now_ros_sec: float) -> bool:
         try:
-            if int(message.schema_version) != _SCHEMA_VERSION:
+            if int(message.schema_version) != _REFERENCE_SCHEMA_VERSION:
                 raise ValueError(f"unsupported_reference_schema={message.schema_version}")
             if not bool(message.valid):
                 reason = str(message.invalid_reason) or "planner_marked_invalid"
@@ -242,6 +254,12 @@ class ReferencePathGate:
     def state(
         self, now_ros_sec: float, now_monotonic: float | None = None
     ) -> tuple[str, PathSnapshot | None, str]:
+        with self._lock:
+            return self._state_locked(now_ros_sec, now_monotonic)
+
+    def _state_locked(
+        self, now_ros_sec: float, now_monotonic: float | None = None
+    ) -> tuple[str, PathSnapshot | None, str]:
         if self._follower is None:
             return "INVALID", None, self.reason
         follower_age = float(now_ros_sec) - self._follower.stamp_sec
@@ -262,8 +280,16 @@ class ReferencePathGate:
         return "ACTIVE", snapshot, "valid"
 
     def age(self, now_monotonic: float | None = None) -> float:
-        return self.path_store.age(now_monotonic)
+        with self._lock:
+            return self.path_store.age(now_monotonic)
+
+    def state_for_ros_time(
+        self, ros_time_sec: float
+    ) -> tuple[str, PathSnapshot | None]:
+        with self._lock:
+            return self.path_store.state_for_ros_time(ros_time_sec)
 
     @property
     def metadata(self) -> ReferenceMetadata | None:
-        return self._metadata
+        with self._lock:
+            return self._metadata

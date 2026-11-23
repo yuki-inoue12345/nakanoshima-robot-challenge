@@ -114,7 +114,23 @@ class OdomRotationMotionGate:
     continuous sample run is required; no extrapolation from old odometry.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        minimum_duration_sec: float = 0.18,
+        minimum_angle_deg: float = 6.0,
+        minimum_samples: int = 4,
+    ):
+        self.minimum_duration_sec = float(minimum_duration_sec)
+        self.minimum_angle_deg = float(minimum_angle_deg)
+        self.minimum_samples = int(minimum_samples)
+        if (
+            not math.isfinite(self.minimum_duration_sec)
+            or not math.isfinite(self.minimum_angle_deg)
+            or self.minimum_duration_sec <= 0.0
+            or self.minimum_angle_deg <= 0.0
+            or self.minimum_samples < 3
+        ):
+            raise ValueError('invalid odometry rotation thresholds')
         self.clear()
 
     def clear(self):
@@ -141,7 +157,10 @@ class OdomRotationMotionGate:
         while len(self._samples) > 2 and now - self._samples[1][0] >= 0.80:
             self._samples.popleft()
         elapsed = now - self._samples[0][0]
-        if len(self._samples) < 5 or elapsed < 0.32:
+        if (
+            len(self._samples) < self.minimum_samples
+            or elapsed < self.minimum_duration_sec
+        ):
             return None
         signed_angle = sum(
             (t1 - t0) * (w0 + w1) / 2.0
@@ -149,7 +168,7 @@ class OdomRotationMotionGate:
                 list(self._samples)[:-1], list(self._samples)[1:]
             )
         )
-        if abs(signed_angle) < math.radians(9.0):
+        if abs(signed_angle) < math.radians(self.minimum_angle_deg):
             return None
         self._direction = 'ROTATE LEFT' if w > 0 else 'ROTATE RIGHT'
         return self._direction

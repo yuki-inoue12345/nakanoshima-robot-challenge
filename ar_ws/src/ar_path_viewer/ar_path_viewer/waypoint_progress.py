@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 import re
+import threading
 
 
 _ROUTE_HASH = re.compile(r'^[0-9a-f]{64}$')
@@ -59,6 +60,7 @@ class WaypointProgressGate:
         self.expected_frame = str(expected_frame)
         self._view: WaypointGoalView | None = None
         self._activity: FollowerActivityView | None = None
+        self._lock = threading.RLock()
         self.reason = 'waiting_for_follower_state'
 
     @staticmethod
@@ -72,12 +74,17 @@ class WaypointProgressGate:
         )
 
     def clear(self, reason: str, *, clear_activity: bool = True) -> None:
-        self._view = None
-        if clear_activity:
-            self._activity = None
-        self.reason = str(reason)
+        with self._lock:
+            self._view = None
+            if clear_activity:
+                self._activity = None
+            self.reason = str(reason)
 
     def update(self, message, now_ros_sec: float, path_generation: int) -> bool:
+        with self._lock:
+            return self._update_locked(message, now_ros_sec, path_generation)
+
+    def _update_locked(self, message, now_ros_sec: float, path_generation: int) -> bool:
         try:
             if int(message.schema_version) != _SCHEMA_VERSION:
                 raise ValueError('unsupported_follower_schema')
@@ -149,6 +156,10 @@ class WaypointProgressGate:
 
     def navigation_hold_status(self, now_ros_sec: float) -> str | None:
         """Return a truthful UI label for a fresh explicit Follower hold."""
+        with self._lock:
+            return self._navigation_hold_status_locked(now_ros_sec)
+
+    def _navigation_hold_status_locked(self, now_ros_sec: float) -> str | None:
         activity = self._activity
         if activity is None:
             return None
@@ -159,6 +170,20 @@ class WaypointProgressGate:
         return _ACTIVITY_STATUS.get(activity.activity, 'STOPPED')
 
     def label(
+        self,
+        now_ros_sec: float,
+        path_generation: int,
+        remaining_path_m: float | None,
+        anchor_distance_m: float | None,
+        maximum_anchor_distance_m: float,
+    ) -> str | None:
+        with self._lock:
+            return self._label_locked(
+                now_ros_sec, path_generation, remaining_path_m,
+                anchor_distance_m, maximum_anchor_distance_m,
+            )
+
+    def _label_locked(
         self,
         now_ros_sec: float,
         path_generation: int,
@@ -198,12 +223,32 @@ class WaypointProgressGate:
         remaining_path_m: float | None,
         anchor_distance_m: float | None,
         maximum_anchor_distance_m: float,
+        final_direct_distance_m: float | None = None,
+        final_waypoint_number: int | None = None,
     ) -> str | None:
-        """Show final *route* distance only when the final goal is
-        the current verified to_pose plan endpoint. No WP chords.
+        """Show verified plan distance and separately labelled direct range.
+
+        The final goal uses the real ``/plan`` polyline only when it is the
+        current verified endpoint. Before that, optional map-plane distance
+        is explicitly labelled ``DIRECT`` and never presented as route length.
         """
+        with self._lock:
+            return self._destination_status_locked(
+                now_ros_sec, path_generation, remaining_path_m,
+                anchor_distance_m, maximum_anchor_distance_m,
+                final_direct_distance_m, final_waypoint_number,
+            )
+
+    def _destination_status_locked(
+        self, now_ros_sec: float, path_generation: int,
+        remaining_path_m: float | None,
+        anchor_distance_m: float | None,
+        maximum_anchor_distance_m: float,
+        final_direct_distance_m: float | None,
+        final_waypoint_number: int | None,
+    ) -> str | None:
         view = self._view
-        valid_plan = self.label(
+        valid_plan = self._label_locked(
             now_ros_sec, path_generation, remaining_path_m,
             anchor_distance_m, maximum_anchor_distance_m,
         )
@@ -216,8 +261,11 @@ class WaypointProgressGate:
         # straight-line chord or fabricated route to the final destination.
         distance = valid_plan.split(": ", 1)[1]
         if view.next_index != view.waypoint_count - 1:
+            direct = self._format_direct_destination(
+                final_direct_distance_m, final_waypoint_number,
+            )
             return (f"NEXT WP #{view.next_number}: {distance} | "
-                    f"FINAL WP (last of {view.waypoint_count}): --")
+                    f"{direct}")
         # Only at the final verified to_pose goal do these distances coincide.
         return (
             f"NEXT WP #{view.next_number}: {distance} | "
@@ -226,6 +274,12 @@ class WaypointProgressGate:
 
     def authorizes_plan(self, now_ros_sec: float, path_generation: int) -> bool:
         """Confirm that guidance belongs to a fresh, navigating Follower goal."""
+        with self._lock:
+            return self._authorizes_plan_locked(now_ros_sec, path_generation)
+
+    def _authorizes_plan_locked(
+        self, now_ros_sec: float, path_generation: int
+    ) -> bool:
         view = self._view
         if view is None:
             return False
@@ -238,3 +292,20 @@ class WaypointProgressGate:
             return False
         self.reason = 'valid'
         return True
+
+    @staticmethod
+    def _format_direct_destination(
+        distance_m: float | None, waypoint_number: int | None
+    ) -> str:
+        """Label a validated Euclidean distance without implying Nav2 arc length."""
+        if (
+            distance_m is None or waypoint_number is None
+            or not math.isfinite(float(distance_m)) or float(distance_m) < 0.0
+        ):
+            return 'FINAL WP DIRECT: --'
+        return f'FINAL WP #{int(waypoint_number)} DIRECT: {float(distance_m):.1f} m'
+
+    @property
+    def current_view(self) -> WaypointGoalView | None:
+        with self._lock:
+            return self._view

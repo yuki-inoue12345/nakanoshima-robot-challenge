@@ -61,7 +61,7 @@ def reference(
     )
     return SimpleNamespace(
         header=SimpleNamespace(frame_id="map", stamp=stamp(now)),
-        schema_version=1,
+        schema_version=2,
         valid=valid,
         invalid_reason=reason,
         route_sha256=route,
@@ -93,6 +93,15 @@ def test_atomic_reference_is_accepted_only_after_matching_follower_state():
     assert snapshot is not None
     assert len(snapshot.points) == 2
     assert gate.metadata.declared_length_m == 10.0
+
+
+def test_old_reference_schema_is_rejected_without_affecting_follower_schema():
+    gate = ReferencePathGate()
+    assert gate.update_follower(follower(), 100.0)
+    old_reference = reference()
+    old_reference.schema_version = 1
+    assert not gate.update_reference(old_reference, 100.0)
+    assert gate.reason == 'unsupported_reference_schema=1'
 
 
 def test_route_index_and_goal_generation_mismatches_fail_closed():
@@ -191,3 +200,16 @@ def test_reference_waits_for_same_identity_follower_delivery_reordering():
     assert state == "ACTIVE"
     assert reason == "valid"
     assert current is not previous
+
+
+def test_periodic_same_goal_heartbeats_keep_reference_visible_but_gap_expires():
+    gate = ReferencePathGate(follower_timeout_sec=2.5, clock=lambda: 10.0)
+    assert gate.update_follower(follower(now=100.0), 100.0)
+    assert gate.update_reference(reference(now=100.0), 100.0)
+
+    for now in (100.8, 101.6, 102.4, 103.2):
+        assert gate.update_follower(follower(now=now), now)
+        assert gate.state(now)[0] == 'ACTIVE'
+
+    assert gate.state(105.71)[0] == 'INVALID'
+    assert 'follower_state_stale' in gate.reason

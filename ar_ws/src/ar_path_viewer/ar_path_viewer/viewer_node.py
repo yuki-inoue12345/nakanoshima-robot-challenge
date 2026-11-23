@@ -13,6 +13,7 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as PathMessage
 from rcl_interfaces.msg import Log
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -89,6 +90,7 @@ from .projection import (
     ground_plane_view,
 )
 from .reference_path import ReferencePathGate
+from .route_destination import direct_distance_m, destination_from_reference_state
 from .rendering import render_frame
 from .session_log import SessionLog, resolve_session_paths
 from .tf_adapter import transform_message_points
@@ -845,6 +847,12 @@ class ArPathViewerNode(Node):
                 )
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
+        # The 30 fps rendering timer is intentionally kept in the default
+        # callback group.  Real/reference Path updates and Follower heartbeats
+        # use one separate serial group: their ordering is preserved, while a
+        # long render cannot delay receipt past the 2.5 s safety limit.  The
+        # stores/gates read concurrently by the render callback are locked.
+        self._route_callback_group = MutuallyExclusiveCallbackGroup()
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -852,7 +860,8 @@ class ArPathViewerNode(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
         self._subscription = self.create_subscription(
-            PathMessage, self._str("path_topic"), self._on_path, qos
+            PathMessage, self._str("path_topic"), self._on_path, qos,
+            callback_group=self._route_callback_group,
         )
         self._costmap_subscription = None
         if self._perception_costmap_enabled:
@@ -875,6 +884,7 @@ class ArPathViewerNode(Node):
                 self._str("reference_path_state_topic"),
                 self._on_reference_path_state,
                 qos,
+                callback_group=self._route_callback_group,
             )
         reference_state_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -892,12 +902,14 @@ class ArPathViewerNode(Node):
             Log, '/rosout', self._on_follower_log, 100,
         )
         self._reference_follower_subscription = None
+        self._route_destination = None
         if self._reference_enabled or self._waypoint_distance_enabled:
             self._reference_follower_subscription = self.create_subscription(
                 WaypointFollowerState,
                 self._str("reference_follower_state_topic"),
                 self._on_reference_follower_state,
                 reference_state_qos,
+                callback_group=self._route_callback_group,
             )
         # The robot AMCL publisher is RELIABLE + TRANSIENT_LOCAL.
         # Request its latest retained sample on Viewer startup; the monitor
@@ -1427,6 +1439,12 @@ class ArPathViewerNode(Node):
             message, self._ros_now_sec(), path_generation
         )
         if progress_accepted:
+            destination = getattr(self, '_route_destination', None)
+            if destination is not None and (
+                destination.route_sha256 != str(message.route_sha256)
+                or destination.waypoint_count != int(message.waypoint_count)
+            ):
+                self._route_destination = None
             if (str(message.navigation_mode) == 'to_pose'
                     and int(message.next_waypoint_index)
                     == int(message.waypoint_count) - 1):
@@ -1460,6 +1478,26 @@ class ArPathViewerNode(Node):
         accepted = self._reference_gate.update_reference(
             message, self._ros_now_sec()
         )
+        try:
+            destination = destination_from_reference_state(message)
+        except (AttributeError, TypeError, ValueError):
+            destination = None
+        current_view = self._waypoint_progress_gate.current_view
+        if (
+            destination is not None
+            and current_view is not None
+            and destination.route_sha256 == current_view.route_sha256
+            and destination.waypoint_count == current_view.waypoint_count
+        ):
+            previous = getattr(self, '_route_destination', None)
+            self._route_destination = destination
+            if previous != destination:
+                self._log_info(
+                    'final_waypoint_direct verified=true '
+                    f'route={destination.route_sha256[:12]} '
+                    f'waypoint={destination.waypoint_number} '
+                    'meaning=map_plane_straight_line_not_nav2_path'
+                )
         point_count = len(getattr(getattr(message, "path", None), "poses", ()))
         metadata = self._reference_gate.metadata
         detail = self._reference_gate.reason
@@ -2177,6 +2215,31 @@ class ArPathViewerNode(Node):
                                 or ""
                             )
                             if waypoint_status:
+                                direct_distance = None
+                                direct_number = None
+                                progress_view = (
+                                    self._waypoint_progress_gate.current_view
+                                )
+                                destination = getattr(
+                                    self, '_route_destination', None
+                                )
+                                if (
+                                    localization.stable
+                                    and tf_available
+                                    and tf_pose is not None
+                                    and progress_view is not None
+                                    and destination is not None
+                                ):
+                                    direct_distance = direct_distance_m(
+                                        destination,
+                                        progress_view.route_sha256,
+                                        progress_view.waypoint_count,
+                                        tf_pose[0], tf_pose[1],
+                                    )
+                                    if direct_distance is not None:
+                                        direct_number = (
+                                            destination.waypoint_number
+                                        )
                                 final_waypoint_status = (
                                     self._waypoint_progress_gate
                                     .destination_status(
@@ -2186,6 +2249,8 @@ class ArPathViewerNode(Node):
                                         progress.anchor_distance_m,
                                         self._guidance_settings
                                         .max_path_start_distance_m,
+                                        direct_distance,
+                                        direct_number,
                                     ) or ""
                                 )
                         if (
@@ -2218,6 +2283,12 @@ class ArPathViewerNode(Node):
                             if not authorized:
                                 self._guidance_stability.clear()
                                 guidance = None
+                            elif guidance.direction.startswith('ROTATE '):
+                                # RotationMotionGate already requires a fresh,
+                                # sustained measured yaw run. Applying the
+                                # generic 0.35 s path-direction debounce again
+                                # caused a measured ~0.9 s total lag.
+                                self._guidance_stability.clear()
                             else:
                                 stable = self._guidance_stability.update(
                                     guidance, self._ros_now_sec()
@@ -2288,7 +2359,7 @@ class ArPathViewerNode(Node):
                     > image_timing.stamp_sec
                 ):
                     historical_state, historical = (
-                        reference_gate.path_store.state_for_ros_time(
+                        reference_gate.state_for_ros_time(
                             image_timing.stamp_sec
                         )
                     )

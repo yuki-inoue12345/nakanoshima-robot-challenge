@@ -24,6 +24,11 @@ identities match exactly. Pause/person-search, route/index/generation changes,
 an invalid planner result, or either timeout clears the display. This topic is
 never substituted for the control `/plan`.
 
+The state also carries the final Waypoint position only when the active
+Follower route hash and Waypoint count exactly match the YAML loaded by this
+Planner. The Viewer may use it for an explicitly labelled map-plane `DIRECT`
+distance; it is not a Nav2 route length and is never used for control.
+
 ## Selected-map and Keepout safety gate
 
 Production launch requires the exact selected map YAML. The launch validates

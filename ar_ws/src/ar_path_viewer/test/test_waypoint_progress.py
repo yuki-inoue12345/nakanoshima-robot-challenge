@@ -136,8 +136,11 @@ def test_final_waypoint_distance_only_at_verified_final_to_pose():
     gate = WaypointProgressGate()
     gate.update(follower_state(index=18, number=19), 100.0, 3)
     assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
-        'NEXT WP #19: 2.4 m | FINAL WP (last of 20): --'
+        'NEXT WP #19: 2.4 m | FINAL WP DIRECT: --'
     )
+    assert gate.destination_status(
+        100.1, 4, 2.4, 0.1, 1.0, 17.25, 30
+    ) == 'NEXT WP #19: 2.4 m | FINAL WP #30 DIRECT: 17.2 m'
     gate.update(follower_state(index=19, number=20, generation=5,
                                stamp=100.2), 100.2, 4)
     assert gate.destination_status(100.3, 5, 2.4, 0.1, 1.0) == (
@@ -165,7 +168,7 @@ def test_nonsequential_waypoint_numbers_keep_true_final_identity():
     gate = WaypointProgressGate()
     gate.update(follower_state(index=18, number=45), 100.0, 3)
     assert gate.destination_status(100.1, 4, 2.4, 0.1, 1.0) == (
-        'NEXT WP #45: 2.4 m | FINAL WP (last of 20): --'
+        'NEXT WP #45: 2.4 m | FINAL WP DIRECT: --'
     )
     gate.update(follower_state(index=19, number=90, generation=5,
                                stamp=100.2), 100.2, 4)

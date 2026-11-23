@@ -326,7 +326,9 @@ Followerがpause、人物探索、task wait、holding stopを明示している�
 
 `waypoint_distance_enabled: true`では、Followerの読み取り専用`/waypoint_follower/reference_state`を安全状態の確認に使い、画面左下に`PLAN LEFT: 2.4 m`を表示します。距離は直線距離でも次Waypointまでの距離でもなく、ロボットに最も近いPath位置からPath終点までの実`/plan`ポリライン残長です。1 m未満はcm表示です。`to_pose`と`through_poses`のどちらでも意味は「現在受信しているPlanの残長」に限定します。
 
-Followerのpause・待機・人物探索、状態期限切れ、AMCL/TF不良、Path開始位置がロボットから離れすぎている場合は表示しません。route/index/goal generationが変わると直ちに旧距離を消し、その変更後に受信した新しい`/plan`まで再表示を待ちます。Waypoint座標やWaypointまでの距離を推測しないため、現インターフェースでは`NEXT WP`という表記を使用しません。
+参考Plannerが同じroute SHA-256とWaypoint件数に一致する実Waypoint YAMLを読み込めた場合だけ、最終Waypointまでの地図平面上の直線距離を`FINAL WP #30 DIRECT: 8.2 m`のように併記します。これはNav2の経路残長ではなく、障害物や曲がり角を含まないユークリッド距離です。route不一致、Follower状態期限切れ、AMCL/TF不良、参考Planner未起動では`FINAL WP DIRECT: --`とし、推測値を表示しません。最終Waypointが現在の検証済み`to_pose`目標になった場合だけ、`FINAL WP`には実`/plan`残長を使用します。
+
+Followerのpause・待機・人物探索、状態期限切れ、AMCL/TF不良、Path開始位置がロボットから離れすぎている場合は表示しません。route/index/goal generationが変わると直ちに旧距離を消し、その変更後に受信した新しい`/plan`まで再表示を待ちます。`NEXT WP`に併記する距離はあくまで現在の実`/plan`残長であり、次Waypointそのものまでの距離を表しません。
 
 Launcher2の旧Followerを使う場合、専用Launchの読み取り専用compatibility bridgeが
 Followerパラメータ、Nav2 goal UUID、goal変更後の`/plan`終点を選択ルートへ一意に

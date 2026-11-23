@@ -41,3 +41,20 @@ def test_clock_jump_and_missing_measurement_reset():
         gate.update(0.001, 0.55, i * 0.04)
     assert gate.update(0.001, 0.55, 3.0) is None
     assert gate.update(None, 0.55, 3.04) is None
+
+
+def test_real_run_rate_is_detected_without_accepting_short_yaw_noise():
+    gate = OdomRotationMotionGate()
+    # The MCAP contained a 0.135 s / 2.1 degree candidate before the actual
+    # turn. It must remain below the evidence threshold.
+    assert all(
+        gate.update(0.0, 0.281, i / 30.0) is None for i in range(5)
+    )
+    gate.clear()
+    detected_at = None
+    for i in range(20):
+        result = gate.update(0.0, 0.384, 1.0 + i / 30.0)
+        if result is not None and detected_at is None:
+            detected_at = i / 30.0
+    assert detected_at is not None
+    assert 0.18 <= detected_at <= 0.32

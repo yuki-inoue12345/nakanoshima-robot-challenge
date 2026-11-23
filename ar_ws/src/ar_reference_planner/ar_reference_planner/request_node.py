@@ -763,6 +763,16 @@ class ReferencePathRequestNode(Node):
             message.waypoint_count = state.waypoint_count
             message.follower_state_stamp.sec = state.stamp_ns // 1_000_000_000
             message.follower_state_stamp.nanosec = state.stamp_ns % 1_000_000_000
+            if (
+                state.route_sha256 == self._route.sha256
+                and state.waypoint_count == len(self._route.waypoints)
+            ):
+                final = self._route.waypoints[-1]
+                message.final_waypoint_valid = True
+                message.final_waypoint_number = final.number
+                message.final_waypoint_position.x = final.x
+                message.final_waypoint_position.y = final.y
+                message.final_waypoint_position.z = 0.0
         self._state_publisher.publish(message)
 
     def _finish_cycle(self, now: float, *, immediate: bool = False) -> None:
