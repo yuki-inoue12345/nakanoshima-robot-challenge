@@ -124,6 +124,10 @@ def main():
     title = 'Camera V8: C920 shared preview (C/SPACE photo, Q/F10 close)'
     started = time.monotonic()
     try:
+        # Match the original V7 preview window without modifying ROS frames.
+        cv2.namedWindow(title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        cv2.resizeWindow(title, 1440, 810)
+        cv2.moveWindow(title, 240, 120)
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.035)
             now = time.monotonic()
