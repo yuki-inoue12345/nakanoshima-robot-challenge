@@ -304,6 +304,27 @@ def draw_costmap_overlay(
     return frame
 
 
+def _draw_segment_batch(
+    frame: np.ndarray,
+    segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
+    color_bgr: Tuple[int, int, int],
+    thickness: int,
+) -> None:
+    """Draw every real projected segment with fewer Python/OpenCV calls.
+
+    A 2-point polyline is pixel-identical to cv2.line (including LINE_AA).
+    Never connect adjacent segments, because clipping or Path invalidation
+    may introduce gaps that must remain visible and truthful.
+    """
+    segment_list = list(segments)
+    if not segment_list:
+        return
+    endpoints = np.asarray(segment_list, dtype=np.int32).reshape(-1, 2, 2)
+    cv2.polylines(
+        frame, endpoints, False, color_bgr, thickness, cv2.LINE_AA
+    )
+
+
 def direction_arrow_segments(
     segments: Iterable[Tuple[Tuple[int, int], Tuple[int, int]]],
     spacing_px: float = 90.0,
@@ -341,25 +362,31 @@ def direction_arrow_segments(
             targets = [total]
         elif total - targets[-1] >= spacing_px * 0.65:
             targets.append(total)
+        # Targets ascend.  Reusing the segment cursor avoids walking the
+        # entire green Path anew for every single direction arrow.
+        walked = 0.0
+        segment_index = 0
         for target_distance in targets:
-            walked = 0.0
-            for (start, end), length in zip(chain, lengths):
-                if walked + length + 1e-9 < target_distance:
-                    walked += length
-                    continue
-                fraction = min(1.0, max(0.0, (target_distance - walked) / length))
-                target = np.array(start, dtype=float) + fraction * (
-                    np.array(end, dtype=float) - np.array(start, dtype=float)
+            while (
+                segment_index < len(chain) - 1
+                and walked + lengths[segment_index] + 1e-9 < target_distance
+            ):
+                walked += lengths[segment_index]
+                segment_index += 1
+            start, end = chain[segment_index]
+            length = lengths[segment_index]
+            fraction = min(1.0, max(0.0, (target_distance - walked) / length))
+            target = np.array(start, dtype=float) + fraction * (
+                np.array(end, dtype=float) - np.array(start, dtype=float)
+            )
+            unit = (np.array(end, dtype=float) - np.array(start, dtype=float)) / length
+            origin = target - unit * min(arrow_length_px, target_distance)
+            arrows.append(
+                (
+                    tuple(np.rint(origin).astype(int)),
+                    tuple(np.rint(target).astype(int)),
                 )
-                unit = (np.array(end, dtype=float) - np.array(start, dtype=float)) / length
-                origin = target - unit * min(arrow_length_px, target_distance)
-                arrows.append(
-                    (
-                        tuple(np.rint(origin).astype(int)),
-                        tuple(np.rint(target).astype(int)),
-                    )
-                )
-                break
+            )
     return arrows
 
 
@@ -610,24 +637,18 @@ def render_frame(
     reference_dashes = dashed_line_segments(
         reference_list, reference_dash_px, reference_gap_px
     )
-    # A dark halo makes cyan dashes readable against white walls without
-    # changing their position, length, or distinction from the green Path.
-    for start, end in reference_dashes:
-        cv2.line(
-            frame, start, end, (18, 18, 18),
-            reference_thickness + 3, cv2.LINE_AA,
-        )
-    for start, end in reference_dashes:
-        cv2.line(
-            frame, start, end, reference_color_bgr,
-            reference_thickness, cv2.LINE_AA,
-        )
+    # Batch identical two-point OpenCV strokes.  Preserve the original
+    # halo-before-dash order, AA, thickness, and *exact* projected endpoints.
+    # No interpolation, extrapolation, re-timing, or geometry simplification.
+    _draw_segment_batch(
+        frame, reference_dashes, (18, 18, 18), reference_thickness + 3
+    )
+    _draw_segment_batch(
+        frame, reference_dashes, reference_color_bgr, reference_thickness
+    )
     if state == "ACTIVE":
         route_layer = frame.copy()
-        for start, end in segment_list:
-            cv2.line(
-                route_layer, start, end, color_bgr, thickness, cv2.LINE_AA
-            )
+        _draw_segment_batch(route_layer, segment_list, color_bgr, thickness)
         for start, end in direction_arrow_segments(segment_list):
             cv2.arrowedLine(
                 route_layer, start, end, color_bgr, thickness, cv2.LINE_AA,
