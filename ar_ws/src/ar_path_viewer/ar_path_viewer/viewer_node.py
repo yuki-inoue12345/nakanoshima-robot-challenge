@@ -1436,6 +1436,18 @@ class ArPathViewerNode(Node):
             f'final_waypoint_threshold_verified waypoint={wp_number} '
             f'distance_m={distance:.2f} route_complete_claim=false'
         )
+        meter = getattr(self, '_odom_distance_meter', None)
+        if meter is not None and hasattr(meter, "diagnostics"):
+            evidence = meter.diagnostics()
+            self._log_info(
+                'odom_distance_audit '
+                f"observed_m={evidence['observed_m']:.3f} "
+                f"accepted_steps={evidence['accepted_steps']} "
+                f"rejected_gap={evidence['rejected_gap']} "
+                f"rejected_jump={evidence['rejected_jump']} "
+                f"rejected_bad_time={evidence['rejected_bad_time']} "
+                f"stale_follower_events={evidence['stale_follower_events']}"
+            )
 
     def _on_reference_follower_state(
         self, message: WaypointFollowerState
@@ -3145,7 +3157,7 @@ class ArPathViewerNode(Node):
                 meter = getattr(self, '_odom_distance_meter', None)
                 distance = None if meter is None else meter.total_m()
                 if distance is not None:
-                    travel_distance_status = f'ODOM TRAVELED: {distance:.1f} m'
+                    travel_distance_status = f'ODOM TRAVELED: ~{distance:.1f} m'
             minimap_status = ""
             if robot_view_enabled and robot_view_expanded:
                 costmap_minimap, minimap_status = (

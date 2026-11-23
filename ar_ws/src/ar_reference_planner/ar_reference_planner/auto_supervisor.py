@@ -603,7 +603,14 @@ class ReferencePlannerAutoSupervisor(Node):
         """Invalidate first, then stop only the owned planning subprocess."""
         try:
             if rclpy.ok(context=self.context):
-                self._invalidate('auto_supervisor_shutdown')
+                try:
+                    self._invalidate('auto_supervisor_shutdown')
+                except Exception as error:
+                    # The Viewer may already have shut down the shared
+                    # ROS context. Only that known teardown race is safe
+                    # to ignore; other publish errors must remain visible.
+                    if 'context is invalid' not in str(error):
+                        raise
         finally:
             self._process.stop()
         return super().destroy_node()

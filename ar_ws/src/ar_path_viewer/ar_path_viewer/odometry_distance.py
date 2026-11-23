@@ -20,6 +20,10 @@ class OdomTravelDistanceMeter:
         self._total = 0.0
         self._accepted_steps = 0
         self._follower_seen_monotonic = None
+        self._rejected_bad_time = 0
+        self._rejected_gap = 0
+        self._rejected_jump = 0
+        self._stale_follower_events = 0
 
     def set_follower(self, route_sha256, waypoint_count, activity):
         route = str(route_sha256)
@@ -34,6 +38,10 @@ class OdomTravelDistanceMeter:
                 self._route = identity
                 self._total = 0.0
                 self._accepted_steps = 0
+                self._rejected_bad_time = 0
+                self._rejected_gap = 0
+                self._rejected_jump = 0
+                self._stale_follower_events = 0
                 self._last = None
             was_active = self._active
             self._follower_seen_monotonic = time.monotonic()
@@ -58,6 +66,7 @@ class OdomTravelDistanceMeter:
                     time.monotonic() - self._follower_seen_monotonic > 2.5):
                 self._active = False
                 self._last = None
+                self._stale_follower_events += 1
                 return
             last = self._last
             self._last = (t, x, y)
@@ -66,7 +75,14 @@ class OdomTravelDistanceMeter:
             dt = t - last[0]
             step = math.hypot(x - last[1], y - last[2])
             # Disallow clock resets, missing segments, improbable pose jumps.
-            if not 0.0 < dt <= 0.25 or step > 0.035 + 1.5 * dt:
+            if dt <= 0.0:
+                self._rejected_bad_time += 1
+                return
+            if dt > 0.25:
+                self._rejected_gap += 1
+                return
+            if step > 0.035 + 1.5 * dt:
+                self._rejected_jump += 1
                 return
             self._total += step
             self._accepted_steps += 1
@@ -74,3 +90,15 @@ class OdomTravelDistanceMeter:
     def total_m(self):
         with self._lock:
             return self._total if self._accepted_steps >= 2 else None
+
+    def diagnostics(self):
+        """Report observed distance and rejection counts, not accuracy."""
+        with self._lock:
+            return {
+                "observed_m": self._total,
+                "accepted_steps": self._accepted_steps,
+                "rejected_bad_time": self._rejected_bad_time,
+                "rejected_gap": self._rejected_gap,
+                "rejected_jump": self._rejected_jump,
+                "stale_follower_events": self._stale_follower_events,
+            }

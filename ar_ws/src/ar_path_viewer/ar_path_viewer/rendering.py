@@ -643,6 +643,12 @@ def render_frame(
             _draw_direction_panel(frame, guidance, guidance_color_bgr)
     elif state == "PATH OUT OF VIEW" and guidance is not None:
         _draw_offscreen_guidance(frame, guidance, guidance_color_bgr)
+    if state == "PATH OUT OF VIEW" and not segment_list:
+        # This is a screen-space status, never fabricated floor geometry.
+        _draw_bottom_badge(
+            frame, "REAL PATH OUT OF VIEW", (210, 210, 210),
+            align_right=True, offset_y=34,
+        )
     if (
         observed_rotation_status in ('ROTATE LEFT', 'ROTATE RIGHT')
         and state in (
