@@ -28,6 +28,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from camera_preview import HighGuiPreviewManager
+from v8_result_sound import play_person_search_notification
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -1082,6 +1083,7 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
 
             detail_log = ""
             terminal_error = ""
+            notification_status = ""
             with self._lock:
                 terminal_started = False
                 summary_started = False
@@ -1141,6 +1143,7 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
                         self._busy_conflict = False
                     terminal_started = True
                     self.publish_result(bool(detail["safe_to_advance"]), detail)
+                    notification_status = str(detail.get("status", ""))
                 except Exception as exc:
                     # Pre-publication failure may send one unsafe terminal.
                     # Once publication starts, partial delivery is uncertain:
@@ -1168,6 +1171,17 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
                             self.publish_result(False, detail)
                         except Exception as publish_exc:
                             terminal_error += f"; unsafe terminal publication failed: {publish_exc}"
+
+            # Mirror V7: play result sound ONLY after successful ROS terminal publication.
+            # Audio failure must never change ROS completion or navigation admission.
+            if notification_status:
+                try:
+                    play_person_search_notification(
+                        notification_status,
+                        self.get_logger(),
+                    )
+                except Exception as exc:
+                    self.get_logger().warning(f"V8 result sound failed: {exc}")
 
             # Old worker has no shared-state/resource writes beyond this point.
             # Freeze log payload before admission, and never let late logging
