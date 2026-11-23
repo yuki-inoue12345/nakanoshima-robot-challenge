@@ -148,6 +148,51 @@ class CameraV8PreservedUI(v7.Milestone2TargetUI):
         except Exception as exc:
             v7.messagebox.showerror('実行できません', str(exc))
 
+    def _prepare_lm_studio_worker(self, url: str) -> None:
+        """Use V7's actual LM Studio preflight without changing V8 output paths.
+
+        The inherited V7 worker incorrectly resolves the helper relative to
+        module.APP_DIR, which V8 intentionally repoints to its own directory.
+        Override only that worker. Do not mutate the shared V7 module globals.
+        """
+        helper = V7_DIR / 'v7_startup_preflight.py'
+        if not helper.is_file():
+            self.log_queue.put(f'[LM Studio] 準備用スクリプトがありません: {helper}')
+            self.log_queue.put('__UI_LM_STATUS_FAIL__')
+            return
+        try:
+            completed = subprocess.run(
+                [sys.executable, '-B', str(helper), '--base-url', url, '--prepare-lm'],
+                cwd=str(HERE),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=v7.LM_STUDIO_PREPARE_TIMEOUT_SEC,
+            )
+            output = completed.stdout or ''
+            for line in output.splitlines():
+                if line.strip():
+                    self.log_queue.put('[LM Studio] ' + line)
+            if completed.returncode == 0:
+                self.log_queue.put('__UI_LM_STATUS_OK__')
+            elif any(marker in output for marker in (
+                'TARGET_MODEL_NOT_VISIBLE:',
+                'TARGET_MODEL_NOT_IN_LOCAL_CATALOG:',
+                'MODEL_UNAVAILABLE:',
+            )):
+                self.log_queue.put('__UI_LM_STATUS_MODEL_MISSING__')
+            else:
+                self.log_queue.put('__UI_LM_STATUS_FAIL__')
+        except subprocess.TimeoutExpired:
+            self.log_queue.put(
+                '[LM Studio] 準備処理が'
+                f'{v7.LM_STUDIO_PREPARE_TIMEOUT_SEC:.0f}秒でtimeoutしました'
+            )
+            self.log_queue.put('__UI_LM_STATUS_FAIL__')
+        except Exception as exc:
+            self.log_queue.put(f'[LM Studio] 起動・準備失敗: {exc}')
+            self.log_queue.put('__UI_LM_STATUS_FAIL__')
+
     def direct_command(self):
         if self.current_config().get('input_mode') == 'video':
             return super().direct_command()
