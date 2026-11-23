@@ -102,3 +102,61 @@ class OdomTravelDistanceMeter:
                 "rejected_jump": self._rejected_jump,
                 "stale_follower_events": self._stale_follower_events,
             }
+
+class SessionOdomTravelDistanceMeter:
+    """Measured XY distance from the AR Viewer session start, not route length.
+
+    Unlike the route-scoped meter, it does not discard genuine odometry while
+    the legacy Follower reference bridge temporarily loses goal identity.
+    It never extrapolates missing motion; see diagnostics() for completeness.
+    Only frame-validated /odom/filtered observations are passed by the caller.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._last = None
+        self._total = 0.0
+        self._accepted_steps = 0
+        self._rejected_gap = 0
+        self._rejected_jump = 0
+        self._rejected_bad_time = 0
+
+    def observe(self, x, y, stamp):
+        try:
+            x, y, t = float(x), float(y), float(stamp)
+        except (TypeError, ValueError):
+            return
+        if not all(math.isfinite(value) for value in (x, y, t)) or t <= 0.0:
+            return
+        with self._lock:
+            last = self._last
+            self._last = (t, x, y)
+            if last is None:
+                return
+            dt = t - last[0]
+            step = math.hypot(x - last[1], y - last[2])
+            if dt <= 0.0:
+                self._rejected_bad_time += 1
+                return
+            if dt > 0.25:
+                self._rejected_gap += 1
+                return
+            if step > 0.035 + 1.5 * dt:
+                self._rejected_jump += 1
+                return
+            self._total += step
+            self._accepted_steps += 1
+
+    def total_m(self):
+        with self._lock:
+            return self._total if self._accepted_steps >= 2 else None
+
+    def diagnostics(self):
+        with self._lock:
+            return {
+                'observed_m': self._total,
+                'accepted_steps': self._accepted_steps,
+                'rejected_gap': self._rejected_gap,
+                'rejected_jump': self._rejected_jump,
+                'rejected_bad_time': self._rejected_bad_time,
+            }

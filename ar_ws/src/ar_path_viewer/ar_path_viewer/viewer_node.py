@@ -80,7 +80,10 @@ from .localization_monitor import (
 )
 from .offscreen_guidance import GuidanceSettings, OffscreenGuidance
 from .rotation_motion import OdomRotationMotionGate, RotationMotionGate
-from .odometry_distance import OdomTravelDistanceMeter
+from .odometry_distance import (
+    OdomTravelDistanceMeter,
+    SessionOdomTravelDistanceMeter,
+)
 from .path_adapter import PathStore, path_message_to_array
 from .path_transition import PathTransitionGate
 from .perception_frame_delay import PerceptionFrameDelay
@@ -606,6 +609,9 @@ class ArPathViewerNode(Node):
         self._rotation_motion_gate = RotationMotionGate()
         self._odom_rotation_gate = OdomRotationMotionGate()
         self._odom_distance_meter = OdomTravelDistanceMeter()
+        # Always measures physical travel since THIS viewer session began.
+        # Does not depend on a temporarily missing legacy Follower heartbeat.
+        self._session_distance_meter = SessionOdomTravelDistanceMeter()
         self._last_reported_rotation = None
         self._last_verified_final_goal = None
         self._final_waypoint_success = None
@@ -898,7 +904,7 @@ class ArPathViewerNode(Node):
         # of the Follower's own arrival threshold, NOT route completion.
         self._odom_rotation_subscription = self.create_subscription(
             Odometry, self._str('rotation_odom_topic'),
-            self._on_rotation_odom, 10,
+            self._on_rotation_odom, 100,
         )
         self._follower_log_subscription = self.create_subscription(
             Log, '/rosout', self._on_follower_log, 100,
@@ -1388,6 +1394,17 @@ class ArPathViewerNode(Node):
         now = self._ros_now_sec()
         stamp = (float(message.header.stamp.sec)
                  + float(message.header.stamp.nanosec) * 1e-9)
+        # Historical odometry samples can arrive late when the ROS executor
+        # is busy. They remain genuine measured positions and may be used for
+        # session distance; stale data is still prohibited for live rotation.
+        if (stamp > 0.0 and str(message.header.frame_id)
+                == self._str('rotation_odom_frame')):
+            session_meter = getattr(self, '_session_distance_meter', None)
+            if session_meter is not None:
+                session_meter.observe(
+                    message.pose.pose.position.x,
+                    message.pose.pose.position.y, stamp,
+                )
         if (stamp <= 0.0 or abs(now - stamp) > 0.75
                 or str(message.header.frame_id)
                 != self._str('rotation_odom_frame')):
@@ -1447,6 +1464,18 @@ class ArPathViewerNode(Node):
                 f"rejected_jump={evidence['rejected_jump']} "
                 f"rejected_bad_time={evidence['rejected_bad_time']} "
                 f"stale_follower_events={evidence['stale_follower_events']}"
+            )
+
+        session_meter = getattr(self, '_session_distance_meter', None)
+        if session_meter is not None and hasattr(session_meter, 'diagnostics'):
+            evidence = session_meter.diagnostics()
+            self._log_info(
+                'session_odom_distance_audit scope=viewer_session '
+                f"observed_m={evidence['observed_m']:.3f} "
+                f"accepted_steps={evidence['accepted_steps']} "
+                f"rejected_gap={evidence['rejected_gap']} "
+                f"rejected_jump={evidence['rejected_jump']} "
+                f"rejected_bad_time={evidence['rejected_bad_time']}"
             )
 
     def _on_reference_follower_state(
@@ -3154,10 +3183,18 @@ class ArPathViewerNode(Node):
                     guidance = None
             travel_distance_status = ''
             if navigation_status in ('ROUTE COMPLETE', 'FINAL WP REACHED'):
-                meter = getattr(self, '_odom_distance_meter', None)
+                meter = getattr(self, '_session_distance_meter', None)
                 distance = None if meter is None else meter.total_m()
                 if distance is not None:
-                    travel_distance_status = f'ODOM TRAVELED: ~{distance:.1f} m'
+                    # Session scope is explicit: never call this planned route
+                    # length or infer movement from missing ROS observations.
+                    quality = meter.diagnostics()
+                    missing = any(quality[key] for key in (
+                        'rejected_gap', 'rejected_jump', 'rejected_bad_time'
+                    ))
+                    label = ('SESSION ODOM MIN' if missing
+                             else 'SESSION ODOM TRAVELED')
+                    travel_distance_status = f'{label}: ~{distance:.1f} m'
             minimap_status = ""
             if robot_view_enabled and robot_view_expanded:
                 costmap_minimap, minimap_status = (

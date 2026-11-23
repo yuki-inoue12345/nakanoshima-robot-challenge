@@ -53,10 +53,19 @@ def unique_waypoint_index(
             f'{distances[0][0] if distances else math.inf:.3f}'
         )
     if len(distances) > 1 and distances[1][0] - distances[0][0] < separation_m:
-        raise ValueError(
-            'plan_endpoint_waypoint_ambiguous '
-            f'nearest_m={distances[0][0]:.3f} second_m={distances[1][0]:.3f}'
+        # A fresh Nav2 plan endpoint is a stronger identity signal when it
+        # coincides with precisely one route point at centimeter precision.
+        # The 20-cm conservative margin remains for every non-exact case.
+        # Never accept a duplicate or nearly coincident (< 5cm) endpoint.
+        nearest_m, second_m = distances[0][0], distances[1][0]
+        exact_unique_goal = (
+            nearest_m <= 0.01 and second_m - nearest_m >= 0.05
         )
+        if not exact_unique_goal:
+            raise ValueError(
+                'plan_endpoint_waypoint_ambiguous '
+                f'nearest_m={nearest_m:.3f} second_m={second_m:.3f}'
+            )
     return distances[0][1]
 
 
