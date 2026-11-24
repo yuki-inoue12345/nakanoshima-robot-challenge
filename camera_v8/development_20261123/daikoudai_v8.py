@@ -613,6 +613,12 @@ def ros_wrapped_command(args: List[str]) -> List[str]:
 
 
 def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
+    # Per-domain singleton prevents a stale GUI/server from duplicating YOLO/VLM work.
+    from v8_search_singleton import V8ServerAlreadyRunning, acquire_v8_person_search_lock
+    try:
+        _v8_search_lock_fd = acquire_v8_person_search_lock()
+    except V8ServerAlreadyRunning as exc:
+        raise SystemExit(str(exc)) from None
     # Block before cv2/rclpy/MS2 imports can create native threads. Process-wide
     # SIGTERM may otherwise be delivered to an older unblocked thread and take
     # its default action before the dedicated sigwait thread can receive it.
