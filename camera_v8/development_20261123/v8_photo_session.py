@@ -60,8 +60,8 @@ def stop_owned_process(process: subprocess.Popen | None) -> None:
         process.wait(timeout=3)
 
 
-def handle_exit(_signum, _frame) -> None:
-    raise SystemExit(143)
+def handle_exit(signum, _frame) -> None:
+    raise SystemExit(128 + int(signum))
 
 
 def main() -> int:
@@ -84,6 +84,7 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, handle_exit)
     signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGHUP, handle_exit)
     lock_file = None
     log_file = None
     owner = None
@@ -109,7 +110,8 @@ def main() -> int:
                 log_file = log_path.open('x', encoding='utf-8')
                 owner = subprocess.Popen(
                     [sys.executable, '-u', str(HERE / 'v8_camera_source.py'),
-                     '--device', str(device), '--fps', '30'],
+                     '--device', str(device), '--fps', '30',
+                     '--expected-parent-pid', str(os.getpid())],
                     cwd=str(HERE), stdout=log_file, stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )

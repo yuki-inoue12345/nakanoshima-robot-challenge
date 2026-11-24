@@ -7,6 +7,8 @@ navigation commands or modifies Nav2, Renya Launcher2, or the Follower.
 import argparse
 import time
 
+from v8_parent_death_guard import arm_parent_death_guard
+
 import numpy as np
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -97,7 +99,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
     parser.add_argument('--fps', type=float, choices=(20., 30.), default=30.)
+    parser.add_argument('--expected-parent-pid', type=int, default=0)
     args = parser.parse_args()
+    if args.expected_parent_pid != 0:
+        arm_parent_death_guard(args.expected_parent_pid)
     rclpy.init()
     node = None
     executor = MultiThreadedExecutor(num_threads=2)

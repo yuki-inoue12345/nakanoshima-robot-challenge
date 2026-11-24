@@ -31,6 +31,11 @@ source "$REPO/ar_ws/install/setup.bash"
 set -u
 RUNNER="$REPO/ar_ws/install/ar_reference_planner/lib/ar_reference_planner/run_kokochan_navi_launcher2"
 [[ -x "$RUNNER" ]] || { echo "AR runner missing: build ar_ws first." >&2; exit 2; }
+# Match the standalone photo-session lock across ALL ROS domains.
+command -v flock >/dev/null 2>&1 || { echo "flock unavailable" >&2; exit 2; }
+CAMERA_LOCK_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+exec 8>"$CAMERA_LOCK_DIR/kokochan-v8-camera-$(id -u).lock"
+flock -n 8 || { echo "Camera V8 session already owns the C920 startup lock" >&2; exit 3; }
 LOG_DIR="${KOKO_NAVI_OUTPUT_DIR:-$HOME/ar_navigation_project/outputs}"
 mkdir -p "$LOG_DIR"
 OWNER_LOG="$LOG_DIR/v8_camera_owner_$(date +%Y%m%d_%H%M%S).log"
@@ -38,6 +43,19 @@ OWNER_LOG="$LOG_DIR/v8_camera_owner_$(date +%Y%m%d_%H%M%S).log"
 if ros2 node list 2>/dev/null | grep -Fxq /koko_v8_camera_source; then
     echo "C920 camera owner node is already running; refusing duplicate." >&2
     exit 3
+fi
+# ROS discovery is domain-scoped: check the physical camera across ALL domains.
+command -v fuser >/dev/null 2>&1 || { echo "fuser unavailable; refusing camera startup" >&2; exit 4; }
+REAL_DEVICE="$(readlink -f -- "$DEVICE")"
+[[ -c "$REAL_DEVICE" ]] || { echo "Not a C920 character device: $REAL_DEVICE" >&2; exit 4; }
+if fuser "$REAL_DEVICE" >/dev/null 2>&1; then
+    echo "Camera already occupied: $REAL_DEVICE; refusing duplicate C920 open" >&2
+    exit 4
+else
+    case "$?" in
+        1) ;; # fuser returns 1 when no process holds the device
+        *) echo "C920 ownership cannot be verified; refusing startup" >&2; exit 4 ;;
+    esac
 fi
 CAMERA_PYTHON="${V8_PYTHON:-python3}"
 if ! command -v "$CAMERA_PYTHON" >/dev/null 2>&1; then
@@ -49,6 +67,7 @@ if ! "$CAMERA_PYTHON" -c 'import cv2, numpy, rclpy; from ar_path_viewer.latest_i
     exit 2
 fi
 "$CAMERA_PYTHON" -u "$HERE/v8_camera_source.py" --device "$DEVICE" --fps "$KOKO_NAVI_FPS" \
+    --expected-parent-pid "$$" \
     >"$OWNER_LOG" 2>&1 &
 OWNER_PID=$!
 cleanup() {
@@ -58,6 +77,9 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 ready=0
 for _ in $(seq 1 50); do
     if ! kill -0 "$OWNER_PID" 2>/dev/null; then break; fi
