@@ -35,6 +35,9 @@ class V8PersonFrameShare(Node):
                                durability=DurabilityPolicy.VOLATILE)
         self.create_subscription(Bool, '/person_area_arrived', self._on_arrival, arrival_qos)
         self.create_subscription(String, '/person_search_done_detail', self._on_result, detail_qos)
+        # Bool is also a terminal publication from the unchanged V8 engine.
+        # It is useful if a large detail message is delayed or not delivered.
+        self.create_subscription(Bool, '/person_search_done', self._on_done, detail_qos)
         self._pub = self.create_publisher(Image, '/koko/person_search/raw_image', image_qos)
         self.get_logger().info('V8 camera share ready: publishes UNANNOTATED pixels ONLY during arrival search')
 
@@ -45,7 +48,22 @@ class V8PersonFrameShare(Node):
             self._frame_count = 0
             self.get_logger().info('V8 raw frames enabled by person_area arrival')
         else:
+            if self._active:
+                self.get_logger().info(
+                    f'V8 raw frames stopped at false arrival; sent={self._frame_count}'
+                )
             self._active = False
+
+    def _on_done(self, msg):
+        # The existing V8 server publishes done only for terminal results.
+        # False means unsafe to advance; camera publication still stops.
+        if not self._active:
+            return
+        self._active = False
+        self.get_logger().info(
+            f'V8 raw frames stopped at terminal done; sent={self._frame_count}; '
+            f'safe_to_advance={bool(msg.data)}'
+        )
 
     def _on_result(self, msg):
         if not self._active:
