@@ -79,20 +79,20 @@ class V8PersonFrameShare(Node):
 
     def publish_unannotated(self, bgr, stamp):
         if not self._active:
-            return
+            return False
         if time.monotonic() - self._started > self._max_active:
             self._active = False
             self.get_logger().error('V8 raw-frame share deadline exceeded; stopped (no navigation action)')
-            return
+            return False
         if self._pub.get_subscription_count() < 1:
-            return
+            return False
         if (not isinstance(bgr, np.ndarray) or bgr.dtype != np.uint8 or
                 bgr.ndim != 3 or bgr.shape[2] != 3):
-            return
+            return False
         frame = np.ascontiguousarray(bgr)
         h, w = frame.shape[:2]
         if not 0 < h <= 1080 or not 0 < w <= 1920:
-            return
+            return False
         msg = Image()
         msg.header.stamp = stamp  # ROS processing time; not claimed exposure time
         msg.header.frame_id = 'koko_c920_raw_image'
@@ -104,3 +104,12 @@ class V8PersonFrameShare(Node):
         msg.data = frame.tobytes()
         self._pub.publish(msg)
         self._frame_count += 1
+        return True
+
+    @property
+    def active(self):
+        return bool(self._active)
+
+    @property
+    def frame_count(self):
+        return int(self._frame_count)

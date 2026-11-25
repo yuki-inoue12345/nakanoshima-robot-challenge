@@ -658,6 +658,7 @@ class ArPathViewerNode(Node):
                 self._image_source = RosLatestImageSource(
                     self, self._str("image_input_uri"),
                     self._intrinsics.width, self._intrinsics.height,
+                    metrics_enabled=self._bool("diagnostic_logging"),
                 )
             else:
                 self._image_source = make_image_source(

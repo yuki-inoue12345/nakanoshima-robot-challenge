@@ -637,6 +637,10 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--camera_fps", type=float, default=15.0)
     parser.add_argument("--camera_read_fail_tolerance", type=int, default=30)
     parser.add_argument("--raw_image_topic", default="/koko/person_search/raw_image")
+    parser.add_argument(
+        "--pipeline_diagnostics", action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--subject_type", choices=["auto", "person", "mannequin"], default="auto")
     parser.add_argument("--target_upper_color", default="white")
     parser.add_argument("--target_upper_secondary_color", default="none")
@@ -707,13 +711,16 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
     from rclpy.signals import SignalHandlerOptions
     from std_msgs.msg import Bool, String
 
-    from v8_shared_camera import RosFrameFeed, V8FrameCoordinator
+    from v8_shared_camera import (
+        RosFrameFeed, V8FrameCoordinator, V8ModelStageDiagnostics,
+    )
     from person_search_vlm_milestone2_v7 import (
         build_parser,
         open_camera_capture_with_fallback,
         request_stop as request_ms2_stop,
         run_milestone2_search,
     )
+    ms2_module = sys.modules[run_milestone2_search.__module__]
 
     def json_dumps(data: Dict[str, Any]) -> str:
         return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -844,7 +851,11 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
                 cv2_module=cv2,
                 logger=self._preview_log,
             )
-            self._frame_feed = RosFrameFeed(self, args.raw_image_topic)
+            self._frame_feed = RosFrameFeed(
+                self, args.raw_image_topic,
+                pipeline_diagnostics=args.pipeline_diagnostics,
+                process_every=args.process_every,
+            )
             self._camera_ownership = V8FrameCoordinator(
                 self._frame_feed, self._shutdown_requested
             )
@@ -1036,6 +1047,13 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
                     )
                 admission_ready = True
                 self.get_logger().info(f"person search started: area_index={area_index}")
+                self.get_logger().info(
+                    'v8_pipeline_configuration '
+                    f'process_every={args.process_every} '
+                    f'camera_fps_bookkeeping={args.camera_fps:.1f} '
+                    'camera_fps_is_measured=false '
+                    f'diagnostics={str(args.pipeline_diagnostics).lower()}'
+                )
 
                 def search_target(profile: Dict[str, Any]) -> Dict[str, Any]:
                     if self._shutdown_requested.is_set():
@@ -1043,12 +1061,16 @@ def run_person_search_server_mode(argv: Optional[List[str]] = None) -> None:
                     target_id = str(profile.get("target_id", "target"))
                     self.get_logger().info(f"area {area_index}: searching {target_id}")
                     try:
-                        result = run_milestone2_search(
-                            build_search_args(profile, area_index, self.mission_dir),
-                            external_capture=self._camera_ownership.create_search_reader(),
-                            preview_manager=self._preview_manager,
-                            preview_stop_callback=self._request_shutdown_from_preview,
-                        )
+                        with V8ModelStageDiagnostics(
+                            ms2_module, self._frame_feed,
+                            enabled=args.pipeline_diagnostics,
+                        ):
+                            result = run_milestone2_search(
+                                build_search_args(profile, area_index, self.mission_dir),
+                                external_capture=self._camera_ownership.create_search_reader(),
+                                preview_manager=self._preview_manager,
+                                preview_stop_callback=self._request_shutdown_from_preview,
+                            )
                     except Exception as exc:
                         result = {
                             "status": "ERROR",

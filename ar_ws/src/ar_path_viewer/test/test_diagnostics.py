@@ -201,6 +201,41 @@ def test_camera_pipeline_counts_reads_sync_queue_rendering_and_recording():
     assert reporter.camera_recorded_frame_count == 2
 
 
+def test_camera_pipeline_mode_changes_do_not_bypass_five_second_log_limit():
+    now = [10.0]
+    logger = RecordingLogger()
+    reporter = DiagnosticReporter(True, logger, 5.0, clock=lambda: now[0])
+    common = dict(
+        read_success=True, timestamp_usable=False, pending_frames=0,
+        discarded_frames=0, recorded=False,
+    )
+    reporter.camera_pipeline(
+        timestamp_reason='waiting_for_tf', mode='preview_sync_wait', **common)
+    now[0] += 0.1
+    reporter.camera_pipeline(
+        timestamp_reason='exact_time_tf', mode='synchronized', **common)
+    now[0] += 0.1
+    reporter.camera_pipeline(
+        timestamp_reason='waiting_for_tf', mode='preview_sync_wait', **common)
+
+    assert sum('camera_pipeline ' in message for _, message in logger.records) == 1
+    assert reporter.camera_read_count == 3
+
+
+def test_diagnostic_logger_failure_never_escapes_camera_pipeline():
+    class BrokenLogger:
+        def info(self, _message):
+            raise OSError('synthetic logger failure')
+
+    reporter = DiagnosticReporter(True, BrokenLogger(), 5.0)
+    reporter.camera_pipeline(
+        read_success=True, timestamp_usable=False,
+        timestamp_reason='waiting_for_tf', mode='preview_sync_wait',
+        pending_frames=0, discarded_frames=0, recorded=False,
+    )
+    assert reporter.camera_read_count == 1
+
+
 def test_camera_pipeline_separates_source_gui_and_recording_cadence():
     now = [100.0]
     logger = RecordingLogger()

@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from .pipeline_metrics import ProcessResourceSampler
+
 
 class DiagnosticReporter:
     """Collect counters even when logs are throttled, without ROS dependencies."""
@@ -41,6 +43,9 @@ class DiagnosticReporter:
         self._camera_read_duration_sec = deque(maxlen=200)
         self._camera_dequeue_duration_sec = deque(maxlen=200)
         self._camera_decode_duration_sec = deque(maxlen=200)
+        self._camera_callback_duration_sec = deque(maxlen=200)
+        self._camera_callback_copy_duration_sec = deque(maxlen=200)
+        self._camera_consumer_copy_duration_sec = deque(maxlen=200)
         self._camera_tick_interval_sec = deque(maxlen=200)
         self._camera_tick_duration_sec = deque(maxlen=200)
         self._camera_pre_render_duration_sec = deque(maxlen=200)
@@ -59,6 +64,9 @@ class DiagnosticReporter:
         self.camera_gui_duplicate_count = 0
         self.camera_gui_deadline_miss_count = 0
         self._camera_gui_lock = threading.Lock()
+        self._resource_sampler = ProcessResourceSampler(clock=self.clock)
+        self._resource_last_sample_at = float("-inf")
+        self._resource_sample = {"cpu_pct": 0.0, "rss_mib": 0.0, "threads": 0}
         self.last_path_received_at: Optional[float] = None
         self.last_path_outcome = "no Path received since startup"
         self.current_state: Optional[str] = None
@@ -94,7 +102,12 @@ class DiagnosticReporter:
             except Exception:
                 # File/UI diagnostics must never interrupt ROS callbacks or rendering.
                 pass
-        self._write_log(level, message)
+        try:
+            self._write_log(level, message)
+        except Exception:
+            # Diagnostics are observational. A logger backend failure must not
+            # interrupt camera callbacks, rendering, recording, or shutdown.
+            pass
 
     def path_received(
         self, frame_id: str, point_count: int, header_stamp_sec: float | None = None
@@ -342,6 +355,18 @@ class DiagnosticReporter:
             getattr(source_metrics, "decode_duration_sec", None),
         )
         self._append_camera_metric(
+            self._camera_callback_duration_sec,
+            getattr(source_metrics, "callback_duration_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_callback_copy_duration_sec,
+            getattr(source_metrics, "callback_copy_duration_sec", None),
+        )
+        self._append_camera_metric(
+            self._camera_consumer_copy_duration_sec,
+            getattr(source_metrics, "consumer_copy_duration_sec", None),
+        )
+        self._append_camera_metric(
             self._camera_tick_interval_sec, tick_interval_sec
         )
         self._append_camera_metric(
@@ -387,7 +412,6 @@ class DiagnosticReporter:
                 )
             self._camera_previous_source_stamp = source_stamp
         self.camera_source_gap_frames += sequence_gap
-        reason = str(timestamp_reason).split(" ", 1)[0]
         level = "info" if read_success else "warning"
         usable_rate = (
             100.0 * self.camera_timestamp_usable_count
@@ -416,6 +440,16 @@ class DiagnosticReporter:
                 f"{getattr(source_metrics, 'handoff_discarded_total', 0)}"
                 " source_gap_total="
                 f"{getattr(source_metrics, 'source_gap_total', 0)}"
+                " ros_callback_received_total="
+                f"{getattr(source_metrics, 'received_total', 0)}"
+                " ros_callback_accepted_total="
+                f"{getattr(source_metrics, 'accepted_total', 0)}"
+                " ros_callback_rejected_total="
+                f"{getattr(source_metrics, 'rejected_total', 0)}"
+                " ros_callback_overwritten_total="
+                f"{getattr(source_metrics, 'overwritten_total', 0)}"
+                " ros_callback_consumed_total="
+                f"{getattr(source_metrics, 'consumed_total', 0)}"
                 " requested_capture_fps="
                 f"{getattr(source_metrics, 'requested_capture_fps', None)}"
                 " effective_capture_fps="
@@ -424,6 +458,10 @@ class DiagnosticReporter:
                 f"{getattr(source_metrics, 'capture_rate_reason', '') or 'unknown'}"
                 f" source_error={getattr(source_metrics, 'error_reason', '') or 'none'}"
             )
+        resource_now = self.clock()
+        if resource_now - self._resource_last_sample_at >= self.min_interval_sec:
+            self._resource_sample = self._resource_sampler.sample()
+            self._resource_last_sample_at = resource_now
         with self._camera_gui_lock:
             gui_present_count = self.camera_gui_present_count
             gui_new_count = self.camera_gui_new_frame_count
@@ -435,6 +473,8 @@ class DiagnosticReporter:
         deadline_pct = (
             100.0 * gui_deadline_miss_count / max(1, gui_new_count - 1)
         )
+        source_fps = self._rate_from_intervals(self._camera_source_interval_sec)
+        gui_new_fps = self._rate_from_intervals(gui_new_intervals)
         writer_detail = ""
         if recording_writer_metrics is not None:
             writer_detail = (
@@ -451,7 +491,10 @@ class DiagnosticReporter:
             )
         self._emit(
             level,
-            f"camera_pipeline:{mode}:{reason}",
+            # One aggregate line per interval. Keying on mode/reason allowed
+            # rapid state changes to bypass throttling and add avoidable I/O
+            # load to the image/render path.
+            "camera_pipeline",
             "camera_pipeline "
             f"reads={self.camera_read_count} "
             f"read_success={self.camera_read_success_count} "
@@ -467,6 +510,12 @@ class DiagnosticReporter:
             f"read_ms={self._camera_metric_summary(self._camera_read_duration_sec)} "
             f"dequeue_ms={self._camera_metric_summary(self._camera_dequeue_duration_sec)} "
             f"decode_ms={self._camera_metric_summary(self._camera_decode_duration_sec)} "
+            "ros_callback_ms="
+            f"{self._camera_metric_summary(self._camera_callback_duration_sec)} "
+            "ros_callback_copy_ms="
+            f"{self._camera_metric_summary(self._camera_callback_copy_duration_sec)} "
+            "ros_consumer_copy_ms="
+            f"{self._camera_metric_summary(self._camera_consumer_copy_duration_sec)} "
             f"tick_interval_ms={self._camera_metric_summary(self._camera_tick_interval_sec)} "
             f"tick_duration_ms={self._camera_metric_summary(self._camera_tick_duration_sec)} "
             "pre_render_ms="
@@ -474,8 +523,10 @@ class DiagnosticReporter:
             f"render_ms={self._camera_metric_summary(self._camera_render_duration_sec)} "
             f"writer_ms={self._camera_metric_summary(self._camera_writer_duration_sec)} "
             f"source_interval_ms={self._camera_metric_summary(self._camera_source_interval_sec)} "
+            f"ros_callback_fps_est={source_fps:.2f} "
             f"gui_interval_ms={self._camera_metric_summary(gui_intervals)} "
             f"gui_new_interval_ms={self._camera_metric_summary(gui_new_intervals)} "
+            f"gui_new_fps_est={gui_new_fps:.2f} "
             f"display_age_ms={self._camera_metric_summary(display_ages)} "
             f"source_gap_frames={self.camera_source_gap_frames} "
             f"gui_presents={gui_present_count} gui_new_frames={gui_new_count} "
@@ -485,6 +536,9 @@ class DiagnosticReporter:
             f"target_fps={target_fps} "
             f"recording_output_frames={int(recording_output_frames)} "
             f"recording_duplicates={int(recording_duplicate_frames)} "
+            f"process_cpu_pct={float(self._resource_sample['cpu_pct']):.1f} "
+            f"process_rss_mib={float(self._resource_sample['rss_mib']):.1f} "
+            f"process_threads={int(self._resource_sample['threads'])} "
             f"mode={mode} timestamp_reason={timestamp_reason}"
             f"{source_detail}{writer_detail}",
             force=self.camera_read_count == 1,
@@ -554,6 +608,14 @@ class DiagnosticReporter:
             f"mean:{mean * 1000.0:.1f},p50:{median * 1000.0:.1f},"
             f"p95:{p95 * 1000.0:.1f},max:{ordered[-1] * 1000.0:.1f}"
         )
+
+    @staticmethod
+    def _rate_from_intervals(values) -> float:
+        valid = sorted(float(value) for value in values if float(value) > 0.0)
+        if not valid:
+            return 0.0
+        median = valid[(len(valid) - 1) // 2]
+        return 1.0 / median
 
     def localization_update(
         self, state: str, detail: str, receive_count: int

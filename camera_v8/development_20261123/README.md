@@ -85,3 +85,95 @@ git diff --check
 - UIの「手動発火」は**テスト用**。本番ではFollowerから既存のperson_areaイベントを受け取る。
 - GUIの古い「写真だけ撮影」内部ヘルパーはV7由来でソース内に残るが、V8のUIからは呼び出せない。後日完全整理予定。
 - Desktopアイコンのインストールは、実機NUCの検証用クローンから `install_v8_desktop.sh` を明示実行したときのみ。既存のV7.desktopを上書きしない。
+## AR/V8 pipeline diagnostics (next field run)
+
+The diagnostics are scalar counters/timings inside the existing camera owner,
+AR subscriber and V8 subscriber. They do **not** add an image subscriber and
+do not retain image pixels. Every five seconds the logs contain:
+
+- `camera_owner_pipeline`: C920 handoff, AR/V8 publish rates, serialization,
+  owner CPU/RSS;
+- `camera_pipeline`: AR ROS callback/copy, Viewer tick/render, GUI-new-frame
+  interval, capture-to-display age, recorder and AR process CPU/RSS;
+- `v8_image_pipeline`: V8 receive/overwrite/consume rates, YOLO/VLM calls and
+  durations, V8 process CPU/RSS.
+
+`camera_fps_bookkeeping=15.0` in the V8 line is explicitly **not** a measured
+input rate. V8 continues to consume the latest shared frames and the unchanged
+V7 engine invokes YOLO according to `process_every=5`. The measured
+`receive_fps`, `consume_fps`, and `yolo_fps` show the actual rates. This change
+does not alter V8 resolution, publication rate, recognition thresholds, or
+person-search completion behavior.
+
+After AR, camera owner, and the V8 person-search server are running, start the
+read-only collector in a fourth terminal:
+
+```bash
+cd ~/v8_camera_eval/nakanoshima-robot-challenge
+export ROS_DOMAIN_ID=54
+source /opt/ros/jazzy/setup.bash
+source ~/robotbase_ws_renya/install/setup.bash
+source robot_ws/install/setup.bash
+source ar_ws/install/setup.bash
+bash camera_v8/development_20261123/collect_ar_v8_diagnostics.sh
+```
+
+The collector requires exactly one PID for each real command line used by the
+current launchers: `v8_camera_source.py`, the installed `ar_path_viewer`
+console script, and `daikoudai_v8.py --person-search-server`. It also verifies
+the corresponding ROS nodes (`/koko_v8_camera_source`, `/ar_path_viewer`, and
+`/camera_all_in_one_person_search`) and resolves the three persistent logs. It
+aborts with the candidates/reason on zero, duplicate, or incomplete startup.
+The V8 server is expected to exist while waiting for a person-search event;
+start the preserved V8 UI server at least five seconds before the collector.
+
+`pidstat -H -t -w` records epoch time, process/thread CPU and RSS, plus
+voluntary/involuntary context switches. The MCAP intentionally
+records only low-bandwidth state/TF/path/costmap/person-search topics; both raw
+image topics are excluded so diagnosis does not duplicate camera traffic.
+
+Run one route containing these three segments, without restarting the
+processes: normal navigation, active person search, and navigation after the
+terminal search result. Press Ctrl+C only after the post-search segment. The
+collector writes the exact source-log paths to `process_manifest.txt` and an
+escaped, ready-to-run `analyze_this_run.sh`; it does not copy a still-open log
+and thereby lose its tail. The generated command also bounds analysis to the
+collector start/end epoch, so an earlier V8-server run in the same UI log is
+not mixed into this run. Run:
+
+```bash
+<diagnostic-dir>/analyze_this_run.sh
+```
+
+The analyzer accepts rclpy epoch lines and the Viewer's ISO-8601 session lines.
+It uses the owner's exact enable/stop transition lines when present, with the
+five-second `v8_active` sample only as a fallback. It prints `INSUFFICIENT DATA`
+instead of guessing when a process, rate field, or any of normal/search/post
+segments is absent. It separately reports bounded versus accumulating display
+latency, so low FPS is not automatically mislabeled as stale video.
+Its first branch is selected as follows:
+
+1. owner AR publish below 27 fps: camera owner/capture/serialization;
+2. owner healthy but AR receive low: owner-to-AR DDS/callback;
+3. AR receive healthy but GUI new-frame rate low: Viewer/render/GUI;
+4. owner healthy but V8 receive low: DDS/V8 callback contention;
+5. V8 receive healthy but consumption low: YOLO/VLM consumption contention;
+6. degradation limited to active search: system contention;
+7. increasing or high capture-to-display age: latency/jitter before FPS.
+
+The exact five-second rows and `pidstat.log` remain the source evidence; the
+automatic branch is a triage result, not a claim about the robot.
+
+For a hardware-free instrumentation overhead comparison:
+
+```bash
+source ar_ws/install/setup.bash
+python3 ar_ws/src/ar_path_viewer/scripts/benchmark_pipeline_metrics.py
+```
+
+To return to the pre-diagnostic runtime without reverting source, pass
+`--no-pipeline-diagnostics` to `v8_camera_source.py` and
+`--no-pipeline_diagnostics` to the V8 server. This disables only scalar
+collection; no navigation or recognition setting changes. In an emergency,
+use the previously built/committed revision through the normal Git deployment
+workflow—never patch the NUC working tree directly.
