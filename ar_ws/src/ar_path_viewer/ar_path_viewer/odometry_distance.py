@@ -166,6 +166,11 @@ class SessionOdomTravelDistanceMeter:
         with self._lock:
             return self._frozen
 
+    def live_snapshot(self) -> OdomTravelSnapshot:
+        """Read measured distance without freezing an active session."""
+        with self._lock:
+            return self._frozen or self._snapshot_locked()
+
     def observe(self, x, y, stamp):
         try:
             x, y, t = float(x), float(y), float(stamp)

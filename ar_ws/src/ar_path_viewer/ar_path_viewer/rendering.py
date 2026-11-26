@@ -32,6 +32,7 @@ VALID_STATES = {
     "LOCALIZATION UNSTABLE",
     "REPLANNING",
     "NAVIGATION HOLD",
+    "MAPPING READY",
     "MANUAL MAPPING",
     "MAPPING SESSION ENDED",
     "INVALID CONFIG",
@@ -755,12 +756,26 @@ def render_frame(
                 travel_distance_status_ja or travel_distance_status,
                 travel_distance_status, (225, 250, 230), 19,
             )
-    if state == "MANUAL MAPPING":
-        # An observation-only session; R is local to the Viewer window.
+    if state == "MAPPING READY":
+        # Camera may start long before teleop/SLAM: no distance counted yet.
         _draw_bottom_badge(
-            frame, "MANUAL MAPPING | R: END DISTANCE SESSION",
+            frame, "MAPPING READY | R: START MEASUREMENT",
             (180, 225, 250),
         )
+    elif state == "MANUAL MAPPING":
+        # Show OBSERVED odom distance on every rendered camera frame.
+        _draw_bottom_badge(
+            frame, "MEASURING | R: END MEASUREMENT", (180, 225, 250),
+        )
+        if travel_distance_status:
+            draw_localized_label(
+                frame,
+                (12, max(1, frame.shape[0] - 85),
+                 max(14, frame.shape[1] - 12),
+                 max(2, frame.shape[0] - 42)),
+                travel_distance_status_ja or travel_distance_status,
+                travel_distance_status, (220, 245, 255), 23,
+            )
     elif state == "MAPPING SESSION ENDED":
         center_x = frame.shape[1] // 2
         center_y = frame.shape[0] // 2

@@ -624,8 +624,11 @@ class ArPathViewerNode(Node):
         self._travel_session_lock = threading.RLock()
         self._autonomous_session_identity = None
         self._route_completion = None
-        # Frozen result of a manual mapping measurement session (R key).
-        # The lock is shared with the odometry meter's own atomic freeze.
+        # Manual distance is READY on startup: camera may precede SLAM/teleop.
+        # R starts from zero; the next R freezes the measured distance.
+        # All mode transitions and accepted odom observations share this lock.
+        self._mapping_phase = 'ready'
+        self._mapping_start_stamp = float('inf')
         self._mapping_finished = None
         self._last_reported_rotation = None
         self._last_verified_final_goal = None
@@ -1201,7 +1204,7 @@ class ArPathViewerNode(Node):
             phase, snapshot = ArPathViewerNode._toggle_manual_mapping(self)
             label = (
                 "MAPPING SESSION ENDED" if phase == "ended"
-                else "MAPPING SESSION RESTARTED"
+                else "MAPPING SESSION STARTED"
             )
             if display_window is not None:
                 display_window.set_status(label, True)
@@ -1427,10 +1430,22 @@ class ArPathViewerNode(Node):
                 == self._str('rotation_odom_frame')):
             session_meter = getattr(self, '_session_distance_meter', None)
             if session_meter is not None:
-                session_meter.observe(
-                    message.pose.pose.position.x,
-                    message.pose.pose.position.y, stamp,
-                )
+                if getattr(self, '_operation_mode', 'autonomous') == 'manual_mapping':
+                    # R transitions and odom samples must be atomic as a pair.
+                    # READY and ENDED do not collect movement at all.
+                    with self._travel_session_lock:
+                        if (self._mapping_phase == 'running'
+                                and stamp >= self._mapping_start_stamp):
+                            session_meter.observe(
+                                message.pose.pose.position.x,
+                                message.pose.pose.position.y, stamp,
+                            )
+                else:
+                    # Keep autonomous session semantics unchanged.
+                    session_meter.observe(
+                        message.pose.pose.position.x,
+                        message.pose.pose.position.y, stamp,
+                    )
         if (stamp <= 0.0 or abs(now - stamp) > 0.75
                 or str(message.header.frame_id)
                 != self._str('rotation_odom_frame')):
@@ -1570,24 +1585,30 @@ class ArPathViewerNode(Node):
             )
 
     def _toggle_manual_mapping(self):
-        """Viewer-only R key: freeze observed distance or begin a new session.
+        """R: READY/ENDED -> RUNNING; RUNNING -> ENDED, observation only.
 
-        Never sends motor commands, stops teleop, or changes Launcher2/SLAM.
-        Called only after a Viewer-focused HighGUI key press.
+        A mapping session begins on the first R, NOT at camera startup.
+        This never stops the robot, teleop, SLAM or Launcher2.
         """
         if self._operation_mode != "manual_mapping":
             raise RuntimeError("manual mapping key used outside manual mode")
         with self._travel_session_lock:
-            if self._mapping_finished is None:
-                snapshot = self._session_distance_meter.freeze()
-                self._mapping_finished = snapshot
-                phase = "ended"
-            else:
+            current = self._mapping_phase
+            if current in ('ready', 'ended'):
                 self._session_distance_meter.reset()
                 self._mapping_finished = None
+                self._mapping_start_stamp = float(self._ros_now_sec())
+                self._mapping_phase = 'running'
                 snapshot = None
-                phase = "running"
-        if phase == "ended":
+                phase = 'running'
+            elif current == 'running':
+                snapshot = self._session_distance_meter.freeze()
+                self._mapping_finished = snapshot
+                self._mapping_phase = 'ended'
+                phase = 'ended'
+            else:
+                raise RuntimeError(f'invalid mapping phase: {current}')
+        if phase == 'ended':
             self._log_info(
                 "manual_mapping_session_ended "
                 f"observed_m={snapshot.observed_m:.3f} "
@@ -1595,7 +1616,7 @@ class ArPathViewerNode(Node):
                 f"lower_bound={snapshot.is_observed_lower_bound}"
             )
         else:
-            self._log_info("manual_mapping_session_restarted")
+            self._log_info("manual_mapping_session_started")
         return phase, snapshot
 
     def _update_autonomous_travel_session(self, message) -> None:
@@ -2137,16 +2158,36 @@ class ArPathViewerNode(Node):
             # Camera-only display path. No AMCL, TF, Nav2 /plan, or Follower
             # is necessary; never reuse autonomous navigation geometry.
             with self._travel_session_lock:
+                mapping_phase = self._mapping_phase
                 mapping_result = self._mapping_finished
-            if mapping_result is None:
-                state = "MANUAL MAPPING"
+                # Immutable live snapshot; this must NOT freeze accumulation.
+                live_result = (
+                    self._session_distance_meter.live_snapshot()
+                    if mapping_phase == 'running' else None
+                )
+            if mapping_phase == 'ready':
+                state = "MAPPING READY"
                 distance_ascii = ""
                 distance_ja = ""
-            else:
+            elif mapping_phase == 'running':
+                state = "MANUAL MAPPING"
+                if live_result is not None and live_result.available:
+                    distance_ascii, distance_ja = _travel_distance_labels(
+                        live_result
+                    )
+                else:
+                    distance_ascii = 'ODOM: WAITING FOR SAMPLES'
+                    distance_ja = '距離計測中：データ待機'
+            elif mapping_phase == 'ended' and mapping_result is not None:
                 state = "MAPPING SESSION ENDED"
                 distance_ascii, distance_ja = _travel_distance_labels(
                     mapping_result
                 )
+            else:
+                # Impossible state is visibly fail-closed.
+                state = "INVALID CONFIG"
+                distance_ascii = ""
+                distance_ja = ""
             frame = render_frame(
                 image, [], state, debug_overlay=debug_overlay,
                 travel_distance_status=distance_ascii,
