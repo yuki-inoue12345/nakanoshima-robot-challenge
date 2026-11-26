@@ -26,7 +26,7 @@ done
 if [[ -z "$MODE" ]]; then
   if [[ -n "${DISPLAY:-}" ]] && command -v zenity >/dev/null 2>&1; then
     choice="$(zenity --list --title='ココちゃんナビ：起動モード選択' \
-      --text='使用するモードを選んでください（Launcher2とは独立）' \
+      --text='使用するモードを選んでください' \
       --column='モード' '自律走行' 'キーオペ・地図作成')" || exit 0
     case "$choice" in
       '自律走行') MODE=autonomous ;;
