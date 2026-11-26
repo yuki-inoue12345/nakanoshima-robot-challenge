@@ -30,6 +30,12 @@ source "$REPO/robot_ws/install/setup.bash"
 source "$REPO/ar_ws/install/setup.bash"
 set -u
 RUNNER="$REPO/ar_ws/install/ar_reference_planner/lib/ar_reference_planner/run_kokochan_navi_launcher2"
+# Explicit viewer operation mode. It is not inferred from Launcher2/Follower.
+case "${KOKO_NAVI_MODE:-autonomous}" in
+    autonomous) ;;
+    manual_mapping) RUNNER="$HERE/run_ar_manual_mapping_viewer.sh" ;;
+    *) echo "Unsupported KOKO_NAVI_MODE: ${KOKO_NAVI_MODE}" >&2; exit 2 ;;
+esac
 [[ -x "$RUNNER" ]] || { echo "AR runner missing: build ar_ws first." >&2; exit 2; }
 # Match the standalone photo-session lock across ALL ROS domains.
 command -v flock >/dev/null 2>&1 || { echo "flock unavailable" >&2; exit 2; }

@@ -317,6 +317,34 @@ def test_active_route_keeps_green_line_and_adds_direction_and_distance_badges():
     assert not np.array_equal(frame[48:130, 400:], baseline[48:130, 400:])
 
 
+def test_route_complete_has_recordable_japanese_distance_panel(monkeypatch):
+    import ar_path_viewer.rendering as rendering
+
+    localized = []
+    original = rendering.draw_localized_label
+
+    def recording_label(frame, rect, japanese, fallback, color, height):
+        used_japanese = original(
+            frame, rect, japanese, fallback, color, height
+        )
+        localized.append((japanese, used_japanese))
+        return used_japanese
+
+    monkeypatch.setattr(rendering, 'draw_localized_label', recording_label)
+    image = np.zeros((480, 640, 3), np.uint8)
+    complete = rendering.render_frame(
+        image, [], 'NAVIGATION HOLD', navigation_status='ROUTE COMPLETE',
+        travel_distance_status='ODOM TRAVELED: ~15.3 m',
+        travel_distance_status_ja='走行距離：約 15.3 m',
+    )
+    assert np.count_nonzero(complete[150:340]) > 3000
+    assert not np.array_equal(complete, image)
+    assert localized == [
+        ('走行終了', True),
+        ('走行距離：約 15.3 m', True),
+    ]
+
+
 def test_normal_overlay_hides_technical_detail_but_debug_mode_keeps_it():
     image = np.zeros((480, 640, 3), np.uint8)
     detail = "gen=42 frame=map pts=110 len=2.80m seg=75 px=154"

@@ -112,6 +112,9 @@ class ArPathViewerNode(Node):
         self._robot_view_expanded = False
         self._display_frames = LatestDisplayFrame()
         defaults = {
+            # Selected explicitly by the camera owner wrapper, never inferred
+            # from Launcher2 / Nav2 / Follower availability.
+            "operation_mode": "autonomous",
             "path_topic": "/plan",
             "amcl_pose_topic": "/amcl_pose",
             "base_frame": "robot/base_footprint",
@@ -281,6 +284,7 @@ class ArPathViewerNode(Node):
 
         self._config_error = ""
         self._camera_error = ""
+        self._operation_mode = "autonomous"
         self._log_copy_max_chars = max(2000, self._int("log_copy_max_chars"))
         log_max_entries = max(100, self._int("log_max_entries"))
         self._session_paths = resolve_session_paths(
@@ -291,6 +295,11 @@ class ArPathViewerNode(Node):
         self._session_log = SessionLog(self._session_paths.log, log_max_entries)
         self._log_gui = LogGui()
         try:
+            self._operation_mode = self._str("operation_mode").strip()
+            if self._operation_mode not in ("autonomous", "manual_mapping"):
+                raise ValueError(
+                    "operation_mode must be autonomous or manual_mapping"
+                )
             self._source_intrinsics = CameraIntrinsics(
                 width=self._int("width"), height=self._int("height"),
                 fx=self._float("fx"), fy=self._float("fy"),
@@ -612,6 +621,12 @@ class ArPathViewerNode(Node):
         # Always measures physical travel since THIS viewer session began.
         # Does not depend on a temporarily missing legacy Follower heartbeat.
         self._session_distance_meter = SessionOdomTravelDistanceMeter()
+        self._travel_session_lock = threading.RLock()
+        self._autonomous_session_identity = None
+        self._route_completion = None
+        # Frozen result of a manual mapping measurement session (R key).
+        # The lock is shared with the odometry meter's own atomic freeze.
+        self._mapping_finished = None
         self._last_reported_rotation = None
         self._last_verified_final_goal = None
         self._final_waypoint_success = None
@@ -1180,6 +1195,16 @@ class ArPathViewerNode(Node):
                 ArPathViewerNode._handle_display_action(self, action)
             else:
                 handler(action)
+        if (getattr(self, "_operation_mode", "autonomous") == "manual_mapping"
+                and key_code is not None and
+                (int(key_code) & 0xFFFFFFFF) in (ord('r'), ord('R'))):
+            phase, snapshot = ArPathViewerNode._toggle_manual_mapping(self)
+            label = (
+                "MAPPING SESSION ENDED" if phase == "ended"
+                else "MAPPING SESSION RESTARTED"
+            )
+            if display_window is not None:
+                display_window.set_status(label, True)
         if is_debug_toggle_key(key_code):
             lock = getattr(self, "_ui_state_lock", None)
             if lock is None:
@@ -1503,6 +1528,7 @@ class ArPathViewerNode(Node):
             message, self._ros_now_sec(), path_generation
         )
         if progress_accepted:
+            self._update_autonomous_travel_session(message)
             destination = getattr(self, '_route_destination', None)
             if destination is not None and (
                 destination.route_sha256 != str(message.route_sha256)
@@ -1522,6 +1548,11 @@ class ArPathViewerNode(Node):
             else:
                 self._last_verified_final_goal = None
                 self._final_waypoint_success = None
+        elif (
+            int(getattr(message, 'activity', -1))
+            == WaypointFollowerState.ACTIVITY_FINISHED
+        ):
+            self._accept_verified_route_completion(message)
         if self._reference_enabled:
             accepted = self._reference_gate.update_follower(
                 message, self._ros_now_sec()
@@ -1537,6 +1568,99 @@ class ArPathViewerNode(Node):
                 False,
                 self._waypoint_progress_gate.reason,
             )
+
+    def _toggle_manual_mapping(self):
+        """Viewer-only R key: freeze observed distance or begin a new session.
+
+        Never sends motor commands, stops teleop, or changes Launcher2/SLAM.
+        Called only after a Viewer-focused HighGUI key press.
+        """
+        if self._operation_mode != "manual_mapping":
+            raise RuntimeError("manual mapping key used outside manual mode")
+        with self._travel_session_lock:
+            if self._mapping_finished is None:
+                snapshot = self._session_distance_meter.freeze()
+                self._mapping_finished = snapshot
+                phase = "ended"
+            else:
+                self._session_distance_meter.reset()
+                self._mapping_finished = None
+                snapshot = None
+                phase = "running"
+        if phase == "ended":
+            self._log_info(
+                "manual_mapping_session_ended "
+                f"observed_m={snapshot.observed_m:.3f} "
+                f"accepted_steps={snapshot.accepted_steps} "
+                f"lower_bound={snapshot.is_observed_lower_bound}"
+            )
+        else:
+            self._log_info("manual_mapping_session_restarted")
+        return phase, snapshot
+
+    def _update_autonomous_travel_session(self, message) -> None:
+        """Start/reset odometry only at a verified autonomous route epoch."""
+        identity = (str(message.route_sha256), int(message.waypoint_count))
+        generation = int(message.goal_generation)
+        with self._travel_session_lock:
+            completion = self._route_completion
+            new_run = (
+                completion is not None
+                and (
+                    identity != completion['identity']
+                    or generation > completion['goal_generation']
+                )
+            )
+            if self._autonomous_session_identity is None or (
+                self._autonomous_session_identity != identity
+            ) or new_run:
+                self._session_distance_meter.reset()
+                self._autonomous_session_identity = identity
+                self._route_completion = None
+                self._final_waypoint_success = None
+                self._log_info(
+                    'autonomous_odom_session_started '
+                    f'route={identity[0][:12]} waypoint_count={identity[1]} '
+                    f'goal_generation={generation}'
+                )
+
+    def _accept_verified_route_completion(self, message) -> None:
+        """Latch completion and one immutable odometry result."""
+        last_goal = self._last_verified_final_goal
+        if last_goal is None:
+            return
+        route, generation, number, count, _verified_at = last_goal
+        expected = (route, generation, number, count)
+        actual = (
+            str(message.route_sha256), int(message.goal_generation),
+            int(message.next_waypoint_number), int(message.waypoint_count),
+        )
+        if (
+            actual != expected
+            or int(message.next_waypoint_index) != count
+            or self._waypoint_progress_gate.navigation_hold_status(
+                self._ros_now_sec()
+            ) != 'ROUTE COMPLETE'
+        ):
+            return
+        with self._travel_session_lock:
+            if self._route_completion is not None:
+                return
+            snapshot = self._session_distance_meter.freeze()
+            self._route_completion = {
+                'identity': (route, count),
+                'goal_generation': generation,
+                'waypoint_number': number,
+                'completed_ros_sec': self._ros_now_sec(),
+                'distance': snapshot,
+            }
+        self._log_info(
+            'route_completion_latched '
+            f'route={route[:12]} goal_generation={generation} '
+            f'waypoint={number} observed_m={snapshot.observed_m:.3f} '
+            f'accepted_steps={snapshot.accepted_steps} '
+            f'lower_bound={snapshot.is_observed_lower_bound}'
+        )
 
     def _on_reference_path_state(self, message: ReferencePathState) -> None:
         accepted = self._reference_gate.update_reference(
@@ -2007,6 +2131,26 @@ class ArPathViewerNode(Node):
                 localization_warning=localization_warning,
                 robot_view_enabled=robot_view_enabled,
                 robot_view_expanded=robot_view_expanded,
+            )
+            render_duration_sec = time.monotonic() - render_started_monotonic
+        elif getattr(self, "_operation_mode", "autonomous") == "manual_mapping":
+            # Camera-only display path. No AMCL, TF, Nav2 /plan, or Follower
+            # is necessary; never reuse autonomous navigation geometry.
+            with self._travel_session_lock:
+                mapping_result = self._mapping_finished
+            if mapping_result is None:
+                state = "MANUAL MAPPING"
+                distance_ascii = ""
+                distance_ja = ""
+            else:
+                state = "MAPPING SESSION ENDED"
+                distance_ascii, distance_ja = _travel_distance_labels(
+                    mapping_result
+                )
+            frame = render_frame(
+                image, [], state, debug_overlay=debug_overlay,
+                travel_distance_status=distance_ascii,
+                travel_distance_status_ja=distance_ja,
             )
             render_duration_sec = time.monotonic() - render_started_monotonic
         elif waiting_for_delayed_frame:
@@ -3154,14 +3298,29 @@ class ArPathViewerNode(Node):
                 costmap_alert = None
                 if camera_pipeline_mode == "synchronized":
                     camera_pipeline_mode = "preview_path_wait"
-            if (self._waypoint_progress_gate.navigation_hold_status(
-                    self._ros_now_sec()) == "ROUTE COMPLETE"):
-                # Only explicit follower activity 9 authorizes this.
-                state = "NAVIGATION HOLD"
-                detail = "follower_reported_finished"
-                navigation_status = "ROUTE COMPLETE"
-                waypoint_status = ""
-                final_waypoint_status = ""
+            with self._travel_session_lock:
+                route_completion = self._route_completion
+            if route_completion is not None:
+                # This latch is independent of the following STOPPED heartbeat
+                # and remains until a verified new route session starts.
+                state = 'NAVIGATION HOLD'
+                detail = 'verified_route_completion_latched'
+                navigation_status = 'ROUTE COMPLETE'
+                waypoint_status = ''
+                final_waypoint_status = ''
+                segments = []
+                reference_segments = []
+                guidance = None
+            elif (navigation_status == 'ROUTE COMPLETE' or
+                  self._waypoint_progress_gate.navigation_hold_status(
+                      self._ros_now_sec()) == 'ROUTE COMPLETE'):
+                # An unlatched FINISHED status is not independent confirmation.
+                # Hide all geometry, but never advertise unverified completion.
+                state = 'NAVIGATION HOLD'
+                detail = 'unverified_finished_state_suppressed'
+                navigation_status = 'STOPPED'
+                waypoint_status = ''
+                final_waypoint_status = ''
                 segments = []
                 reference_segments = []
                 guidance = None
@@ -3183,7 +3342,12 @@ class ArPathViewerNode(Node):
                     reference_segments = []
                     guidance = None
             travel_distance_status = ''
-            if navigation_status in ('ROUTE COMPLETE', 'FINAL WP REACHED'):
+            travel_distance_status_ja = ''
+            if route_completion is not None:
+                travel_distance_status, travel_distance_status_ja = (
+                    _travel_distance_labels(route_completion['distance'])
+                )
+            elif navigation_status in ('ROUTE COMPLETE', 'FINAL WP REACHED'):
                 meter = getattr(self, '_session_distance_meter', None)
                 distance = None if meter is None else meter.total_m()
                 if distance is not None:
@@ -3238,6 +3402,7 @@ class ArPathViewerNode(Node):
                 navigation_status=navigation_status,
                 observed_rotation_status=observed_rotation_status,
                 travel_distance_status=travel_distance_status,
+                travel_distance_status_ja=travel_distance_status_ja,
                 debug_overlay=debug_overlay,
                 path_alpha=getattr(self, "_path_alpha", 1.0),
                 costmap_projection=(
@@ -3375,6 +3540,23 @@ def is_exit_key(key_code: int) -> bool:
     return code in {ord("q"), ord("Q"), 0x00790000, 0x0000FFC7, 0x01000039}
 
 
+def _travel_distance_labels(snapshot) -> tuple[str, str]:
+    """Return honest ASCII/Japanese labels for one frozen odometry result."""
+    if snapshot is None:
+        return '', ''
+    if not snapshot.available:
+        return 'ODOM DISTANCE: UNAVAILABLE', '走行距離：計測不可'
+    if snapshot.is_observed_lower_bound:
+        return (
+            f'ODOM OBSERVED MIN: ~{snapshot.observed_m:.1f} m',
+            f'走行距離（観測下限）：約 {snapshot.observed_m:.1f} m',
+        )
+    return (
+        f'ODOM TRAVELED: ~{snapshot.observed_m:.1f} m',
+        f'走行距離：約 {snapshot.observed_m:.1f} m',
+    )
+
+
 def is_debug_toggle_key(key_code: int) -> bool:
     """Use D/d for a backend-independent normal/debug overlay toggle."""
     if key_code is None or key_code < 0:
@@ -3406,10 +3588,12 @@ def main(args=None) -> None:
     # HighGUI requires window creation, imshow/waitKey, and destruction on one
     # thread (the process main thread on Qt/GTK).  ROS callbacks therefore run
     # in this background executor while the main thread pumps the GUI below.
-    # Two executor workers remain necessary: camera/rendering uses the node's
-    # mutually-exclusive default callback group, while TransformListener's
-    # reentrant callbacks can continue ingesting 30 Hz TF on the other worker.
-    executor = MultiThreadedExecutor(num_threads=2)
+    # Three workers keep render, the locked latest-only camera callback, and
+    # the locked route/reference/TF callbacks independently schedulable.
+    # Costmap remains in the render timer's mutually-exclusive default group:
+    # CostmapStore/TransformQueue are intentionally single-owner structures.
+    # HighGUI itself remains on this main thread.
+    executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
     executor_done = threading.Event()
     executor_failure: list[tuple[BaseException, str]] = []

@@ -14,11 +14,15 @@ from ar_reference_planner.legacy_compatibility import (
     resolve_legacy_progress,
     unique_waypoint_index,
 )
+from ar_reference_planner.legacy_completion import (
+    LegacyCompletion,
+    LegacyCompletionGate,
+)
 from ar_reference_planner.legacy_follower_bridge import LegacyFollowerBridge
 from ar_reference_planner.route import load_route
 from builtin_interfaces.msg import Time
 import pytest
-from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.msg import Log, ParameterType, ParameterValue
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -307,6 +311,75 @@ def test_verified_legacy_state_is_accepted_by_strict_planner_contract(tmp_path):
     assert snapshot.next_index == 1
     assert snapshot.goal_generation == 7
     assert snapshot.safe_end_index == 2
+
+
+def test_finished_publisher_uses_terminal_index_and_disallows_reference(tmp_path):
+    route = _route(tmp_path)
+    published = []
+
+    class ClockValue:
+        @staticmethod
+        def to_msg():
+            return Time(sec=30, nanosec=0)
+
+    fake = SimpleNamespace(
+        _publisher=SimpleNamespace(publish=published.append),
+        _route=route, _map_frame='map', _navigation_mode='to_pose',
+        get_clock=lambda: SimpleNamespace(now=lambda: ClockValue()),
+    )
+    completion = LegacyCompletion(
+        route.sha256, 8, '01' * 16, len(route.waypoints) - 1,
+        route.waypoints[-1].number, len(route.waypoints),
+    )
+    LegacyFollowerBridge._publish_finished_state(fake, completion)
+
+    message = published[-1]
+    assert message.activity == WaypointFollowerState.ACTIVITY_FINISHED
+    assert message.next_waypoint_index == len(route.waypoints)
+    assert message.next_waypoint_number == route.waypoints[-1].number
+    assert message.reference_allowed is False
+
+
+def test_terminal_follower_log_publishes_completion_without_timer_delay(tmp_path):
+    route = _route(tmp_path)
+    published = []
+    reasons = []
+    gate = LegacyCompletionGate('koko_waypoint_follower', 2.0)
+    goal_uuid = '01' * 16
+    gate.bind_final_goal(
+        route_sha256=route.sha256,
+        goal_generation=8,
+        goal_uuid=goal_uuid,
+        final_index=len(route.waypoints) - 1,
+        final_number=route.waypoints[-1].number,
+        waypoint_count=len(route.waypoints),
+    )
+    gate.observe_status(goal_uuid, GoalStatus.STATUS_SUCCEEDED, monotonic())
+
+    class ClockValue:
+        @staticmethod
+        def to_msg():
+            return Time(sec=30, nanosec=0)
+
+    fake = SimpleNamespace(
+        _completion_gate=gate,
+        _publisher=SimpleNamespace(publish=published.append),
+        _route=route,
+        _map_frame='map',
+        _navigation_mode='to_pose',
+        get_clock=lambda: SimpleNamespace(now=lambda: ClockValue()),
+        _log_reason=reasons.append,
+    )
+    first = Log(name='koko_waypoint_follower')
+    first.msg = f'[WP:{route.waypoints[-1].number}] reached by Nav2'
+    second = Log(name='koko_waypoint_follower')
+    second.msg = 'All waypoints completed'
+
+    LegacyFollowerBridge._on_follower_log(fake, first)
+    assert published == []
+    LegacyFollowerBridge._on_follower_log(fake, second)
+    assert published[-1].activity == WaypointFollowerState.ACTIVITY_FINISHED
+    assert reasons[-1] == 'legacy_route_completion_verified'
 
 
 def test_modern_follower_parameter_disables_compatibility_publisher():

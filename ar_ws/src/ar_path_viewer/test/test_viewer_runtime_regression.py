@@ -16,6 +16,7 @@ from ar_path_viewer.localization_monitor import (
     LocalizationThresholds,
     LocalizationWarningGate,
 )
+from ar_path_viewer.odometry_distance import SessionOdomTravelDistanceMeter
 from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.path_transition import PathTransitionGate
 from ar_path_viewer.perception_frame_delay import DelayedFrame, PerceptionFrameDelay
@@ -154,6 +155,22 @@ def make_viewer(clock=None):
     fake = FakeViewer()
     active_clock = clock or __import__("time").monotonic
     fake._shutdown_requested = False
+    fake._travel_session_lock = threading.Lock()
+    fake._session_distance_meter = SessionOdomTravelDistanceMeter()
+    fake._autonomous_session_identity = None
+    fake._route_completion = None
+    fake._last_verified_final_goal = None
+    fake._final_waypoint_success = None
+    fake._update_autonomous_travel_session = lambda message: (
+        viewer_node.ArPathViewerNode._update_autonomous_travel_session(
+            fake, message
+        )
+    )
+    fake._accept_verified_route_completion = lambda message: (
+        viewer_node.ArPathViewerNode._accept_verified_route_completion(
+            fake, message
+        )
+    )
     fake._resources_released = False
     fake._main_thread_id = threading.get_ident()
     fake._ui_state_lock = threading.Lock()
@@ -396,6 +413,56 @@ def test_plan_remaining_distance_tracks_only_fresh_follower_goal(monkeypatch):
     )
     viewer_node.ArPathViewerNode._tick(fake)
     assert rendered[-1][1] == ""
+
+
+def test_verified_route_completion_is_recorded_and_survives_stopped(monkeypatch):
+    rendered = []
+
+    def render(image, segments, state, *args, **kwargs):
+        rendered.append((
+            state,
+            kwargs.get('navigation_status', ''),
+            kwargs.get('travel_distance_status', ''),
+        ))
+        frame = image.copy()
+        frame[0, 0] = (12, 34, 56)
+        return frame
+
+    monkeypatch.setattr(viewer_node, 'render_frame', render)
+    fake = make_viewer()
+    navigating = reference_follower_message(
+        index=7, number=10, generation=10, activity=1, allowed=True,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(
+        fake, navigating
+    )
+    for index in range(21):
+        fake._session_distance_meter.observe(
+            index * 0.01, 0.0, 1.0 + index * 0.03
+        )
+
+    finished = reference_follower_message(
+        index=8, number=10, generation=10, activity=9, allowed=False,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, finished)
+    viewer_node.ArPathViewerNode._tick(fake)
+    first_distance = rendered[-1][2]
+    assert rendered[-1][:2] == ('NAVIGATION HOLD', 'ROUTE COMPLETE')
+    assert '0.2 m' in first_distance
+    assert tuple(fake._writer.frames[-1][0, 0]) == (12, 34, 56)
+
+    # Later odometry and the legacy inactive heartbeat cannot alter or erase
+    # the already verified completion result written into the recording.
+    fake._session_distance_meter.observe(50.0, 0.0, 20.0)
+    stopped = reference_follower_message(
+        index=7, number=10, generation=10, activity=8, allowed=False,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, stopped)
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1] == (
+        'NAVIGATION HOLD', 'ROUTE COMPLETE', first_distance
+    )
+    assert len(fake._writer.frames) == 2
 
 
 def test_through_poses_shows_only_plan_remaining_distance(monkeypatch):
@@ -1550,3 +1617,47 @@ def test_shutdown_uses_try_shutdown(monkeypatch):
     monkeypatch.setattr(viewer_node.rclpy, "try_shutdown", lambda: calls.append(True))
     viewer_node.shutdown_ros_context()
     assert calls == [True]
+
+
+def test_unverified_finished_does_not_render_route_complete(monkeypatch):
+    """An activity=9 event alone must not activate the completion card."""
+    rendered = []
+
+    def record(image, segments, state, *args, **kwargs):
+        rendered.append((state, kwargs.get('navigation_status', ''),
+                         kwargs.get('travel_distance_status', '')))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, 'render_frame', record)
+    fake = make_viewer()
+    finished = reference_follower_message(
+        index=8, number=10, generation=10, activity=9, allowed=False,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, finished)
+    assert fake._route_completion is None
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1][1] != 'ROUTE COMPLETE'
+    assert rendered[-1][2] == ''
+
+
+def test_mismatched_finished_generation_never_renders_complete(monkeypatch):
+    """A final goal from another generation cannot complete this route."""
+    rendered = []
+
+    def record(image, segments, state, *args, **kwargs):
+        rendered.append(kwargs.get('navigation_status', ''))
+        return image.copy()
+
+    monkeypatch.setattr(viewer_node, 'render_frame', record)
+    fake = make_viewer()
+    navigating = reference_follower_message(
+        index=7, number=10, generation=10, activity=1, allowed=True,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, navigating)
+    wrong_finished = reference_follower_message(
+        index=8, number=10, generation=11, activity=9, allowed=False,
+    )
+    viewer_node.ArPathViewerNode._on_reference_follower_state(fake, wrong_finished)
+    assert fake._route_completion is None
+    viewer_node.ArPathViewerNode._tick(fake)
+    assert rendered[-1] != 'ROUTE COMPLETE'

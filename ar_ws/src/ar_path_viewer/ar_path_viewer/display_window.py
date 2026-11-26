@@ -254,8 +254,23 @@ def _paint_centered_mask(
         )
     left = x1 + (x2 - x1 - mask.shape[1]) // 2
     y = top + (bottom - top - mask.shape[0]) // 2
-    region = canvas[y:y + mask.shape[0], left:left + mask.shape[1]]
-    alpha = mask.astype(np.uint16)[..., None]
+    # The requested rectangle may extend beyond the recorded frame, for
+    # example when a completion card is rendered in a 100x160 test image.
+    # Clip both destination and source to the *same* visible ink rectangle.
+    # Empty intersections must be a no-op, not a zero-height broadcast.
+    frame_height, frame_width = canvas.shape[:2]
+    dst_x1 = max(0, left)
+    dst_y1 = max(0, y)
+    dst_x2 = min(frame_width, left + mask.shape[1])
+    dst_y2 = min(frame_height, y + mask.shape[0])
+    if dst_x2 <= dst_x1 or dst_y2 <= dst_y1:
+        return
+    src_x1 = dst_x1 - left
+    src_y1 = dst_y1 - y
+    src_x2 = src_x1 + (dst_x2 - dst_x1)
+    src_y2 = src_y1 + (dst_y2 - dst_y1)
+    region = canvas[dst_y1:dst_y2, dst_x1:dst_x2]
+    alpha = mask[src_y1:src_y2, src_x1:src_x2].astype(np.uint16)[..., None]
     foreground = np.asarray(color, dtype=np.uint16).reshape(1, 1, 3)
     blended = (
         region.astype(np.uint16) * (255 - alpha) + foreground * alpha + 127

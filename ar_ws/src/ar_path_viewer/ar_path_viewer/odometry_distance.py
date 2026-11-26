@@ -2,6 +2,28 @@
 import math
 import threading
 import time
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class OdomTravelSnapshot:
+    """Immutable measured result captured at a session boundary."""
+
+    observed_m: float
+    accepted_steps: int
+    rejected_gap: int
+    rejected_jump: int
+    rejected_bad_time: int
+
+    @property
+    def available(self) -> bool:
+        return self.accepted_steps >= 2
+
+    @property
+    def is_observed_lower_bound(self) -> bool:
+        return bool(
+            self.rejected_gap or self.rejected_jump or self.rejected_bad_time
+        )
 
 
 class OdomTravelDistanceMeter:
@@ -120,6 +142,29 @@ class SessionOdomTravelDistanceMeter:
         self._rejected_gap = 0
         self._rejected_jump = 0
         self._rejected_bad_time = 0
+        self._frozen = None
+
+    def reset(self):
+        """Start a new explicitly selected Viewer session."""
+        with self._lock:
+            self._last = None
+            self._total = 0.0
+            self._accepted_steps = 0
+            self._rejected_gap = 0
+            self._rejected_jump = 0
+            self._rejected_bad_time = 0
+            self._frozen = None
+
+    def freeze(self) -> OdomTravelSnapshot:
+        """Atomically fix the result; later odometry cannot change it."""
+        with self._lock:
+            if self._frozen is None:
+                self._frozen = self._snapshot_locked()
+            return self._frozen
+
+    def frozen_snapshot(self) -> OdomTravelSnapshot | None:
+        with self._lock:
+            return self._frozen
 
     def observe(self, x, y, stamp):
         try:
@@ -129,6 +174,8 @@ class SessionOdomTravelDistanceMeter:
         if not all(math.isfinite(value) for value in (x, y, t)) or t <= 0.0:
             return
         with self._lock:
+            if self._frozen is not None:
+                return
             last = self._last
             self._last = (t, x, y)
             if last is None:
@@ -149,14 +196,26 @@ class SessionOdomTravelDistanceMeter:
 
     def total_m(self):
         with self._lock:
-            return self._total if self._accepted_steps >= 2 else None
+            snapshot = self._frozen or self._snapshot_locked()
+            return snapshot.observed_m if snapshot.available else None
+
+    def _snapshot_locked(self) -> OdomTravelSnapshot:
+        return OdomTravelSnapshot(
+            observed_m=self._total,
+            accepted_steps=self._accepted_steps,
+            rejected_gap=self._rejected_gap,
+            rejected_jump=self._rejected_jump,
+            rejected_bad_time=self._rejected_bad_time,
+        )
 
     def diagnostics(self):
         with self._lock:
+            snapshot = self._frozen or self._snapshot_locked()
             return {
-                'observed_m': self._total,
-                'accepted_steps': self._accepted_steps,
-                'rejected_gap': self._rejected_gap,
-                'rejected_jump': self._rejected_jump,
-                'rejected_bad_time': self._rejected_bad_time,
+                'observed_m': snapshot.observed_m,
+                'accepted_steps': snapshot.accepted_steps,
+                'rejected_gap': snapshot.rejected_gap,
+                'rejected_jump': snapshot.rejected_jump,
+                'rejected_bad_time': snapshot.rejected_bad_time,
+                'frozen': self._frozen is not None,
             }

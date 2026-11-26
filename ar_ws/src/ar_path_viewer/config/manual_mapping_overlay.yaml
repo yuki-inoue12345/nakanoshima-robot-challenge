@@ -1,0 +1,8 @@
+ar_path_viewer:
+  ros__parameters:
+    # Explicit opt-in. No Nav2/Follower/AMCL data is rendered or controlled.
+    operation_mode: manual_mapping
+    reference_path_enabled: false
+    waypoint_distance_enabled: false
+    perception_costmap_enabled: false
+    offscreen_guidance_enabled: false

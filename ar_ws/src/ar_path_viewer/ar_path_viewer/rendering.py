@@ -32,6 +32,8 @@ VALID_STATES = {
     "LOCALIZATION UNSTABLE",
     "REPLANNING",
     "NAVIGATION HOLD",
+    "MANUAL MAPPING",
+    "MAPPING SESSION ENDED",
     "INVALID CONFIG",
 }
 
@@ -616,6 +618,7 @@ def render_frame(
     robot_view_expanded: bool = False,
     observed_rotation_status: str = '',
     travel_distance_status: str = '',
+    travel_distance_status_ja: str = '',
 ) -> np.ndarray:
     if state not in VALID_STATES:
         raise ValueError(f"unsupported viewer state: {state}")
@@ -697,7 +700,9 @@ def render_frame(
     ):
         _draw_navigation_status(frame, navigation_status)
     if (travel_distance_status
-            and navigation_status in ('FINAL WP REACHED', 'ROUTE COMPLETE')):
+            and navigation_status in (
+                'FINAL WP REACHED', 'ROUTE COMPLETE',
+            )):
         # Accumulated robot/odom displacement; never a planned path distance.
         _draw_bottom_badge(
             frame, travel_distance_status, (200, 245, 225), offset_y=30,
@@ -722,13 +727,13 @@ def render_frame(
                     0.40, (226, 226, 226), 1, cv2.LINE_AA)
     if (state == "NAVIGATION HOLD"
             and navigation_status == "ROUTE COMPLETE"):
-        # Only an explicit FINISHED message authorizes this panel.
+        # Only an explicit, validated FINISHED state authorizes this panel.
         center_x = frame.shape[1] // 2
         center_y = frame.shape[0] // 2
         left = max(8, center_x - 229)
         right = min(frame.shape[1] - 8, center_x + 229)
-        top = max(58, center_y - 43)
-        bottom = min(frame.shape[0] - 50, center_y + 43)
+        top = max(52, center_y - 72)
+        bottom = min(frame.shape[0] - 38, center_y + 72)
         layer = frame.copy()
         cv2.rectangle(layer, (left, top), (right, bottom),
                       (16, 45, 24), -1)
@@ -736,14 +741,55 @@ def render_frame(
         cv2.rectangle(frame, (left, top), (right, bottom),
                       (50, 240, 100), 2)
         cv2.putText(
-            frame, "ROUTE COMPLETE", (left + 38, top + 39),
+            frame, "ROUTE COMPLETE", (left + 38, top + 36),
             cv2.FONT_HERSHEY_SIMPLEX, 0.85, (100, 255, 130), 2,
             cv2.LINE_AA,
         )
+        draw_localized_label(
+            frame, (left + 18, top + 43, right - 18, top + 86),
+            '走行終了', 'RUN FINISHED', (210, 255, 220), 26,
+        )
+        if travel_distance_status:
+            draw_localized_label(
+                frame, (left + 14, top + 91, right - 14, bottom - 9),
+                travel_distance_status_ja or travel_distance_status,
+                travel_distance_status, (225, 250, 230), 19,
+            )
+    if state == "MANUAL MAPPING":
+        # An observation-only session; R is local to the Viewer window.
+        _draw_bottom_badge(
+            frame, "MANUAL MAPPING | R: END DISTANCE SESSION",
+            (180, 225, 250),
+        )
+    elif state == "MAPPING SESSION ENDED":
+        center_x = frame.shape[1] // 2
+        center_y = frame.shape[0] // 2
+        left = max(8, center_x - 245)
+        right = min(frame.shape[1] - 8, center_x + 245)
+        top = max(52, center_y - 73)
+        bottom = min(frame.shape[0] - 38, center_y + 73)
+        layer = frame.copy()
+        cv2.rectangle(layer, (left, top), (right, bottom), (24, 43, 62), -1)
+        cv2.addWeighted(layer, 0.87, frame, 0.13, 0.0, frame)
+        cv2.rectangle(frame, (left, top), (right, bottom),
+                      (155, 220, 250), 2)
         cv2.putText(
-            frame, "FOLLOWER CONFIRMED FINISHED",
-            (left + 42, top + 65), cv2.FONT_HERSHEY_SIMPLEX,
-            0.40, (210, 245, 218), 1, cv2.LINE_AA,
+            frame, "MAPPING SESSION ENDED", (left + 12, top + 34),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.67, (180, 235, 255),
+            2, cv2.LINE_AA,
+        )
+        draw_localized_label(
+            frame, (left + 15, top + 42, right - 15, top + 87),
+            '地図作成の計測終了', 'MAPPING ENDED', (220, 245, 255), 22,
+        )
+        if travel_distance_status:
+            draw_localized_label(
+                frame, (left + 12, top + 92, right - 12, bottom - 10),
+                travel_distance_status_ja or travel_distance_status,
+                travel_distance_status, (220, 245, 255), 18,
+            )
+        _draw_bottom_badge(
+            frame, "R: START NEW DISTANCE SESSION", (180, 225, 250)
         )
     if (not debug_overlay and not segment_list and not reference_list
             and state in (

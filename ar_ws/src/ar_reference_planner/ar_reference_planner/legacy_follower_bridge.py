@@ -14,7 +14,7 @@ from time import monotonic
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import Path as PathMessage
-from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.msg import Log, ParameterType
 from rcl_interfaces.srv import GetParameters, ListParameters
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -29,6 +29,7 @@ from rclpy.qos import (
 from robotbase_waypoint_interfaces.msg import WaypointFollowerState
 
 from .legacy_compatibility import resolve_legacy_progress
+from .legacy_completion import LegacyCompletionGate
 from .route import load_route
 
 
@@ -58,6 +59,8 @@ class LegacyFollowerBridge(Node):
             'plan_timeout_sec': 6.5,
             'endpoint_tolerance_m': 0.40,
             'endpoint_separation_m': 0.20,
+            'completion_evidence_window_sec': 2.0,
+            'follower_log_node_name': 'koko_waypoint_follower',
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -95,6 +98,10 @@ class LegacyFollowerBridge(Node):
         self._through_feedback = None
         self._last_progress = None
         self._last_reason = None
+        self._completion_gate = LegacyCompletionGate(
+            str(self.get_parameter('follower_log_node_name').value),
+            float(self.get_parameter('completion_evidence_window_sec').value),
+        )
 
         self.create_subscription(
             PathMessage,
@@ -126,6 +133,7 @@ class LegacyFollowerBridge(Node):
             self._on_through_feedback,
             10,
         )
+        self.create_subscription(Log, '/rosout', self._on_follower_log, 100)
         period = float(self.get_parameter('publish_period_sec').value)
         self.create_timer(period, self._tick)
         self.get_logger().info(
@@ -139,6 +147,7 @@ class LegacyFollowerBridge(Node):
             'action_status_timeout_sec',
             'plan_timeout_sec',
             'endpoint_tolerance_m',
+            'completion_evidence_window_sec',
         ):
             value = float(self.get_parameter(name).value)
             if not math.isfinite(value) or value <= 0.0:
@@ -182,6 +191,9 @@ class LegacyFollowerBridge(Node):
         self._to_pose_feedback = None
         self._through_feedback = None
         self._last_progress = None
+        completion_gate = getattr(self, '_completion_gate', None)
+        if completion_gate is not None:
+            completion_gate.reset(reason)
         self._minimum_plan_sequence = self._plan_sequence + 1
         self._log_reason(reason)
 
@@ -344,6 +356,13 @@ class LegacyFollowerBridge(Node):
         )
 
     def _on_status(self, mode: str, message: GoalStatusArray) -> None:
+        completion_gate = getattr(self, '_completion_gate', None)
+        if completion_gate is not None and mode == self._navigation_mode:
+            now = monotonic()
+            for item in message.status_list:
+                completion_gate.observe_status(
+                    _goal_uuid(item.goal_info), int(item.status), now,
+                )
         active = tuple(
             sorted(
                 _goal_uuid(item.goal_info)
@@ -364,6 +383,8 @@ class LegacyFollowerBridge(Node):
             self._to_pose_feedback = None
             self._through_feedback = None
             self._last_progress = None
+            if completion_gate is not None:
+                completion_gate.reset('nav2_goal_changed')
             self._minimum_plan_sequence = self._plan_sequence + 1
             if previous_progress is not None:
                 # Invalidate the old goal immediately.  Keeping its verified
@@ -409,6 +430,18 @@ class LegacyFollowerBridge(Node):
         except (AttributeError, TypeError, ValueError):
             return
         self._to_pose_feedback = (goal_uuid, monotonic())
+
+    def _on_follower_log(self, message: Log) -> None:
+        """Collect completion evidence only from the configured Follower."""
+        gate = getattr(self, '_completion_gate', None)
+        if gate is None:
+            return
+        now = monotonic()
+        gate.observe_log(message.name, message.msg, now)
+        # Do not wait up to one 200 ms bridge timer period after the explicit
+        # terminal log. Publish the immutable result at the callback that
+        # completed the evidence set; subsequent timer heartbeats are harmless.
+        LegacyFollowerBridge._publish_completion_if_verified(self, now)
 
     def _feedback_liveness(self, mode: str, goal_uuid: str) -> float | None:
         """Return a matching feedback receipt time without inventing a goal."""
@@ -509,10 +542,45 @@ class LegacyFollowerBridge(Node):
         message.waypoint_count = len(self._route.waypoints)
         self._publisher.publish(message)
 
+    def _publish_finished_state(self, completion) -> None:
+        """Publish FINISHED only after the strict evidence gate succeeds."""
+        if self._publisher is None or self._route is None:
+            return
+        message = WaypointFollowerState()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self._map_frame
+        message.schema_version = WaypointFollowerState.SCHEMA_VERSION
+        message.route_sha256 = completion.route_sha256
+        message.next_waypoint_index = completion.waypoint_count
+        message.next_waypoint_number = completion.final_number
+        message.navigation_mode = self._navigation_mode
+        message.goal_generation = completion.goal_generation
+        message.activity = WaypointFollowerState.ACTIVITY_FINISHED
+        message.reference_allowed = False
+        message.safe_section_end_index = completion.final_index
+        message.waypoint_count = completion.waypoint_count
+        self._publisher.publish(message)
+
+    def _publish_completion_if_verified(self, now: float) -> bool:
+        """Publish a verified terminal state without converting plain STOPPED."""
+        completion_gate = getattr(self, '_completion_gate', None)
+        completion = (
+            None if completion_gate is None
+            else completion_gate.completion(now)
+        )
+        if completion is None:
+            return False
+        LegacyFollowerBridge._publish_finished_state(self, completion)
+        self._log_reason('legacy_route_completion_verified')
+        return True
+
     def _tick(self) -> None:
         now = monotonic()
         self._query_parameters(now)
         if not self._legacy_verified or self._modern_follower:
+            return
+        completion_gate = getattr(self, '_completion_gate', None)
+        if LegacyFollowerBridge._publish_completion_if_verified(self, now):
             return
         if not self._follower_parameters_available:
             if self._last_progress is not None:
@@ -525,6 +593,20 @@ class LegacyFollowerBridge(Node):
         progress, reason = self._resolve_progress(now)
         if progress is not None:
             self._last_progress = progress
+            if (
+                completion_gate is not None
+                and self._navigation_mode == 'to_pose'
+                and self._goal_uuid is not None
+                and progress.next_index == len(self._route.waypoints) - 1
+            ):
+                completion_gate.bind_final_goal(
+                    route_sha256=self._route.sha256,
+                    goal_generation=self._goal_generation,
+                    goal_uuid=self._goal_uuid,
+                    final_index=progress.next_index,
+                    final_number=self._route.waypoints[progress.next_index].number,
+                    waypoint_count=len(self._route.waypoints),
+                )
             self._publish_state(
                 progress,
                 WaypointFollowerState.ACTIVITY_NAVIGATING,

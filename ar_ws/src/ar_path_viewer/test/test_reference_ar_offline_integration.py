@@ -7,6 +7,7 @@ No ROS graph, camera device, Nav2 process, or robot command topic is used.
 """
 
 from types import MethodType
+import threading
 
 import cv2
 import numpy as np
@@ -29,6 +30,7 @@ from ar_path_viewer.guidance_stability import GuidanceStabilityGate
 from ar_path_viewer.image_source import SimulationSource
 from ar_path_viewer.localization_monitor import LocalizationMonitor, LocalizationThresholds
 from ar_path_viewer.offscreen_guidance import GuidanceSettings
+from ar_path_viewer.odometry_distance import SessionOdomTravelDistanceMeter
 from ar_path_viewer.path_adapter import PathStore
 from ar_path_viewer.projection import CameraIntrinsics, CameraMount
 from ar_path_viewer.reference_path import ReferencePathGate
@@ -229,6 +231,18 @@ def _amcl(stamp: float, *, position_variance: float = 0.01):
 def _make_viewer(clock: MutableClock, writer=None) -> OfflineViewer:
     fake = OfflineViewer()
     fake._shutdown_requested = False
+    fake._travel_session_lock = threading.Lock()
+    fake._session_distance_meter = SessionOdomTravelDistanceMeter()
+    fake._autonomous_session_identity = None
+    fake._route_completion = None
+    fake._last_verified_final_goal = None
+    fake._final_waypoint_success = None
+    fake._update_autonomous_travel_session = MethodType(
+        viewer_node.ArPathViewerNode._update_autonomous_travel_session, fake
+    )
+    fake._accept_verified_route_completion = MethodType(
+        viewer_node.ArPathViewerNode._accept_verified_route_completion, fake
+    )
     fake._intrinsics = CameraIntrinsics()
     fake._source_intrinsics = fake._intrinsics
     fake._undistorter = None

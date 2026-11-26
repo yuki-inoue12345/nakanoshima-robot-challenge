@@ -50,3 +50,28 @@ def test_session_30hz_replay_matches_independent_polyline_integral():
     assert abs(meter.total_m() - expected) < 1e-8
     assert meter.diagnostics()['accepted_steps'] == 5799
     assert meter.diagnostics()['rejected_gap'] == 0
+
+
+def test_completion_freezes_distance_against_later_odometry():
+    meter = SessionOdomTravelDistanceMeter()
+    for index in range(11):
+        meter.observe(index * .03, 0.0, 1.0 + index * .1)
+    result = meter.freeze()
+    meter.observe(.60, 0.0, 2.1)
+    assert result.available
+    assert abs(result.observed_m - .30) < 1e-10
+    assert meter.freeze() == result
+    assert abs(meter.total_m() - .30) < 1e-10
+
+
+def test_reset_starts_an_independent_route_session():
+    meter = SessionOdomTravelDistanceMeter()
+    meter.observe(0.0, 0.0, 1.0)
+    meter.observe(0.1, 0.0, 1.1)
+    meter.freeze()
+    meter.reset()
+    meter.observe(10.0, 0.0, 2.0)
+    meter.observe(10.1, 0.0, 2.1)
+    meter.observe(10.2, 0.0, 2.2)
+    assert abs(meter.total_m() - .2) < 1e-10
+    assert meter.frozen_snapshot() is None

@@ -721,3 +721,12 @@ diff -u -- "$BACKUP" "$NUC_CONFIG" || true
 画面表示中は`F11`で全画面を切り替え、`q`、`Q`、`F10`で終了できます。OpenCVのWin32、GTK、Qtで異なるF10/F11コードを扱い、終了要求とC920/MP4/Windowの解放は一度だけ実行します。Ctrl+Cも引き続き`rclpy.try_shutdown()`で正常終了します。
 
 開発PCの自動テストでは状態遷移、録画フレームの緑線有無、キーコード、リソース解放を確認しています。実機NUCでのAMCL共分散分布、実際の発行間隔、TF遅延、C920とMP4 codec、各HighGUI backendの物理キー入力は未確認であり、走行なしのログ取得後に閾値を調整してください。
+
+## 完走結果と実測走行距離
+
+旧Follower互換時の`ROUTE COMPLETE`は、同じ最終Goal UUIDについてNav2の
+`SUCCEEDED`、`[WP:N] reached by Nav2`、`All waypoints completed`が順番どおり
+短時間に成立した場合だけBridgeが配信します。単なる`STOPPED`、キャンセル、ABORT、
+途中Waypoint、別Goalの古いstatusでは成立しません。Viewerは完走時の
+`/odom/filtered` XY積算値をその瞬間に固定し、次の検証済み走行まで結果画面を保持します。
+欠測・時刻飛びがあれば「観測下限」、有効な増分が不足すれば「計測不可」と表示します。
