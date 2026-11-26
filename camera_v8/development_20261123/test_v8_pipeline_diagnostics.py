@@ -333,3 +333,18 @@ def test_analyzer_recognizes_exact_comma_separated_viewer_log_format():
     row = {"fields": analyzer.parse_fields(raw)}
     assert analyzer.compound_value(row, "display_age_ms", "p50") == 65.0
     assert analyzer.compound_value(row, "display_age_ms", "p95") == 240.0
+
+
+def test_collector_shutdown_uses_bounded_term_and_checks_mcap_finalization():
+    script = (Path(__file__).parent / 'collect_ar_v8_diagnostics.sh').read_text()
+    assert "trap 'exit 130' INT" in script
+    assert "trap 'exit 143' TERM" in script
+    assert 'trap cleanup EXIT' in script
+    assert "trap '' INT TERM" in script
+    assert 'kill -TERM "$pid"' in script
+    assert 'kill -INT "$pid"' not in script
+    assert 'attempt<150' in script
+    assert 'bag_finalized=true' in script
+    assert 'bag_finalized=false' in script
+    assert 'pidstat_stopped=true' in script
+    assert 'ros_state/metadata.yaml' in script

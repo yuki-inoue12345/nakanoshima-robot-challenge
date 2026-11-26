@@ -113,22 +113,74 @@ write_analyzer_command
 
 PIDSTAT_PID=""
 BAG_PID=""
-cleanup() {
-    local ended_epoch
-    trap - INT TERM EXIT
-    for pid in "$BAG_PID" "$PIDSTAT_PID"; do
-        [[ -n "$pid" ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -INT "$pid" 2>/dev/null || true
+
+# A background job started by non-interactive Bash may inherit SIGINT=ignored.
+# Therefore kill -INT followed by an unbounded wait can leave rosbag running
+# and metadata.yaml unwritten. Stop only our verified children with SIGTERM.
+stop_owned_child() {
+    local label="$1" pid="$2" required_pattern="$3"
+    local cmd state attempt
+    [[ -n "$pid" ]] || return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        return 0
+    fi
+    cmd="$(ps -ww -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ -z "$cmd" || "$cmd" != *"$required_pattern"* ]]; then
+        echo "STOP: $label PID=$pid command changed; not signaling: $cmd" >&2
+        return 1
+    fi
+    if ! kill -TERM "$pid" 2>/dev/null; then
+        echo "STOP: SIGTERM failed for $label PID=$pid" >&2
+        return 1
+    fi
+    # Never wait forever: large MCAP recordings can need time to flush.
+    for ((attempt=0; attempt<150; attempt++)); do
+        state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+        state="${state//[[:space:]]/}"
+        if [[ -z "$state" || "$state" == Z* ]]; then
             wait "$pid" 2>/dev/null || true
+            echo "Stopped $label PID=$pid"
+            return 0
         fi
+        sleep 0.2
     done
+    echo "STOP: $label PID=$pid did not exit within 30s; no SIGKILL sent" >&2
+    return 1
+}
+
+cleanup() {
+    local original_status="$?" bag_ok=0 pidstat_ok=0 ended_epoch
+    # A second Ctrl+C during MCAP finalization must not interrupt cleanup.
+    trap '' INT TERM
+    trap - EXIT
+    set +e
+    stop_owned_child rosbag "$BAG_PID" "ros2 bag record --storage mcap -o $OUT_DIR/ros_state" || bag_ok=1
+    stop_owned_child pidstat "$PIDSTAT_PID" 'pidstat -H -h -t -u -r -w' || pidstat_ok=1
     ended_epoch="$(date +%s.%N)"
     echo "ended_epoch=$ended_epoch" >>"$OUT_DIR/process_manifest.txt"
     write_analyzer_command "$ended_epoch"
+    if (( bag_ok == 0 )) && [[ -s "$OUT_DIR/ros_state/metadata.yaml" ]]; then
+        echo 'bag_finalized=true' >>"$OUT_DIR/process_manifest.txt"
+        echo "MCAP finalized: $OUT_DIR/ros_state/metadata.yaml"
+    else
+        echo 'bag_finalized=false' >>"$OUT_DIR/process_manifest.txt"
+        echo 'STOP: MCAP metadata missing or recorder still running; inspect rosbag.log' >&2
+        (( original_status == 0 )) && original_status=5
+    fi
+    if (( pidstat_ok == 0 )); then
+        echo 'pidstat_stopped=true' >>"$OUT_DIR/process_manifest.txt"
+    else
+        echo 'pidstat_stopped=false' >>"$OUT_DIR/process_manifest.txt"
+        (( original_status == 0 )) && original_status=5
+    fi
     echo "Diagnostics stopped. Analyze with: $OUT_DIR/analyze_this_run.sh"
+    exit "$original_status"
 }
-trap cleanup INT TERM EXIT
+# SIGINT/TERM exits once; EXIT always finalizes both owned children.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap cleanup EXIT
 
 # -H uses epoch time. -t adds per-thread rows; -w then records voluntary and
 # involuntary context switches for both each process and its worker threads.
