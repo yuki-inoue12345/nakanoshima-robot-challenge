@@ -56,5 +56,10 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 [[ -f "$WRAPPER" ]] || { echo "Wrapper missing: $WRAPPER" >&2; exit 2; }
+# Preserve the NUC's validated Camera V8 Python environment when available,
+# while keeping development PCs usable with their active ROS Python.
+if [[ -z "${V8_PYTHON:-}" && -x "$HOME/venvs/person_search/bin/python" ]]; then
+  export V8_PYTHON="$HOME/venvs/person_search/bin/python"
+fi
 export KOKO_NAVI_MODE="$MODE"
 exec bash "$WRAPPER"

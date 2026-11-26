@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import ast
 import errno
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -74,6 +77,61 @@ class V8CameraLifetimeTests(TestCase):
         self.assertIn("trap 'exit 129' HUP", ar)
         self.assertNotIn('pkill', ar)
         self.assertNotIn('killall', ar)
+
+    def test_mode_selector_dry_run_exposes_both_modes_without_starting_ros(self):
+        selector = HERE / 'select_kokochan_navi_mode.sh'
+        for mode in ('autonomous', 'manual_mapping'):
+            completed = subprocess.run(
+                [str(selector), '--mode', mode, '--dry-run'],
+                check=True, text=True, capture_output=True,
+            )
+            self.assertIn(f'MODE={mode}', completed.stdout)
+            self.assertIn('run_ar_with_v8_share.sh', completed.stdout)
+
+    def test_mode_selector_zenity_cancel_is_a_clean_noop(self):
+        selector = HERE / 'select_kokochan_navi_mode.sh'
+        with tempfile.TemporaryDirectory() as directory:
+            fake_zenity = Path(directory) / 'zenity'
+            fake_zenity.write_text('#!/bin/sh\nexit 1\n')
+            fake_zenity.chmod(0o755)
+            environment = dict(os.environ)
+            environment['DISPLAY'] = ':99'
+            environment['PATH'] = f'{directory}:{environment["PATH"]}'
+            completed = subprocess.run(
+                [str(selector)], text=True, capture_output=True,
+                env=environment, timeout=5,
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, '')
+
+    def test_legacy_desktop_bootstrap_uses_the_same_mode_selector(self):
+        source = (HERE / 'run_kokochan_navi_desktop_shared.sh').read_text()
+        self.assertIn('select_kokochan_navi_mode.sh', source)
+        self.assertNotIn('exec "$REPO/camera_v8/development_20261123/run_ar_with_v8_share.sh"', source)
+
+    def test_manual_mapping_prepare_only_keeps_navigation_and_costmap_off(self):
+        repository = HERE.parents[1]
+        environment = dict(os.environ)
+        environment.update({
+            'KOKO_NAVI_VIEWER_CONFIG': str(
+                repository / 'ar_ws/src/ar_path_viewer/config/'
+                'ar_path_viewer_c920.yaml'
+            ),
+            'KOKO_NAVI_MANUAL_MAPPING_OVERLAY': str(
+                repository / 'ar_ws/src/ar_path_viewer/config/'
+                'manual_mapping_overlay.yaml'
+            ),
+        })
+        completed = subprocess.run(
+            [str(HERE / 'run_ar_manual_mapping_viewer.sh'), '--prepare-only'],
+            check=True, text=True, capture_output=True, env=environment,
+        )
+        generated = completed.stdout
+        self.assertIn('operation_mode: manual_mapping', generated)
+        self.assertIn('reference_path_enabled: false', generated)
+        self.assertIn('perception_costmap_enabled: false', generated)
+        self.assertIn('perception_minimap_enabled: false', generated)
+        self.assertIn('perception_alert_enabled: false', generated)
 
     def test_no_navigation_or_drive_commands_in_guard(self):
         guard_src = (HERE / 'v8_parent_death_guard.py').read_text()

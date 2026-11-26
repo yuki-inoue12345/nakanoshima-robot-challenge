@@ -188,6 +188,13 @@ class RosLatestImageSource:
             self._consumed = self._generation
             (frame, stamp, kind, transport_age, source_interval,
              callback_duration, callback_copy_duration) = self._latest
+            # _on_image already made the one required ownership copy from the
+            # ROS message buffer.  Transfer that private ndarray to the sole
+            # consumer instead of copying another 640x480 BGR frame.  Clearing
+            # the slot under the same lock means the callback can publish a
+            # new image concurrently without sharing mutable pixels, while
+            # image/SOE timestamp/metrics remain one atomic snapshot.
+            self._latest = None
             self.frame_timestamp_monotonic = stamp
             self.frame_timestamp_kind = kind
             generation = self._generation
@@ -196,10 +203,9 @@ class RosLatestImageSource:
             rejected_total = self._rejected_total
             overwritten_total = self._overwritten_total
             consumed_total = self._consumed
-        copy_started = time.perf_counter() if self._metrics_enabled else 0.0
-        output = frame.copy()
+        output = frame
         if self._metrics_enabled:
-            consumer_copy_duration = time.perf_counter() - copy_started
+            consumer_copy_duration = 0.0
             self.last_read_metrics = RosImageReadMetrics(
                 frame_timestamp_monotonic_sec=stamp,
                 transport_age_sec=transport_age,

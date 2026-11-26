@@ -1,5 +1,6 @@
 """Test Launcher2/Follower automatic selection without robot hardware."""
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -439,6 +440,9 @@ def test_dedicated_launch_has_no_manual_map_or_waypoint_argument():
     assert 'if calibration_overlay:' in launch
     assert "'viewer_runtime_overlay_file', default_value=''" in launch
     assert 'if runtime_overlay:' in launch
+    assert launch.index('if calibration_overlay:') < launch.index(
+        'if perception_overlay:'
+    )
 
 
 def test_installed_desktop_runner_is_read_only_and_session_scoped():
@@ -503,6 +507,46 @@ def test_installed_desktop_runner_is_read_only_and_session_scoped():
     assert "'viewer_perception_overlay_file', default_value=''" in launch
 
 
+def test_autonomous_shared_camera_entry_enables_review_profile_only_for_autonomy():
+    repository = Path(__file__).parents[4]
+    wrapper = (
+        repository / 'camera_v8' / 'development_20261123'
+        / 'run_ar_with_v8_share.sh'
+    ).read_text(encoding='utf-8')
+    manual = (
+        repository / 'camera_v8' / 'development_20261123'
+        / 'run_ar_manual_mapping_viewer.sh'
+    ).read_text(encoding='utf-8')
+    runner = (
+        Path(__file__).parents[1] / 'scripts'
+        / 'run_kokochan_navi_launcher2'
+    ).read_text(encoding='utf-8')
+    viewer_source = (
+        repository / 'ar_ws/src/ar_path_viewer/ar_path_viewer/viewer_node.py'
+    ).read_text(encoding='utf-8')
+
+    autonomous_case = wrapper.split(
+        'manual_mapping) RUNNER=', 1
+    )[0]
+    assert 'KOKO_NAVI_PERCEPTION_REVIEW:-1' in autonomous_case
+    assert 'KOKO_NAVI_PERCEPTION_REVIEW=${KOKO_NAVI_PERCEPTION_REVIEW}' in wrapper
+    for key in (
+        'perception_costmap_enabled',
+        'perception_minimap_enabled',
+        'perception_alert_enabled',
+    ):
+        assert f"'{key}':False" in manual
+    assert 'Perception profile: enabled overlay=' in runner
+    assert 'KOKO_NAVI_PERCEPTION_REVIEW:-1' in runner
+    assert 'costmap_subscription=true minimap=true alerts=true' in runner
+    assert 'camera_projection=false' in runner
+    assert '"perception_costmap_configuration "' in viewer_source
+    assert 'f"enabled={self._perception_costmap_enabled} "' in viewer_source
+    assert '"perception_review_ui_configuration "' in viewer_source
+    assert 'f"minimap_enabled={self._perception_minimap_enabled} "' in viewer_source
+    assert 'f"alert_enabled={self._perception_alert_enabled} "' in viewer_source
+
+
 def test_desktop_installer_backs_up_and_restores(tmp_path):
     package = Path(__file__).parents[1]
     installer = package / 'scripts' / 'install_kokochan_navi_desktop'
@@ -513,13 +557,17 @@ def test_desktop_installer_backs_up_and_restores(tmp_path):
     environment = dict(os.environ)
     environment['HOME'] = str(tmp_path)
     environment['XDG_DESKTOP_DIR'] = str(desktop)
+    environment['KOKO_NAVI_REPOSITORY'] = str(Path(__file__).parents[4])
 
     subprocess.run(
         [str(installer)], check=True, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     installed = destination.read_text(encoding='utf-8')
-    assert 'run_kokochan_navi_launcher2' in installed
+    assert 'select_kokochan_navi_mode.sh' in installed
+    assert 'Path=' in installed
+    assert '使用するモードを選んで' in installed
+    assert 'Launcher2とは独立' not in installed
     assert list(desktop.glob('ココちゃんナビ.desktop.backup.*'))
 
     subprocess.run(
@@ -527,6 +575,104 @@ def test_desktop_installer_backs_up_and_restores(tmp_path):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     assert destination.read_text(encoding='utf-8') == 'old entry\n'
+
+
+def test_desktop_reinstall_keeps_original_as_restore_target(tmp_path):
+    package = Path(__file__).parents[1]
+    installer = package / 'scripts' / 'install_kokochan_navi_desktop'
+    desktop = tmp_path / 'Desktop'
+    desktop.mkdir()
+    destination = desktop / 'ココちゃんナビ.desktop'
+    destination.write_text('user owned entry\n', encoding='utf-8')
+    environment = dict(os.environ)
+    environment.update({
+        'HOME': str(tmp_path),
+        'XDG_DESKTOP_DIR': str(desktop),
+        'KOKO_NAVI_REPOSITORY': str(Path(__file__).parents[4]),
+    })
+
+    for _ in range(2):
+        subprocess.run(
+            [str(installer)], check=True, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    backups = list(desktop.glob('ココちゃんナビ.desktop.backup.*'))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding='utf-8') == 'user owned entry\n'
+
+    subprocess.run(
+        [str(installer), '--restore'], check=True, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert destination.read_text(encoding='utf-8') == 'user owned entry\n'
+
+
+def test_viewer_parameter_sources_apply_perception_profile_last():
+    launch_path = (
+        Path(__file__).parents[1] / 'launch'
+        / 'launcher2_reference_ar.launch.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'launcher2_reference_ar_audit', launch_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._ordered_viewer_parameters(
+        'old-machine.yaml', 'runtime.yaml', 'calibration.yaml',
+        'perception.yaml',
+    ) == [
+        'old-machine.yaml', 'runtime.yaml', 'calibration.yaml',
+        'perception.yaml',
+    ]
+    assert module._ordered_viewer_parameters(
+        'base.yaml', 'runtime.yaml', '', ''
+    ) == ['base.yaml', 'runtime.yaml']
+
+
+def test_old_machine_yaml_cannot_override_final_perception_profile(tmp_path):
+    launch_path = (
+        Path(__file__).parents[1] / 'launch'
+        / 'launcher2_reference_ar.launch.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'launcher2_reference_ar_merge_audit', launch_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    old = tmp_path / 'old-machine.yaml'
+    runtime = tmp_path / 'runtime.yaml'
+    calibration = tmp_path / 'calibration.yaml'
+    old.write_text(yaml.safe_dump({'ar_path_viewer': {'ros__parameters': {
+        'perception_costmap_enabled': False,
+        'perception_minimap_enabled': False,
+        'perception_alert_enabled': False,
+    }}}), encoding='utf-8')
+    runtime.write_text(yaml.safe_dump({'ar_path_viewer': {'ros__parameters': {
+        'image_input_type': 'ros_image',
+        'perception_costmap_enabled': False,
+    }}}), encoding='utf-8')
+    calibration.write_text(yaml.safe_dump({
+        'ar_path_viewer': {'ros__parameters': {'fx': 658.0}}
+    }), encoding='utf-8')
+    perception = (
+        Path(__file__).parents[2] / 'ar_path_viewer' / 'config'
+        / 'perception_costmap_review_overlay.yaml'
+    )
+    sources = module._ordered_viewer_parameters(
+        str(old), str(runtime), str(calibration), str(perception)
+    )
+    effective = {}
+    for source in sources:
+        document = yaml.safe_load(Path(source).read_text(encoding='utf-8'))
+        effective.update(document['ar_path_viewer']['ros__parameters'])
+
+    assert effective['perception_costmap_enabled'] is True
+    assert effective['perception_minimap_enabled'] is True
+    assert effective['perception_alert_enabled'] is True
+    assert effective['perception_costmap_camera_overlay_enabled'] is False
+    assert effective['image_input_type'] == 'ros_image'
+    assert effective['fx'] == 658.0
 
 
 def test_offline_review_filters_control_topics_and_rejects_production_domain():

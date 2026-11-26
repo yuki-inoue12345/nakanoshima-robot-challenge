@@ -6,7 +6,20 @@ set -euo pipefail
 desktop_dir="${XDG_DESKTOP_DIR:-${HOME}/Desktop}"
 destination="${desktop_dir}/ココちゃんナビ.desktop"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-runner="${script_dir}/run_kokochan_navi_launcher2"
+inferred_repository="$(cd -- "${script_dir}/../../../../.." 2>/dev/null && pwd -P || true)"
+repository="${KOKO_NAVI_REPOSITORY:-${inferred_repository}}"
+if [[ -z "${repository}" || ! -d "${repository}/.git" ]]; then
+    for candidate in \
+        "${HOME}/v8_camera_eval/nakanoshima-robot-challenge" \
+        "${HOME}/inoueyuki_ws/nakanoshima-robot-challenge" \
+        "${HOME}/care_patrol_ws/local_repositories/nakanoshima-robot-challenge"; do
+        if [[ -d "${candidate}/.git" ]]; then
+            repository="${candidate}"
+            break
+        fi
+    done
+fi
+selector="${repository}/camera_v8/development_20261123/select_kokochan_navi_mode.sh"
 
 if [[ "${1:-}" == "--restore" ]]; then
     latest="$(find "${desktop_dir}" -maxdepth 1 -type f \
@@ -22,30 +35,46 @@ if [[ "${1:-}" == "--restore" ]]; then
     exit 0
 fi
 
-if [[ ! -x "${runner}" ]]; then
-    echo "Installed runner is not executable: ${runner}" >&2
+if [[ ! -x "${selector}" ]]; then
+    echo "Mode selector is not executable: ${selector}" >&2
     exit 2
 fi
 mkdir -p "${desktop_dir}"
 if [[ -e "${destination}" ]]; then
-    backup="${destination}.backup.$(date +%Y%m%d_%H%M%S)"
-    cp -p -- "${destination}" "${backup}"
-    echo "Backed up existing desktop entry: ${backup}"
+    # Preserve the user's pre-install entry exactly once. Reinstalling our
+    # managed entry must not make that generated file the newest backup and
+    # thereby prevent --restore from reaching the original.
+    if ! grep -Fxq 'X-KokoChanNavi-Managed=true' "${destination}"; then
+        backup="${destination}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+        cp -p -- "${destination}" "${backup}"
+        echo "Backed up existing desktop entry: ${backup}"
+    else
+        echo "Existing managed desktop entry will be updated in place"
+    fi
 fi
 
 temporary="$(mktemp "${desktop_dir}/.kokochan_navi.desktop.XXXXXX")"
 cleanup() { rm -f -- "${temporary}"; }
 trap cleanup EXIT
+# zenity gives the intended graphical two-choice dialog.  If it is absent,
+# opening a terminal preserves the selector's safe numbered fallback instead
+# of failing silently from a desktop click with no stdin.
+terminal=false
+if ! command -v zenity >/dev/null 2>&1; then
+    terminal=true
+fi
 cat >"${temporary}" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=ココちゃんナビ
-Comment=Launcher2連携の読み取り専用ARナビを起動
-Exec=${runner}
-Terminal=false
+Comment=使用するモードを選んでココちゃんナビを起動
+Exec=${selector}
+Path=${repository}
+Terminal=${terminal}
 StartupNotify=false
 Categories=Utility;
+X-KokoChanNavi-Managed=true
 EOF
 chmod +x "${temporary}"
 mv -- "${temporary}" "${destination}"
@@ -54,5 +83,7 @@ if command -v gio >/dev/null 2>&1; then
     gio set "${destination}" metadata::trusted true >/dev/null 2>&1 || true
 fi
 echo "Installed ${destination}"
-echo "Runner: ${runner}"
+echo "Mode selector: ${selector}"
+echo "Working directory: ${repository}"
+echo "Dialog backend: $(command -v zenity >/dev/null 2>&1 && echo zenity || echo terminal-fallback)"
 echo "Restore: ${script_dir}/install_kokochan_navi_desktop --restore"

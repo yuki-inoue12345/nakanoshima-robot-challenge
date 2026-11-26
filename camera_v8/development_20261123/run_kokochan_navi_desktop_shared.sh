@@ -23,5 +23,6 @@ export KOKO_NAVI_PERCEPTION_REVIEW=1
 export V8_PYTHON="$HOME/venvs/person_search/bin/python"
 test -x "$V8_PYTHON"
 
-# C920共有カメラ → ARナビ
-exec "$REPO/camera_v8/development_20261123/run_ar_with_v8_share.sh"
+# Backward-compatible bootstrap: use the same two-mode selector as the
+# installed desktop entry instead of silently forcing autonomous mode.
+exec "$REPO/camera_v8/development_20261123/select_kokochan_navi_mode.sh"

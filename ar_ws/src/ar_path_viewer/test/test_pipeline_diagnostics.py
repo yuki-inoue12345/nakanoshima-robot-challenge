@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 
 import numpy as np
 from sensor_msgs.msg import Image
@@ -64,6 +65,67 @@ def test_ros_latest_metrics_preserve_latest_pixels_and_matching_timestamp():
     assert metrics.sequence == 2
     assert abs(metrics.transport_age_sec - 0.02) < 1e-6
     assert abs(metrics.source_interval_sec - 0.02) < 1e-6
+    assert metrics.consumer_copy_duration_sec == 0.0
+
+
+def test_ros_latest_transfers_owned_pixels_without_reusing_or_mixing_stamp():
+    node = _Node()
+    source = RosLatestImageSource(node, '/camera', 3, 2)
+    node.callback(_image(31, 99.96))
+
+    first = source.read()
+    first_stamp = source.frame_timestamp_monotonic
+    assert np.all(first == 31)
+    assert source.read() is None
+
+    # Mutating the consumed frame is safe: the callback creates a separate
+    # owner copy for the next ROS message, and its SOE time stays paired.
+    first[:] = 255
+    node.callback(_image(72, 99.98))
+    second = source.read()
+    second_stamp = source.frame_timestamp_monotonic
+
+    assert np.all(second == 72)
+    assert second_stamp is not None and first_stamp is not None
+    assert second_stamp > first_stamp
+
+
+def test_ros_latest_consumer_pixels_stay_owned_while_producer_overwrites():
+    """A held consumer frame must not alias a later callback buffer.
+
+    The producer is deliberately allowed to overwrite the latest-only slot
+    while the consumer repeatedly reads the already transferred ndarray.  A
+    missing ownership copy or a split image/timestamp update makes this test
+    observe torn pixels or a mismatched final stamp.
+    """
+    node = _Node()
+    source = RosLatestImageSource(node, '/camera', 3, 2)
+    node.callback(_image(17, 99.90))
+    held = source.read()
+    held_stamp = source.frame_timestamp_monotonic
+    start = threading.Event()
+
+    def produce():
+        start.wait(timeout=1.0)
+        for index in range(1, 201):
+            node.callback(_image(index % 256, 99.90 + index * 0.0004))
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    start.set()
+    while producer.is_alive():
+        assert np.all(held == 17)
+    producer.join(timeout=1.0)
+    assert not producer.is_alive()
+
+    latest = source.read()
+    latest_stamp = source.frame_timestamp_monotonic
+    assert np.all(held == 17)
+    assert np.all(latest == 200)
+    assert held_stamp is not None and latest_stamp is not None
+    assert latest_stamp > held_stamp
+    assert source.last_read_metrics.sequence == 201
+    assert source.last_read_metrics.overwritten_total == 199
 
 
 def test_ros_latest_rejects_unverified_timestamp_for_ar_but_keeps_preview():

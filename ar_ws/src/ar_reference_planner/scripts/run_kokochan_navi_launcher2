@@ -169,13 +169,22 @@ launch_arguments=(
     "viewer_config_file:=${viewer_config}"
     "viewer_runtime_overlay_file:=${runtime_overlay}"
 )
-if [[ "${KOKO_NAVI_PERCEPTION_REVIEW:-0}" == "1" ]]; then
+perception_review="${KOKO_NAVI_PERCEPTION_REVIEW:-1}"
+case "${perception_review}" in
+    0|1) ;;
+    *) notify_failure "KOKO_NAVI_PERCEPTION_REVIEW must be 0 or 1"; exit 2 ;;
+esac
+if [[ "${perception_review}" == "1" ]]; then
     perception_overlay="$(ros2 pkg prefix ar_path_viewer)/share/ar_path_viewer/config/perception_costmap_review_overlay.yaml"
     if [[ ! -r "${perception_overlay}" ]]; then
         notify_failure "Perception review overlay is missing: ${perception_overlay}"
         exit 2
     fi
     launch_arguments+=("viewer_perception_overlay_file:=${perception_overlay}")
+    echo "Perception profile: enabled overlay=${perception_overlay}"
+    echo "Perception layers: costmap_subscription=true minimap=true alerts=true camera_projection=false"
+else
+    echo "Perception profile: disabled KOKO_NAVI_PERCEPTION_REVIEW=${perception_review}"
 fi
 
 echo "Stop: q/Q/F10 in the Viewer. Logs and recording: ${session_base}.*"

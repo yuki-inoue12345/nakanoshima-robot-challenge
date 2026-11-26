@@ -49,6 +49,33 @@ def test_verified_finished_state_freezes_and_survives_later_odom():
     assert 'route_completion_latched' in logs[-1]
 
 
+def test_duplicate_verified_finished_state_does_not_relatch_or_refreeze():
+    meter = SessionOdomTravelDistanceMeter()
+    meter.observe(0.0, 0.0, 1.0)
+    meter.observe(0.1, 0.0, 1.1)
+    meter.observe(0.2, 0.0, 1.2)
+    logs = []
+    fake = SimpleNamespace(
+        _last_verified_final_goal=('a' * 64, 10, 10, 10, 90.0),
+        _waypoint_progress_gate=SimpleNamespace(
+            navigation_hold_status=lambda _now: 'ROUTE COMPLETE'
+        ),
+        _travel_session_lock=threading.RLock(),
+        _session_distance_meter=meter,
+        _route_completion=None,
+        _ros_now_sec=lambda: 100.0,
+        _log_info=logs.append,
+    )
+    message = _finished_message()
+    ArPathViewerNode._accept_verified_route_completion(fake, message)
+    first = fake._route_completion
+    ArPathViewerNode._accept_verified_route_completion(fake, message)
+
+    assert fake._route_completion is first
+    assert first['distance'].observed_m == 0.2
+    assert len(logs) == 1
+
+
 def test_cancel_stop_or_wrong_goal_cannot_latch_viewer_completion():
     for activity, generation in (
         (WaypointFollowerState.ACTIVITY_HOLDING_STOP, 10),

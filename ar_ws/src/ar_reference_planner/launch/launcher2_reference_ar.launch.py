@@ -21,21 +21,37 @@ from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def _launch_viewer(context):
-    """Build Viewer parameters, adding a review overlay only when requested."""
-    parameters = [LaunchConfiguration('viewer_config_file').perform(context)]
-    runtime_overlay = LaunchConfiguration(
-        'viewer_runtime_overlay_file').perform(context).strip()
+def _ordered_viewer_parameters(
+    base_config, runtime_overlay='', calibration_overlay='',
+    perception_overlay='',
+):
+    """Return ROS parameter sources in their intentional override order."""
+    parameters = [base_config]
     if runtime_overlay:
         parameters.append(runtime_overlay)
+    if calibration_overlay:
+        parameters.append(calibration_overlay)
+    if perception_overlay:
+        parameters.append(perception_overlay)
+    return parameters
+
+
+def _launch_viewer(context):
+    """Build Viewer parameters, adding a review overlay only when requested."""
+    base_config = LaunchConfiguration('viewer_config_file').perform(context)
+    runtime_overlay = LaunchConfiguration(
+        'viewer_runtime_overlay_file').perform(context).strip()
     calibration_overlay = LaunchConfiguration(
         'viewer_calibration_overlay_file').perform(context).strip()
     perception_overlay = LaunchConfiguration(
         'viewer_perception_overlay_file').perform(context).strip()
-    if perception_overlay:
-        parameters.append(perception_overlay)
-    if calibration_overlay:
-        parameters.append(calibration_overlay)
+    # The explicit autonomous perception profile owns only perception keys
+    # and must be applied after the base/runtime/calibration profiles.  This
+    # prevents an older machine-local base YAML from silently restoring the
+    # three review layers to false.  Manual mapping does not use this launch.
+    parameters = _ordered_viewer_parameters(
+        base_config, runtime_overlay, calibration_overlay, perception_overlay
+    )
     # The checked-in base YAML remains false. Only this explicit test launch
     # enables reference rendering after all Viewer gates pass.
     parameters.append({'reference_path_enabled': True})
