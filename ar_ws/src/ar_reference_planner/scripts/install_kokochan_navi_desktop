@@ -68,6 +68,7 @@ cat >"${temporary}" <<EOF
 Version=1.0
 Type=Application
 Name=ココちゃんナビ
+Icon=org.gnome.Maps
 Comment=使用するモードを選んでココちゃんナビを起動
 Exec=${selector}
 Path=${repository}
